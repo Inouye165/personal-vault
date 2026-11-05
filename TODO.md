@@ -6,16 +6,24 @@ This roadmap documents the staged implementation plan for Personal Vault (`perso
 
 ## Stage 1: Engineering Foundation and Desktop Shell
 
+Status: **implemented; correction pass verified; pending independent re-review** (see HANDOFF.md for evidence).
+
+Acceptance criteria: runnable Electron/React shell with isolated main/preload/renderer; sandboxed preload that actually executes; validated IPC; restricted navigation; honest loading/error/empty states; passing test, typecheck, lint, format, build, packaging, and real-Electron smoke checks.
+
 - [x] Version control initialized with `feat/stage-1-foundation` branch.
 - [x] Git ignores configured for build artifacts, local data, databases, and secrets.
 - [x] Project architecture and standing engineering documents created (`AGENTS.md`, `ARCHITECTURE.md`, `TODO.md`, `HANDOFF.md`, `README.md`).
 - [x] Multi-process architecture scaffolded (Electron main, preload, renderer, shared contracts).
-- [x] Process security established: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, strict CSP headers, and navigation blockers.
+- [x] Process security: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, CSP, single trusted navigation location, popups denied.
 - [x] Strict TypeScript configuration enabled across Node and Web targets.
-- [x] Typed IPC bridge with runtime Zod schema validation.
-- [x] Professional desktop shell built with Personal Vault branding, 5 navigation categories (All Items, Photos, Documents, Review, Duplicates), search area, and honest empty states.
-- [x] Behavioral test suite established with Vitest and React Testing Library.
-- [x] Linting, formatting, type checking, test suite, and production build/packaging verified.
+- [x] Typed IPC bridge; every response (including acknowledgements) validated; senders validated in main.
+- [x] Sandboxed preload bundles its dependencies (verified by real-process smoke in dev, built, and unpacked modes).
+- [x] Electron on a supported major (45.2.3).
+- [x] Shell with five views, search area, and distinct loading / error / confirmed-empty states.
+- [x] Behavioral tests (Vitest + Testing Library) for navigation policy, IPC sender checks, preload validation, and UI states.
+- [x] Quality gates and smoke checks passing (results in HANDOFF.md).
+- [ ] Independent re-review of the correction pass.
+- [ ] ESLint rules configured (currently ignores-only; `npm run lint` is not yet a meaningful gate). Tracked here; not part of the correction pass.
 
 ---
 

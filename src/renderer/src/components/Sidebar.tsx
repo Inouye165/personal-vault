@@ -1,30 +1,25 @@
-import React from 'react'
-import { Layers, Image, FileText, CheckSquare, Copy, ShieldCheck } from 'lucide-react'
-import type { NavigationTab } from '../../../shared/validation/ipc-schemas.js'
+import { CheckSquare, Copy, FileText, Image, Layers, ShieldCheck } from 'lucide-react'
+import type { ReactNode } from 'react'
+import type { NavigationTab } from '../../../shared/validation/ipc-schemas'
+import { VIEWS } from '../views'
 
 interface SidebarProps {
   currentTab: NavigationTab
   onSelectTab: (tab: NavigationTab) => void
-  appVersion: string
+  appVersion?: string
 }
 
-interface NavItemConfig {
-  id: NavigationTab
-  label: string
-  icon: React.ReactNode
+const ICONS: Record<NavigationTab, ReactNode> = {
+  all: <Layers size={18} aria-hidden="true" />,
+  photos: <Image size={18} aria-hidden="true" />,
+  documents: <FileText size={18} aria-hidden="true" />,
+  review: <CheckSquare size={18} aria-hidden="true" />,
+  duplicates: <Copy size={18} aria-hidden="true" />
 }
 
-const NAV_ITEMS: readonly NavItemConfig[] = [
-  { id: 'all', label: 'All Items', icon: <Layers size={18} aria-hidden="true" /> },
-  { id: 'photos', label: 'Photos', icon: <Image size={18} aria-hidden="true" /> },
-  { id: 'documents', label: 'Documents', icon: <FileText size={18} aria-hidden="true" /> },
-  { id: 'review', label: 'Review', icon: <CheckSquare size={18} aria-hidden="true" /> },
-  { id: 'duplicates', label: 'Duplicates', icon: <Copy size={18} aria-hidden="true" /> }
-]
-
-export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, appVersion }) => {
+export function Sidebar({ currentTab, onSelectTab, appVersion }: SidebarProps) {
   return (
-    <aside className="sidebar" aria-label="Main Navigation">
+    <aside className="sidebar" aria-label="Main navigation">
       <div className="brand-header">
         <div className="brand-icon" aria-hidden="true">
           <ShieldCheck size={18} />
@@ -32,28 +27,25 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, appVe
         <h1 className="brand-title">Personal Vault</h1>
       </div>
 
-      <nav className="nav-section">
-        {NAV_ITEMS.map((item) => {
-          const isActive = currentTab === item.id
+      <nav className="nav-section" aria-label="Views">
+        {VIEWS.map((view) => {
+          const isActive = currentTab === view.id
           return (
             <button
-              key={item.id}
+              key={view.id}
               type="button"
               className={`nav-item ${isActive ? 'active' : ''}`}
-              onClick={() => onSelectTab(item.id)}
+              onClick={() => onSelectTab(view.id)}
               aria-current={isActive ? 'page' : undefined}
             >
-              {item.icon}
-              <span>{item.label}</span>
+              {ICONS[view.id]}
+              <span>{view.label}</span>
             </button>
           )
         })}
       </nav>
 
-      <div className="sidebar-footer">
-        <div>Stage 1 Shell</div>
-        <div>v{appVersion}</div>
-      </div>
+      {appVersion ? <div className="sidebar-footer">Version {appVersion}</div> : null}
     </aside>
   )
 }

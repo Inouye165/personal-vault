@@ -3,6 +3,7 @@ import { IPC_CHANNELS } from '../shared/contracts/channels.js'
 import {
   AppInfoSchema,
   NavigationTabSchema,
+  TabAckSchema,
   VaultStatusSchema,
   validatePayload,
   type AppInfo,
@@ -35,12 +36,14 @@ const api: VaultApi = {
     if (!parsedTab.success) {
       throw new Error(`Invalid tab name provided: ${parsedTab.error}`)
     }
-    return await ipcRenderer.invoke(IPC_CHANNELS.NAVIGATE_SET_TAB, parsedTab.data)
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.NAVIGATE_SET_TAB, parsedTab.data)
+    const ack = validatePayload(TabAckSchema, raw)
+    if (!ack.success) {
+      throw new Error(`Invalid setTab acknowledgement from main: ${ack.error}`)
+    }
+    return ack.data
   }
 }
 
-try {
-  contextBridge.exposeInMainWorld('api', api)
-} catch (error) {
-  console.error('Failed to expose api bridge in main world:', error)
-}
+// A failure here is deliberately not swallowed: Electron reports it as a preload error.
+contextBridge.exposeInMainWorld('api', api)

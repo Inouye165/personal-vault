@@ -55,6 +55,18 @@ npm run format:check
 npm run format
 ```
 
+### Runtime verification (real Electron)
+
+A visible window is **not** proof that the app works: a broken preload still shows a window. The smoke check launches the real app on a temporary user-data directory, attaches over the DevTools protocol, and verifies that `window.api` exists, its methods return the expected values across IPC, the UI reaches the confirmed empty state, hostile navigation and popups are blocked, and no preload, renderer, or console errors occur. It exits non-zero with the reasons on failure, is bounded by a timeout, and terminates only the process tree it started.
+
+```bash
+npm run smoke:dev        # electron-vite dev server + Electron
+npm run build && npm run smoke:built
+npm run build:unpack && npm run smoke:unpacked
+```
+
+Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.
+
 ---
 
 ## Production Build & Packaging
@@ -81,4 +93,4 @@ The output executable is generated at:
 
 - **Process Isolation**: Electron main process handles OS APIs; preload uses `contextBridge` to expose a narrowly-scoped `window.api`; renderer runs sandboxed React with zero Node.js access.
 - **Runtime Validation**: All IPC channels and payloads crossing process boundaries are verified using Zod schemas.
-- **Content Security Policy**: Strictly enforces `'self'` scripts and styles, disallowing remote code execution.
+- **Content Security Policy**: Scripts are limited to `'self'` (no remote code); the development server additionally allows its own inline preamble by hash.

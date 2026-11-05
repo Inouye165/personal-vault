@@ -1,38 +1,27 @@
-import { session, WebContents } from 'electron'
+import { session } from 'electron'
+import type { AppLocation } from './navigation'
 
-export function setupSecurityPolicies(): void {
-  // Apply strict Content Security Policy (CSP) headers to all session web requests
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"
-        ]
-      }
+const CONTENT_SECURITY_POLICY =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"
+
+export function setupSecurityPolicies(location: AppLocation): void {
+  // Production loads the document from disk, where the <meta> policy in index.html applies.
+  // The header policy covers HTTP(S) responses; for the development server the policy is
+  // delivered by the <meta> tag instead, because Vite must be allowed to hash its inline
+  // refresh preamble (see electron.vite.config.ts).
+  if (location.kind === 'file') {
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [CONTENT_SECURITY_POLICY]
+        }
+      })
     })
-  })
+  }
 
-  // Deny all permission requests (camera, mic, geolocation, notifications)
+  // Deny all permission requests (camera, microphone, geolocation, notifications).
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
     callback(false)
-  })
-}
-
-export function secureWebContents(webContents: WebContents): void {
-  // Prevent any navigation away from the local application
-  webContents.on('will-navigate', (event, navigationUrl) => {
-    // Only allow navigating within file:// or dev server (localhost)
-    const parsed = new URL(navigationUrl)
-    const isDevUrl = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
-    if (parsed.protocol !== 'file:' && !isDevUrl) {
-      event.preventDefault()
-    }
-  })
-
-  // Deny all new window creations (e.g. window.open, target="_blank")
-  webContents.setWindowOpenHandler(({ url }) => {
-    console.warn(`Denied opening external window to URL: ${url}`)
-    return { action: 'deny' }
   })
 }

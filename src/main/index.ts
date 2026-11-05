@@ -1,11 +1,23 @@
-import { app, BrowserWindow, shell } from 'electron'
-import { join } from 'path'
-import { promises as fs } from 'fs'
-import { setupSecurityPolicies, secureWebContents } from './security.js'
-import { registerIpcHandlers } from './ipc/handlers.js'
+import { app, BrowserWindow } from 'electron'
+import { join } from 'node:path'
+import { registerIpcHandlers } from './ipc/handlers'
+import { createSenderValidator } from './ipc/sender'
+import { resolveAppLocation, secureWebContents } from './navigation'
+import { setupSecurityPolicies } from './security'
+
+const documentPath = join(__dirname, '../renderer/index.html')
+
+// The development URL is honoured only for unpackaged runs; see resolveAppLocation.
+const location = resolveAppLocation({
+  isPackaged: app.isPackaged,
+  rendererUrl: process.env['ELECTRON_RENDERER_URL'],
+  documentPath
+})
+
+let mainWindow: BrowserWindow | null = null
 
 function createWindow(): BrowserWindow {
-  const mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 900,
@@ -22,77 +34,50 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  // Prevent opening links inside Electron window; if necessary open in external browser
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: 'deny' }
+  secureWebContents(window.webContents, location)
+
+  window.on('ready-to-show', () => window.show())
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null
   })
 
-  secureWebContents(mainWindow.webContents)
-
-  mainWindow.on('ready-to-show', async () => {
-    mainWindow.show()
-
-    if (process.env.PV_SCREENSHOT_PATH) {
-      try {
-        // Wait a moment for renderer paint
-        await new Promise((resolve) => setTimeout(resolve, 800))
-        const image = await mainWindow.webContents.capturePage()
-        await fs.writeFile(process.env.PV_SCREENSHOT_PATH, image.toPNG())
-        console.log(`SCREENSHOT_CAPTURED: ${process.env.PV_SCREENSHOT_PATH}`)
-      } catch (err) {
-        console.error('Failed to capture shell screenshot:', err)
-      }
-    }
-
-    if (process.env.PV_TEST_EXIT === 'true') {
-      console.log('MAIN_WINDOW_READY_AND_SHOWN')
-      setTimeout(() => {
-        app.quit()
-      }, 500)
-    }
-  })
-
-  // Load dev server or packaged production build
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  if (location.kind === 'dev') {
+    void window.loadURL(location.origin)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void window.loadFile(location.documentPath)
   }
 
-  return mainWindow
+  mainWindow = window
+  return window
 }
 
-// Ensure single instance of Personal Vault
-const gotTheLock = app.requestSingleInstanceLock()
-
-if (!gotTheLock) {
+// Ensure a single instance of Personal Vault per user-data directory.
+if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    const windows = BrowserWindow.getAllWindows()
-    const mainWindow = windows[0]
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
     }
   })
 
-  app.whenReady().then(() => {
-    setupSecurityPolicies()
-    registerIpcHandlers()
+  void app.whenReady().then(() => {
+    setupSecurityPolicies(location)
+    registerIpcHandlers({
+      validateSender: createSenderValidator({
+        getTrustedWebContentsId: () => mainWindow?.webContents.id,
+        location
+      })
+    })
     createWindow()
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow()
-      }
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
   })
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-      app.quit()
-    }
+    if (process.platform !== 'darwin') app.quit()
   })
 }

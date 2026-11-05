@@ -52,11 +52,13 @@ The system enforces strict multi-process isolation:
 src/
 ├── main/
 │   ├── index.ts           # App lifecycle, single-instance lock, window setup
-│   ├── security.ts        # CSP headers, navigation guards, permission deny
+│   ├── navigation.ts      # Trusted-location policy, navigation guards, popup denial
+│   ├── security.ts        # CSP response headers, permission denial
 │   └── ipc/
-│       └── handlers.ts    # Handlers for app info, vault status, tab navigation
+│       ├── sender.ts      # Validates the sending WebContents, frame, and URL
+│       └── handlers.ts    # Sender-checked handlers: app info, vault status, tab ack
 ├── preload/
-│   ├── index.ts           # Exposes window.api via contextBridge with validation
+│   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
 ├── shared/
 │   ├── contracts/         # IPC channel definitions
@@ -94,11 +96,22 @@ src/
 
 ## 5. Technology Decisions & Rationale
 
-1. **Electron (v34) + React (v19) + TypeScript**:
-   - Modern, supported foundation offering native desktop integration, memory-safe cross-process communication, and strict type checking.
+1. **Electron + React + TypeScript**:
+   - Electron follows a three-major-version support window; the project pins an exact supported major (see HANDOFF.md for the installed version) and must be re-checked against electronjs.org/docs/latest/tutorial/electron-timelines when upgrading.
 2. **electron-vite (v3.1) + Vite (v6)**:
-   - Separate build configurations for main (Node target), preload (sandbox/node target), and renderer (browser ESM target).
-   - Fast hot reload during development and deterministic tree-shaken production bundles.
+   - Separate build configurations for main (Node target), preload (sandbox target), and renderer (browser ESM target).
+   - A sandboxed preload can only `require` `electron` and a few built-ins, so every other import (including Zod) must be bundled into `out/preload/index.js`. Main keeps its dependencies external.
+   - Development only: the Vite dev server injects an inline React Refresh preamble. A dev-only Vite plugin allows exactly those inline scripts by SHA-256 hash in the `<meta>` CSP; `unsafe-inline` is never added to `script-src`. Production output has no inline scripts and keeps the strict policy.
+
+### 5.1 Trust and navigation
+
+- Exactly one application location is trusted: the built `renderer/index.html` when packaged, or one explicitly configured http(s) dev origin when not packaged. `ELECTRON_RENDERER_URL` is ignored by packaged builds.
+- `will-navigate`, `will-redirect`, and `will-frame-navigate` block everything else. Popups are denied in one place (`secureWebContents`) and URLs are never passed to `shell.openExternal`.
+- Every IPC handler accepts a call only from the top-level frame of the application window while it shows the trusted location; other senders are rejected.
+- The renderer distinguishes **loading**, **error** (missing bridge, rejected request, or unacknowledged request), and **confirmed empty** states. It never substitutes default data for a missing bridge.
+
+### 5.2 Other decisions
+
 3. **Zod Runtime Validation**:
    - TypeScript types guarantee compile-time correctness, but IPC payloads cross process serialization boundaries. Zod ensures runtime defense-in-depth against corrupt or unexpected data.
 4. **Vitest + @testing-library/react**:

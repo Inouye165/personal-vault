@@ -1,93 +1,117 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/src/App.js'
+import type { VaultApi } from '../../src/preload/index.d.js'
 
-describe('Personal Vault Desktop Shell (Stage 1)', () => {
-  beforeEach(() => {
-    window.api = {
-      getAppInfo: async () => ({
-        name: 'Personal Vault',
-        version: '0.1.0',
-        platform: 'win32',
-        isPackaged: false
-      }),
-      getVaultStatus: async () => ({
-        sourceCount: 0,
-        itemCount: 0,
-        isReady: true
-      }),
-      setTab: async () => true
+const healthyApi = (): VaultApi => ({
+  getAppInfo: vi.fn(async () => ({
+    name: 'Personal Vault',
+    version: '0.1.0',
+    platform: 'win32',
+    isPackaged: false
+  })),
+  getVaultStatus: vi.fn(async () => ({ sourceCount: 0, itemCount: 0, isReady: true })),
+  setTab: vi.fn(async () => true)
+})
+
+const mount = async () => {
+  await act(async () => {
+    render(<App />)
+  })
+}
+
+const emptyHeading = () => screen.queryByRole('heading', { name: /no sources connected/i })
+
+beforeEach(() => {
+  window.api = healthyApi()
+})
+
+afterEach(() => {
+  Reflect.deleteProperty(window, 'api')
+})
+
+describe('shell: confirmed empty state', () => {
+  it('shows the product name, the five views and an honest empty state', async () => {
+    await mount()
+    expect(screen.getByRole('heading', { name: 'Personal Vault', level: 1 })).toBeInTheDocument()
+    for (const name of ['All Items', 'Photos', 'Documents', 'Review', 'Duplicates']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument()
     }
+    expect(emptyHeading()).toBeInTheDocument()
+    expect(screen.getByText(/never modified or deleted/i)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
-  it('renders application branding and title', async () => {
-    await act(async () => {
-      render(<App />)
-    })
-    expect(screen.getByText('Personal Vault')).toBeInTheDocument()
-    expect(screen.getByText(/Stage 1 Shell/i)).toBeInTheDocument()
+  it('does not show development-stage commentary or invented data', async () => {
+    await mount()
+    expect(screen.queryByText(/stage \d/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/engineering foundation/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/\b\d[\d,]*\s+(items|photos|documents)\b/i)).not.toBeInTheDocument()
   })
 
-  it('provides all 5 required navigation items', async () => {
-    await act(async () => {
-      render(<App />)
-    })
-    const allTab = screen.getByRole('button', { name: /all items/i })
-    const photosTab = screen.getByRole('button', { name: /photos/i })
-    const docsTab = screen.getByRole('button', { name: /documents/i })
-    const reviewTab = screen.getByRole('button', { name: /review/i })
-    const dupsTab = screen.getByRole('button', { name: /duplicates/i })
-
-    expect(allTab).toBeInTheDocument()
-    expect(photosTab).toBeInTheDocument()
-    expect(docsTab).toBeInTheDocument()
-    expect(reviewTab).toBeInTheDocument()
-    expect(dupsTab).toBeInTheDocument()
-
-    // Default tab is 'all'
-    expect(allTab).toHaveAttribute('aria-current', 'page')
-    expect(photosTab).not.toHaveAttribute('aria-current')
+  it('disables search and explains why', async () => {
+    await mount()
+    const search = screen.getByRole('searchbox', { name: /search/i })
+    expect(search).toBeDisabled()
+    expect(search).toHaveAccessibleDescription(/unavailable until a source/i)
   })
 
-  it('switches navigation tab and updates view cleanly on click', async () => {
+  it('switches views, names the current view, and tells the main process', async () => {
+    await mount()
+    const photos = screen.getByRole('button', { name: 'Photos' })
     await act(async () => {
-      render(<App />)
+      fireEvent.click(photos)
     })
-    const photosTab = screen.getByRole('button', { name: /photos/i })
+    expect(photos).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', { name: 'All Items' })).not.toHaveAttribute('aria-current')
+    expect(screen.getByText(/the photos view is empty/i)).toBeInTheDocument()
+    expect(window.api.setTab).toHaveBeenCalledWith('photos')
+  })
+})
 
-    await act(async () => {
-      fireEvent.click(photosTab)
-    })
-
-    expect(photosTab).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByText(/photo library view is currently empty/i)).toBeInTheDocument()
+describe('shell: bridge states', () => {
+  it('shows a loading status, not the empty state, while the bridge answers', async () => {
+    const pending = new Promise<never>(() => {})
+    window.api = { ...healthyApi(), getAppInfo: () => pending }
+    await mount()
+    expect(screen.getByRole('status')).toHaveTextContent(/connecting/i)
+    expect(emptyHeading()).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('displays an honest empty state stating no sources are connected and no files scanned', async () => {
-    await act(async () => {
-      render(<App />)
-    })
-    expect(screen.getByRole('heading', { name: /no sources connected/i })).toBeInTheDocument()
-    expect(screen.getByText(/no user files have been scanned or modified/i)).toBeInTheDocument()
-    expect(screen.getByText(/source originals will always remain unaltered/i)).toBeInTheDocument()
+  it('shows an accessible error when window.api is missing', async () => {
+    Reflect.deleteProperty(window, 'api')
+    await mount()
+    expect(screen.getByRole('alert')).toHaveTextContent(/could not (start|connect)/i)
+    expect(emptyHeading()).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
-  it('renders search bar in disabled/honest state when zero sources are connected', async () => {
-    await act(async () => {
-      render(<App />)
-    })
-    const searchInput = screen.getByRole('searchbox', { name: /search catalog/i })
-    expect(searchInput).toBeInTheDocument()
-    expect(searchInput).toBeDisabled()
+  it('shows an error when the main process rejects a request', async () => {
+    window.api = {
+      ...healthyApi(),
+      getVaultStatus: vi.fn(async () => {
+        throw new Error('Unauthorized IPC sender')
+      })
+    }
+    await mount()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(emptyHeading()).not.toBeInTheDocument()
   })
 
-  it('does not render fake counts, mock search items, or simulated items', async () => {
+  it('shows an error when the main process does not acknowledge a view change', async () => {
+    window.api = { ...healthyApi(), setTab: vi.fn(async () => false) }
+    await mount()
     await act(async () => {
-      render(<App />)
+      fireEvent.click(screen.getByRole('button', { name: 'Documents' }))
     })
-    // Verify no fake item rows or fake numerical counters pretending data exists
-    expect(screen.queryByText(/1,000 photos/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/sample_image\.jpg/i)).not.toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: /no sources connected/i })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('keeps search disabled while loading or failed', async () => {
+    Reflect.deleteProperty(window, 'api')
+    await mount()
+    expect(screen.getByRole('searchbox', { name: /search/i })).toBeDisabled()
   })
 })

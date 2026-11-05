@@ -32,6 +32,8 @@
     "src/preload/**/*.ts",
     "src/preload/**/*.d.ts",
     "src/shared/**/*.ts",
-    "tests/shared/**/*.ts"
+    "tests/shared/**/*.ts",
+    "tests/main/**/*.ts",
+    "tests/preload/**/*.ts"
   ]
 }

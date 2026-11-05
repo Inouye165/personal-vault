@@ -1,61 +1,72 @@
-import { useEffect, useState } from 'react'
-import type { AppInfo, VaultStatus, NavigationTab } from '../../../shared/validation/ipc-schemas.js'
+import { useCallback, useEffect, useState } from 'react'
+import type { AppInfo, NavigationTab, VaultStatus } from '../../../shared/validation/ipc-schemas'
 
-export function useVaultApi() {
-  const [appInfo, setAppInfo] = useState<AppInfo>({
-    name: 'Personal Vault',
-    version: '0.1.0',
-    platform: 'desktop',
-    isPackaged: false
-  })
+export type BridgeState =
+  | { readonly phase: 'loading' }
+  | { readonly phase: 'ready'; readonly appInfo: AppInfo; readonly vaultStatus: VaultStatus }
+  | { readonly phase: 'error'; readonly message: string }
 
-  const [vaultStatus, setVaultStatus] = useState<VaultStatus>({
-    sourceCount: 0,
-    itemCount: 0,
-    isReady: true
-  })
+const MISSING_BRIDGE_MESSAGE =
+  'Personal Vault could not connect to its application services. Restart the application. If the problem continues, check the application log.'
+
+const failure = (error: unknown): BridgeState => ({
+  phase: 'error',
+  message:
+    error instanceof Error && error.message
+      ? `Personal Vault could not complete a request to its application services: ${error.message}`
+      : MISSING_BRIDGE_MESSAGE
+})
+
+/**
+ * Connects to the preload bridge. Never substitutes default values: the state is
+ * `loading` until the bridge answers, `ready` only with real responses, and
+ * `error` if the bridge is missing, rejects, or fails to acknowledge a request.
+ */
+export function useVaultApi(): {
+  state: BridgeState
+  notifyTab: (tab: NavigationTab) => Promise<void>
+} {
+  const [state, setState] = useState<BridgeState>({ phase: 'loading' })
 
   useEffect(() => {
-    let isMounted = true
-
-    if (typeof window !== 'undefined' && window.api) {
-      window.api
-        .getAppInfo()
-        .then((info) => {
-          if (isMounted) setAppInfo(info)
-        })
-        .catch((err) => {
-          console.error('Error fetching app info:', err)
-        })
-
-      window.api
-        .getVaultStatus()
-        .then((status) => {
-          if (isMounted) setVaultStatus(status)
-        })
-        .catch((err) => {
-          console.error('Error fetching vault status:', err)
-        })
+    let active = true
+    const api = window.api
+    if (!api) {
+      setState({ phase: 'error', message: MISSING_BRIDGE_MESSAGE })
+      return
     }
 
+    Promise.all([api.getAppInfo(), api.getVaultStatus()]).then(
+      ([appInfo, vaultStatus]) => {
+        if (active) setState({ phase: 'ready', appInfo, vaultStatus })
+      },
+      (error: unknown) => {
+        if (active) setState(failure(error))
+      }
+    )
+
     return () => {
-      isMounted = false
+      active = false
     }
   }, [])
 
-  const setTab = async (tab: NavigationTab) => {
-    if (typeof window !== 'undefined' && window.api) {
-      try {
-        await window.api.setTab(tab)
-      } catch (err) {
-        console.error('Failed to notify tab change via IPC:', err)
-      }
+  const notifyTab = useCallback(async (tab: NavigationTab) => {
+    const api = window.api
+    if (!api) {
+      setState({ phase: 'error', message: MISSING_BRIDGE_MESSAGE })
+      return
     }
-  }
+    try {
+      if (!(await api.setTab(tab))) {
+        setState({
+          phase: 'error',
+          message: 'Personal Vault’s application services did not accept the requested view.'
+        })
+      }
+    } catch (error) {
+      setState(failure(error))
+    }
+  }, [])
 
-  return {
-    appInfo,
-    vaultStatus,
-    setTab
-  }
+  return { state, notifyTab }
 }

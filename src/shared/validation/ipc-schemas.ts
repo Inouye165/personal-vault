@@ -13,6 +13,9 @@ export const NavigationTabSchema = z.enum(['all', 'photos', 'documents', 'review
 
 export type NavigationTab = z.infer<typeof NavigationTabSchema>
 
+/** Main-process acknowledgement of a navigation request. */
+export const TabAckSchema = z.boolean()
+
 export const VaultStatusSchema = z.object({
   sourceCount: z.number().int().nonnegative(),
   itemCount: z.number().int().nonnegative(),

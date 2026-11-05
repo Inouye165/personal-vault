@@ -78,6 +78,7 @@ All commands run from project root (`D:\organizer`):
 - **Format codebase**: `npm run format`
 - **Full bundle build**: `npm run build`
 - **Unpacked desktop binary build**: `npm run build:unpack`
+- **Real Electron bridge smoke checks**: `npm run smoke:dev`, `npm run smoke:built`, `npm run smoke:unpacked` (the unpacked check requires `npm run build:unpack` first)
 
 ---
 
@@ -103,7 +104,10 @@ All commands run from project root (`D:\organizer`):
 - **Content Security Policy (CSP)**: Enforced via HTTP response headers and `<meta>` tag:
   `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self';`
 - **Navigation Restrictions**: External URLs cannot be loaded inside the Electron window; `will-navigate` blocks unexpected redirects and `setWindowOpenHandler` denies popup creations.
-- **Process Boundary Validation**: All incoming and outgoing IPC payloads must be validated with Zod schemas.
+- **Process Boundary Validation**: All incoming and outgoing IPC payloads, including acknowledgements, must be validated with Zod schemas.
+- **IPC Sender Validation**: Every IPC handler must verify the sending WebContents, that the frame is the top-level frame, and that its URL is the trusted application location.
+- **Navigation**: Only the trusted application location may be navigated to (the built document when packaged; one explicit dev origin when unpackaged). No broad `localhost` or `file:` exceptions. Popups are denied; never pass arbitrary URLs to `shell.openExternal`.
+- **Sandboxed Preload**: Anything the preload imports other than `electron` must be bundled into it; `out/preload/index.js` must not `require` other packages.
 
 ---
 
@@ -111,5 +115,6 @@ All commands run from project root (`D:\organizer`):
 
 - All stage deliverables completed according to specification.
 - No untested code or unvalidated IPC boundaries.
+- Runtime success means a real Electron smoke check passes (`window.api` methods return correct values across IPC, no preload or renderer errors). A visible window or a startup log alone is not evidence.
 - No implementation beyond the current assigned stage (e.g. do not implement Stage 2 file scanning during Stage 1).
 - `AGENTS.md`, `ARCHITECTURE.md`, `TODO.md`, `HANDOFF.md`, and `README.md` kept up to date and verified against real execution.
