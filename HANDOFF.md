@@ -5,6 +5,7 @@
 - **Project Slug**: `personal-vault`
 - **Workspace**: `D:\organizer`
 - **Branch**: `feat/stage-1-foundation`
+- **Revision**: `e8e3a2c1d32c24a2e3b50a513d0655710907d8da`
 - **Stage Completed**: Stage 1 (Engineering foundation and desktop shell)
 
 All Stage 1 requirements are implemented and verified:
