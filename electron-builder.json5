@@ -1,0 +1,17 @@
+{
+  appId: 'com.personalvault.app',
+  productName: 'Personal Vault',
+  directories: {
+    output: 'dist',
+    buildResources: 'build'
+  },
+  files: ['out/**/*'],
+  win: {
+    target: [
+      {
+        target: 'dir',
+        arch: ['x64']
+      }
+    ]
+  }
+}
