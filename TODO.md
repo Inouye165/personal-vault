@@ -22,8 +22,9 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 - [x] Shell with five views, search area, and distinct loading / error / confirmed-empty states.
 - [x] Behavioral tests (Vitest + Testing Library) for navigation policy, IPC sender checks, preload validation, and UI states.
 - [x] Quality gates and smoke checks passing (results in HANDOFF.md).
-- [ ] Independent re-review of the correction pass.
-- [ ] ESLint rules configured (currently ignores-only; `npm run lint` is not yet a meaningful gate). Tracked here; not part of the correction pass.
+- [x] ESLint rules configured (@eslint/js, typescript-eslint, react-hooks) and verified with in-memory / stdin enforcement demonstrations; genuine warnings addressed.
+- [x] Dependency vulnerabilities triaged (10 initial advisories analyzed; safe targeted updates applied for vitest, zod, and minimatch override; fresh audit: 0 vulnerabilities).
+- [ ] Independent re-review of the Stage 1 correction pass.
 
 ---
 

@@ -41,7 +41,7 @@ export function validatePayload<T>(
   }
   return {
     success: false,
-    error: result.error.errors
+    error: (result.error.issues ?? [])
       .map((e) => `${e.path.join('.') || 'payload'}: ${e.message}`)
       .join(', ')
   }

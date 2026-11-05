@@ -26,13 +26,17 @@ export function useVaultApi(): {
   state: BridgeState
   notifyTab: (tab: NavigationTab) => Promise<void>
 } {
-  const [state, setState] = useState<BridgeState>({ phase: 'loading' })
+  const [state, setState] = useState<BridgeState>(() => {
+    if (typeof window !== 'undefined' && !window.api) {
+      return { phase: 'error', message: MISSING_BRIDGE_MESSAGE }
+    }
+    return { phase: 'loading' }
+  })
 
   useEffect(() => {
     let active = true
     const api = window.api
     if (!api) {
-      setState({ phase: 'error', message: MISSING_BRIDGE_MESSAGE })
       return
     }
 
