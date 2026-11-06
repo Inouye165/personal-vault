@@ -6,7 +6,7 @@ This roadmap documents the staged implementation plan for Personal Vault (`perso
 
 ## Stage 1: Engineering Foundation and Desktop Shell
 
-Status: **implemented; correction pass verified; pending independent re-review** (see HANDOFF.md for evidence).
+Status: **complete; independent review accepted at `070e3cb`** (see HANDOFF.md for evidence).
 
 Acceptance criteria: runnable Electron/React shell with isolated main/preload/renderer; sandboxed preload that actually executes; validated IPC; restricted navigation; honest loading/error/empty states; passing test, typecheck, lint, format, build, packaging, and real-Electron smoke checks.
 
@@ -24,7 +24,7 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 - [x] Quality gates and smoke checks passing (results in HANDOFF.md).
 - [x] ESLint rules configured (@eslint/js, typescript-eslint, react-hooks) and verified with in-memory / stdin enforcement demonstrations; genuine warnings addressed.
 - [x] Dependency vulnerabilities triaged (10 initial advisories analyzed; safe targeted updates applied for vitest, zod, and minimatch override; fresh audit: 0 vulnerabilities).
-- [ ] Independent re-review of the Stage 1 correction pass.
+- [x] Independent re-review of the Stage 1 correction pass accepted at `070e3cb`.
 
 ---
 

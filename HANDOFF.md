@@ -6,7 +6,7 @@
 - **Reviewed implementation commit**: `e8e3a2c` (Stage 1 implementation); `a1cc006` recorded the revision in docs.
 - **First correction pass commit**: `dd18df6` (preload bundling, smoke checks, Electron 45.2.3, navigation/IPC validation).
 - **Current correction pass**: ESLint real quality gate configuration, dependency vulnerability triage and resolution, and runtime smoke reconfirmation.
-- **Stage 1 status**: all required quality gates and smoke checks pass in this environment; awaiting independent re-review before Stage 1 is declared closed.
+- **Stage 1 status**: complete; independent review accepted at `070e3cb`. The reviewer independently passed 68 tests, type checking, active linting, formatting, production build, and an in-memory lint enforcement probe. Packaging, native smoke checks, and the fresh audit were verified by the implementation agent.
 
 ---
 
@@ -52,7 +52,7 @@ Fresh `npm audit` triage of the 10 vulnerabilities reported in the previous pass
 | `zod` (<4.6.6)                         | High (GHSA-mrhx-c7xc-m3w5)                                 | Direct runtime dependency                                               | Shipped runtime                 | Memory exhaustion (DoS) when validating maliciously crafted oversized inputs with constrained collection schemas. Used at IPC boundary. | Updated `zod` to `^4.6.7`. Adapted `validatePayload` in `src/shared/validation/ipc-schemas.ts` to support Zod v4 issue mapping. Resolved. |
 | `minimatch` (7.0.0 - 11.0.0)           | Moderate (GHSA-g3hv-75wg-m249)                             | `electron-builder` -> `app-builder-lib`, `eslint`, `@typescript-eslint` | Build/packaging & linting tools | ReDoS via globparts amplification when evaluating untrusted glob patterns with large expansions.                                        | Added npm `overrides: { "minimatch": "^11.0.4" }` in `package.json` to pin minimatch across dev dependencies to safe version. Resolved.   |
 
-Fresh audit result: `found 0 vulnerabilities`. An audit command passing does not guarantee absolute security, but all published CVEs in the dependency tree have been identified, evaluated, and resolved with targeted updates.
+The implementation agent reported that npm audit found zero known vulnerabilities for the audited dependency tree at the time of verification. This does not establish the absence of all vulnerabilities.
 
 ---
 
@@ -82,7 +82,7 @@ The independent reviewer reported an exit code of `2147483651` (`0x80000003` - S
 
 ## 4. Current Limitations & Remaining Blockers
 
-- **Reviewer Environment Verification**: The unpacked binary runs cleanly here; confirmation from the reviewer's environment is pending.
+- **Reviewer Environment Verification**: The implementation agent verified the unpacked binary. The reviewer's native launch failed without an established cause; this remains a verification limitation, not a demonstrated unresolved application defect.
 - **Windows-Specific Smoke Check**: The unpacked smoke script specifically targets `dist/win-unpacked/Personal Vault.exe`.
 - **Application Icon & Code Signing**: Standard defaults used; code signing skipped.
 - **Stage 2 Deferred**: No scanning, SQLite database creation, copying, or AI tooling implemented.
@@ -91,4 +91,4 @@ The independent reviewer reported an exit code of `2147483651` (`0x80000003` - S
 
 ## 5. Immediate Recommended Next Task
 
-Independent review of this correction pass; if verified, close Stage 1 and begin Stage 2 (read-only discovery, metadata inventory, resumable scan jobs) starting with a failing test for read-only directory scanning.
+Stage 2A: read-only discovery boundary and safe traversal, beginning with a failing preservation test. Database persistence and resumable job implementation belong to subsequent bounded tasks. No Stage 2 implementation is included in this closeout.
