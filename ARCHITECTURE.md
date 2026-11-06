@@ -54,9 +54,16 @@ src/
 │   ├── index.ts           # App lifecycle, single-instance lock, window setup
 │   ├── navigation.ts      # Trusted-location policy, navigation guards, popup denial
 │   ├── security.ts        # CSP response headers, permission denial
-│   └── ipc/
-│       ├── sender.ts      # Validates the sending WebContents, frame, and URL
-│       └── handlers.ts    # Sender-checked handlers: app info, vault status, tab ack
+│   ├── ipc/
+│   │   ├── sender.ts      # Validates the sending WebContents, frame, and URL
+│   │   └── handlers.ts    # Sender-checked handlers: app info, vault status, tab ack
+│   └── services/
+│       └── discovery/     # Stage 2A: read-only traversal, policy, and metadata inventory
+│           ├── fs-adapter.ts # Narrow read-only adapter (lstat, realpath, opendir)
+│           ├── policy.ts     # Candidate extension & exclusion/software-clutter rules
+│           ├── scanner.ts    # Incremental bounded scanner with AbortSignal cleanup
+│           ├── types.ts      # Candidate, skip, error, and result contracts
+│           └── index.ts      # Public discovery exports
 ├── preload/
 │   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
@@ -118,3 +125,9 @@ src/
    - Fast execution, jsdom support for DOM and component behavior testing, and full compatibility with Vite TypeScript paths.
 5. **No AI / Embedding / OCR / Python tooling in Stage 1**:
    - Deferred to subsequent stages to evaluate memory, packaging, and offline performance trade-offs without bloat.
+6. **Read-Only Discovery & Exclusion Policy (Stage 2A)**:
+   - Informed by digiKam collection root/ignore-directory rules and PhotoPrism indexing conventions:
+     - **Explicit Approved Roots & Boundary Enforcement**: Only caller-supplied root directories are scanned. Symbolic links and Windows directory junctions are skipped by default (including roots that are links) and reported as structured skips, avoiding cyclic traversal, duplicate references, and escapes. Every visited path is checked with `realpath` against the canonical approved root.
+     - **Configurable Extension & Clutter Policy**: Candidate photos and documents are identified by extension policy (including `.md`, `.markdown`, and `.txt` documents). Hidden/system entries (dot-entries, `.DS_Store`, `Thumbs.db`, `@eaDir`, `__MACOSX`, `$RECYCLE.BIN`, `System Volume Information`), explicit excluded paths/directory names, and software/build clutter directories (`node_modules`, `.git`, `dist`, `build`, `out`, `.venv`, `__pycache__`, `target`, etc.) and boilerplate clutter files (`CMakeLists.txt`, `requirements.txt`, `CHANGELOG.md`, lockfiles) are skipped with explicit, testable reasons while preserving user `.md` and `.txt` files.
+     - **Bounded Incremental Traversal**: Uses `opendir` entry-by-entry iteration with a breadth-first queue so at most one directory handle is open at any moment (`O(1)` file descriptors), closing the active handle in a `finally` block on completion, error, or `AbortSignal` cancellation.
+     - **Preservation & Provenance Honesty**: `ReadOnlyFsAdapter` exposes only `lstat`, `realpath`, and `opendir` (frozen, no mutation methods). File contents, `birthtime`, and `mtime` are never altered (note: operating systems may update `atime` during read-only directory reads depending on mount/filesystem settings). Missing or unreliable timestamps (such as `0` or non-finite values) are recorded as `null` rather than fabricated from `mtime`. Stage 2A records extension-based candidates and filesystem metadata only; SHA-256 content hashing and embedded metadata extraction belong to subsequent Stage 2 tasks.

@@ -2,93 +2,70 @@
 
 ## Current state
 
-- **Workspace**: `D:\organizer` · **Branch**: `feat/stage-1-foundation` (not pushed, not merged)
-- **Reviewed implementation commit**: `e8e3a2c` (Stage 1 implementation); `a1cc006` recorded the revision in docs.
-- **First correction pass commit**: `dd18df6` (preload bundling, smoke checks, Electron 45.2.3, navigation/IPC validation).
-- **Current correction pass**: ESLint real quality gate configuration, dependency vulnerability triage and resolution, and runtime smoke reconfirmation.
-- **Stage 1 status**: complete; independent review accepted at `070e3cb`. The reviewer independently passed 68 tests, type checking, active linting, formatting, production build, and an in-memory lint enforcement probe. Packaging, native smoke checks, and the fresh audit were verified by the implementation agent.
+- **Workspace**: `D:\organizer`
+- **Branch**: `feat/stage-2a-read-only-discovery` (branched from verified Stage 1 closeout commit `db43f2c`)
+- **Stage 1 status**: complete (`db43f2c`).
+- **Stage 2 status**: **in progress** — **Stage 2A (read-only discovery service, safe traversal, and filesystem metadata inventory) is complete**; overall Stage 2 remains incomplete pending Stage 2B (hashing + SQLite catalog persistence) and Stage 2C (resumable scan jobs + IPC/UI integration).
 
 ---
 
-## 1. ESLint Real Quality Gate Configuration & Enforcement
+## 1. Stage 2A Implementation & Module Boundaries
 
-### Configuration
+Implemented under `src/main/services/discovery/`, isolated from React components and Electron IPC, and never invoked automatically at application startup:
 
-- Configured in `eslint.config.mjs` using `@eslint/js@10.0.1`, `typescript-eslint@8.72.1`, `eslint-plugin-react-hooks@7.1.1`, and `globals@17.14.0` on `eslint@10.14.0`.
-- Formatted with Prettier compatibility in mind; stylistic rules already enforced by Prettier are avoided.
-- Generated directories (`out/`, `dist/`, `build/`, `coverage/`, `node_modules/`, `*.tsbuildinfo`) remain excluded.
-
-### Target Coverage (calculated via ESLint API)
-
-- `src/main/index.ts`: 91 rules active (Node globals, JS recommended, TypeScript recommended).
-- `src/preload/index.ts`: 91 rules active (Node globals, JS recommended, TypeScript recommended).
-- `src/renderer/src/App.tsx`: 107 rules active (Browser globals, JS recommended, TypeScript recommended, plus all 16 React Hooks rules).
-- `scripts/smoke.mjs`: 64 rules active (Node + Browser globals, JS recommended).
-
-### Enforcement Evidence (in-memory / stdin tests)
-
-1. **TypeScript rule enforcement**:
-   - Command: `"const unused: number = 42;" | npx --no-install eslint --stdin --stdin-filename src/main/dummy.ts`
-   - Output: `1:7 error 'unused' is assigned a value but never used @typescript-eslint/no-unused-vars` (exited with code 1).
-2. **React Hooks rule enforcement**:
-   - Command: Feeding conditional hook invocation to `src/renderer/src/Component.tsx` via stdin.
-   - Output: `4:5 error React Hook "useEffect" is called conditionally @react-hooks/rules-of-hooks` (exited with code 1).
-
-### Genuine Issues Corrected
-
-- `src/renderer/src/hooks/useVaultApi.ts`: ESLint flagged `react-hooks/set-state-in-effect` because `setState` was called synchronously within `useEffect` when `!window.api`. Resolved cleanly by initializing `state` with `() => typeof window !== 'undefined' && !window.api ? { phase: 'error', message: MISSING_BRIDGE_MESSAGE } : { phase: 'loading' }`, eliminating the cascading render pattern.
-- No blanket disable comments or suppressions were introduced.
+- [`src/main/services/discovery/fs-adapter.ts`](file:///d:/organizer/src/main/services/discovery/fs-adapter.ts):
+  - Defines `ReadOnlyFsAdapter` and `createNodeReadOnlyFsAdapter()` exposing only `lstat`, `realpath`, and `opendir` on a frozen object (`Object.freeze`).
+  - Exposes zero mutation operations (`writeFile`, `unlink`, `rm`, `rename`, `utimes`, `chmod`, `chown`, `truncate`, `copyFile`, `mkdir`, and `open` are absent).
+  - Documents the distinction between preserved file contents, creation times (`birthtime`), and modification times (`mtime`) versus operating-system-managed access timestamps (`atime`).
+- [`src/main/services/discovery/policy.ts`](file:///d:/organizer/src/main/services/discovery/policy.ts):
+  - Configurable candidate photo and document extension sets (`DEFAULT_PHOTO_EXTENSIONS`, `DEFAULT_DOCUMENT_EXTENSIONS`), treating matches as extension-based candidates (`candidateKind: 'photo' | 'document'`) without claiming content verification.
+  - Explicitly includes `.md`, `.markdown`, and `.txt` documents while filtering known software-clutter filenames (`CMakeLists.txt`, `requirements.txt`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, lockfiles, etc.) and software-clutter directories (`node_modules`, `.git`, `dist`, `build`, `out`, `.venv`, `__pycache__`, `target`, `vendor`, etc.).
+  - Supports explicit directory exclusions by path (`excludedPaths`) and directory name (`excludedDirectoryNames`), plus hidden/system metadata filtering (`.DS_Store`, `Thumbs.db`, `@eaDir`, `__MACOSX`, `$RECYCLE.BIN`, `System Volume Information`, and dot-entries). Every exclusion decision returns a structured, testable `DiscoverySkipReason` and `detail`.
+- [`src/main/services/discovery/scanner.ts`](file:///d:/organizer/src/main/services/discovery/scanner.ts):
+  - `discoverFiles(options)` traverses caller-supplied roots incrementally using an explicit breadth-first queue and `dirHandle.read()`.
+  - Maintains at most one open directory handle at any time (`O(1)` file descriptors) and guarantees `await dirHandle.close()` inside a `finally` block on normal completion, recoverable error, or `AbortSignal` cancellation.
+  - Skips symbolic links and Windows directory junctions by default (both when a source root itself is a link/junction and when encountered inside a directory) and verifies every visited path via `realpath` and `isInsideApprovedRoot` so traversal never escapes the canonical approved root.
+  - Records original `absolutePath`, `fileName`, normalized `extension`, `candidateKind`, `byteSize`, `filesystemCreatedAt`, and `filesystemModifiedAt`. Represents missing or unreliable timestamps (`<= 0`, `NaN`, or non-finite) as `null` rather than fabricating fallback values from `mtime`.
+  - Handles missing roots, non-directory roots, unreadable directories (`EACCES`/`EPERM`), disappearing entries (`ENOENT`), and unreadable files as structured `DiscoveryError` items without failing the overall scan.
+- [`src/main/services/discovery/types.ts`](file:///d:/organizer/src/main/services/discovery/types.ts) & [`src/main/services/discovery/index.ts`](file:///d:/organizer/src/main/services/discovery/index.ts):
+  - Public TypeScript contracts and module exports. Documents that SHA-256 content hashing and embedded metadata extraction belong to subsequent tasks.
 
 ---
 
-## 2. Dependency Vulnerability Triage
+## 2. Test-Driven Development (Red / Green) Evidence
 
-Fresh `npm audit` triage of the 10 vulnerabilities reported in the previous pass:
-
-| Package                                | Severity                                                   | Dependency Path                                                         | Classification                  | Exposure / Conditions                                                                                                                   | Action Taken                                                                                                                              |
-| -------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `tinypool` (<=2.1.1)                   | Critical (GHSA-5gmw-xhrv-c9v3, GHSA-85c8-ppgw-ccpr)        | `vitest` -> `tinypool`                                                  | Test runner tool                | Prototype pollution in worker options leading to potential RCE if untrusted options are passed to test workers.                         | Updated `vitest` to `^5.1.0`, pulling safe `tinypool >=2.1.2`. Resolved.                                                                  |
-| `vitest` / `@vitest/mocker` (<=4.1.11) | Moderate / High (GHSA-82fw-gwwq-j7x9, GHSA-qxg6-89mg-rqv8) | `vitest` -> `@vitest/mocker`                                            | Test runner tool                | Path traversal and code injection via redirect mock if untrusted mock redirects are configured in tests.                                | Updated `vitest` to `^5.1.0`. Resolved.                                                                                                   |
-| `zod` (<4.6.6)                         | High (GHSA-mrhx-c7xc-m3w5)                                 | Direct runtime dependency                                               | Shipped runtime                 | Memory exhaustion (DoS) when validating maliciously crafted oversized inputs with constrained collection schemas. Used at IPC boundary. | Updated `zod` to `^4.6.7`. Adapted `validatePayload` in `src/shared/validation/ipc-schemas.ts` to support Zod v4 issue mapping. Resolved. |
-| `minimatch` (7.0.0 - 11.0.0)           | Moderate (GHSA-g3hv-75wg-m249)                             | `electron-builder` -> `app-builder-lib`, `eslint`, `@typescript-eslint` | Build/packaging & linting tools | ReDoS via globparts amplification when evaluating untrusted glob patterns with large expansions.                                        | Added npm `overrides: { "minimatch": "^11.0.4" }` in `package.json` to pin minimatch across dev dependencies to safe version. Resolved.   |
-
-The implementation agent reported that npm audit found zero known vulnerabilities for the audited dependency tree at the time of verification. This does not establish the absence of all vulnerabilities.
+1. **Red phase**:
+   - Authored behavioral test suite in [`tests/main/discovery.test.ts`](file:///d:/organizer/tests/main/discovery.test.ts) covering nested photo/document candidate discovery, `.md`/`.txt` inclusion, explicit and software-clutter exclusions, source byte/timestamp preservation, honest `null` timestamps, real Windows directory junctions and root boundary checks, recoverable errors, and `AbortSignal` handle cleanup.
+   - Ran `npm test` before creating `src/main/services/discovery/`: failed with `Error: Cannot find module '../../src/main/services/discovery'`.
+2. **Green & Refactor phase**:
+   - Implemented `fs-adapter.ts`, `policy.ts`, `scanner.ts`, `types.ts`, and `index.ts`.
+   - Fixed a Windows path resolution mismatch in the synthetic timestamp test (`resolve('/synthetic/root')` vs `join(fixtureRoot, 'synthetic-root')`) and expanded coverage to 11 behavioral tests in `tests/main/discovery.test.ts` (79 total tests across 6 test files).
+   - Ran `npm test`: **6 test files, 79 tests passing**.
 
 ---
 
-## 3. Verification & Runtime Results
+## 3. Verification Results
 
-| Command                  | Result   | Details                                                                                                          |
-| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| `npm test`               | **PASS** | 5 test files, 68 tests passing                                                                                   |
-| `npm run typecheck`      | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)                           |
-| `npm run lint`           | **PASS** | ESLint verified across all project files with 0 errors and 0 warnings                                            |
-| `npm run format:check`   | **PASS** | Prettier 100% compliant                                                                                          |
-| `npm run build`          | **PASS** | electron-vite multi-bundle build (main, preload with bundled Zod, renderer)                                      |
-| `npm run build:unpack`   | **PASS** | electron-builder generates `dist/win-unpacked/Personal Vault.exe` (Electron 45.2.3)                              |
-| `npm run smoke:dev`      | **PASS** | Dev server + Electron launched; CDP verified `window.api`, navigation restrictions, and UI states                |
-| `npm run smoke:built`    | **PASS** | Production build launched in Electron; verified over CDP                                                         |
-| `npm run smoke:unpacked` | **PASS** | Unpacked executable (`dist/win-unpacked/Personal Vault.exe`) launched and verified over CDP (`isPackaged: true`) |
-
-### Reviewer Exit Code 2147483651 (0x80000003) Note
-
-The independent reviewer reported an exit code of `2147483651` (`0x80000003` - STATUS_BREAKPOINT) during an unpacked execution attempt. In this local execution environment:
-
-- `npm run smoke:unpacked` consistently launches `dist/win-unpacked/Personal Vault.exe`, successfully connects over the DevTools protocol, verifies `window.api`, and exits with code 0.
-- Direct execution starts the application process without crashing.
-- This clean execution is reported as observed; no claim is made that the reviewer's environment failure has been explained or reproduced.
+| Command                | Result   | Details                                                                                |
+| ---------------------- | -------- | -------------------------------------------------------------------------------------- |
+| `npm test`             | **PASS** | 6 test files, 79 tests passing (including 11 Stage 2A discovery behavioral tests)      |
+| `npm run typecheck`    | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors) |
+| `npm run lint`         | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                    |
+| `npm run format:check` | **PASS** | Prettier 100% compliant                                                                |
+| `npm run build`        | **PASS** | `electron-vite` builds main, preload, and renderer cleanly                             |
 
 ---
 
-## 4. Current Limitations & Remaining Blockers
+## 4. Known Limitations & Boundaries
 
-- **Reviewer Environment Verification**: The implementation agent verified the unpacked binary. The reviewer's native launch failed without an established cause; this remains a verification limitation, not a demonstrated unresolved application defect.
-- **Windows-Specific Smoke Check**: The unpacked smoke script specifically targets `dist/win-unpacked/Personal Vault.exe`.
-- **Application Icon & Code Signing**: Standard defaults used; code signing skipped.
-- **Stage 2 Deferred**: No scanning, SQLite database creation, copying, or AI tooling implemented.
+- **Windows File Symlink Privilege (`EPERM`)**: On Windows without Developer Mode or elevated `SeCreateSymbolicLinkPrivilege`, creating file symlinks (`symlink(target, path, 'file')`) returns `EPERM`, whereas directory junctions (`symlink(target, path, 'junction')`) work unprivileged. Integration tests exercise real filesystem directory junctions (both nested and as a source root) in temporary fixtures and verify file symlinks and `realpath` root escapes via `ReadOnlyFsAdapter`.
+- **Metadata-Only Discovery (Stage 2A Scope)**: Stage 2A records filesystem metadata and extension-based candidate kinds only. It does not compute SHA-256 content hashes, parse EXIF/document contents, write to SQLite, or expose IPC/UI controls.
+- **OS Access Time (`atime`)**: While discovery uses strictly read-only system calls (`lstat`, `realpath`, `opendir`), the host OS/filesystem may update access timestamps (`atime`) during directory reads depending on mount settings. File contents, creation times (`birthtime`), and modification times (`mtime`) remain untouched.
 
 ---
 
 ## 5. Immediate Recommended Next Task
 
-Stage 2A: read-only discovery boundary and safe traversal, beginning with a failing preservation test. Database persistence and resumable job implementation belong to subsequent bounded tasks. No Stage 2 implementation is included in this closeout.
+**Stage 2B: Streaming SHA-256 Content Hashing & SQLite Catalog Inventory Schema**
+
+- Implement read-only streaming SHA-256 hashing and the SQLite catalog schema to persist discovered file facts and source inventory records, beginning with failing behavioral tests.

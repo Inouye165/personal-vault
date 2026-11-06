@@ -30,12 +30,14 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 ## Stage 2: Read-Only Discovery, Metadata Inventory, and Resumable Scan Jobs
 
-- [ ] Read-only filesystem scanning adapter for user-selected folders.
-- [ ] Safe traversal respecting directory junctions, symlinks, and file system boundaries.
-- [ ] Extraction of factual metadata: original path, filename, byte size, filesystem timestamps, and SHA-256 hash.
-- [ ] Preservation assurance: verify zero file modifications or timestamp touches on scanned sources.
-- [ ] SQLite catalog schema for recorded file facts and inventory tracking.
-- [ ] Background worker job controller with progress reporting, pause, cancel, and resumability.
+Status: **in progress — Stage 2A complete; subsequent Stage 2 tasks pending** (see HANDOFF.md).
+
+- [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
+- [x] **Stage 2A**: Safe incremental traversal (`O(1)` open directory handles, `AbortSignal` cancellation with deterministic handle cleanup) skipping symlinks/junctions and enforcing canonical approved-root boundaries.
+- [x] **Stage 2A**: Configurable candidate photo/document extension policy (including `.md` and `.txt`) with testable explicit exclusions and software-clutter filtering.
+- [x] **Stage 2A**: Factual filesystem metadata inventory (original path, filename, extension, byte size, honest nullable creation and modification times) and verified source preservation.
+- [ ] **Stage 2B**: Streaming SHA-256 content hashing and SQLite catalog schema for recorded file facts and inventory persistence.
+- [ ] **Stage 2C**: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.
 
 ---
 
