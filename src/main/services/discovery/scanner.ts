@@ -10,10 +10,80 @@ import type {
   DiscoveredCandidate,
   DiscoveryError,
   DiscoveryErrorCode,
+  DiscoveryEvent,
+  DiscoveryLimitReached,
   DiscoveryOptions,
   DiscoveryResult,
-  DiscoverySkip
+  DiscoverySkip,
+  DiscoveryStatus,
+  DiscoverySummary
 } from './types'
+
+export const DEFAULT_MAX_PENDING_DIRECTORIES = 10_000
+export const DEFAULT_MAX_VISITED_DIRECTORIES = 100_000
+export const DEFAULT_MAX_COLLECTED_RECORDS = 50_000
+
+interface QueueNode<T> {
+  readonly value: T
+  next: QueueNode<T> | null
+}
+
+/**
+ * Bounded O(1) FIFO queue backed by a singly linked list.
+ * Avoids `Array.prototype.shift()` O(n) copying and enforces a hard upper bound on queue size.
+ */
+export class BoundedFifoQueue<T> {
+  private head: QueueNode<T> | null = null
+  private tail: QueueNode<T> | null = null
+  private count = 0
+  public readonly capacity: number
+
+  constructor(capacity: number) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      throw new RangeError(`BoundedFifoQueue capacity must be a positive integer, got ${capacity}`)
+    }
+    this.capacity = capacity
+  }
+
+  public get size(): number {
+    return this.count
+  }
+
+  public enqueue(value: T): boolean {
+    if (this.count >= this.capacity) {
+      return false
+    }
+    const node: QueueNode<T> = { value, next: null }
+    if (this.tail === null) {
+      this.head = node
+      this.tail = node
+    } else {
+      this.tail.next = node
+      this.tail = node
+    }
+    this.count++
+    return true
+  }
+
+  public dequeue(): T | undefined {
+    const first = this.head
+    if (first === null) {
+      return undefined
+    }
+    this.head = first.next
+    if (this.head === null) {
+      this.tail = null
+    }
+    this.count--
+    return first.value
+  }
+}
+
+interface QueuedDirectory {
+  readonly dirPath: string
+  readonly expectedRealPath: string
+  readonly isRoot: boolean
+}
 
 function toHonestIsoTimestamp(ms: number): string | null {
   if (!Number.isFinite(ms) || ms <= 0) {
@@ -67,49 +137,139 @@ function classifyFsError(
 }
 
 /**
- * Incrementally traverses the supplied source roots in read-only mode.
+ * Incrementally scans the supplied source roots in read-only mode, yielding
+ * structured `DiscoveryEvent` items (`candidate`, `skip`, `error`) with consumer
+ * backpressure.
  *
- * - Keeps at most one directory handle open at any time (`O(1)` file descriptors).
- * - Closes the active directory handle in a `finally` block on completion, error, or abort.
- * - Never traverses symbolic links, directory junctions, or paths resolving outside the canonical root.
+ * Resource & safety properties:
+ * - Does not retain emitted candidates, skips, or errors in memory; summary counters
+ *   are tracked independently and returned when the generator completes.
+ * - Keeps at most one directory handle open at any time (`O(1)` file descriptors)
+ *   and closes the active handle in a `finally` block on completion, abort, limit, or
+ *   early consumer termination (`break` / `stream.return()`).
+ * - Bounds the pending directory queue via `BoundedFifoQueue` (`maxPendingDirectories`)
+ *   and total opened directories (`maxVisitedDirectories`), returning
+ *   `status: 'resource_limit_reached'` if exceeded.
+ * - Applies explicit path and name-based exclusions to source roots before opening them.
+ * - Revalidates each queued directory (`lstat`, `realpath`, policy, and approved-root
+ *   containment) immediately before calling `opendir`. Note: path-based user-space
+ *   checks narrow the TOCTOU window between queuing and opening, though they do not
+ *   replace OS kernel-level `openat` directory-descriptor sandboxing.
  */
-export async function discoverFiles(options: DiscoveryOptions): Promise<DiscoveryResult> {
+interface MutableDiscoveryStats {
+  rootsRequested: number
+  directoriesVisited: number
+  candidatesFound: number
+  skippedCount: number
+  errorCount: number
+}
+
+export async function* scanSourceRoots(
+  options: DiscoveryOptions
+): AsyncGenerator<DiscoveryEvent, DiscoverySummary, void> {
+  return yield* scanSourceRootsInternal(options)
+}
+
+async function* scanSourceRootsInternal(
+  options: DiscoveryOptions,
+  externalStats?: MutableDiscoveryStats
+): AsyncGenerator<DiscoveryEvent, DiscoverySummary, void> {
   const fsAdapter = options.fsAdapter ?? createNodeReadOnlyFsAdapter()
   const policy = resolveDiscoveryPolicy(options.policy)
   const signal = options.signal
 
-  const candidates: DiscoveredCandidate[] = []
-  const skips: DiscoverySkip[] = []
-  const errors: DiscoveryError[] = []
-  let directoriesVisited = 0
+  const maxPendingDirectories =
+    options.limits?.maxPendingDirectories ?? DEFAULT_MAX_PENDING_DIRECTORIES
+  const maxVisitedDirectories =
+    options.limits?.maxVisitedDirectories ?? DEFAULT_MAX_VISITED_DIRECTORIES
 
-  const buildResult = (status: 'completed' | 'cancelled'): DiscoveryResult => ({
+  const stats: MutableDiscoveryStats = externalStats ?? {
+    rootsRequested: options.roots.length,
+    directoriesVisited: 0,
+    candidatesFound: 0,
+    skippedCount: 0,
+    errorCount: 0
+  }
+  stats.rootsRequested = options.roots.length
+
+  const buildSummary = (
+    status: DiscoveryStatus,
+    limitReached?: DiscoveryLimitReached
+  ): DiscoverySummary => ({
     status,
-    candidates,
-    skips,
-    errors,
     stats: {
-      rootsRequested: options.roots.length,
-      directoriesVisited,
-      candidatesFound: candidates.length,
-      skippedCount: skips.length,
-      errorCount: errors.length
-    }
+      rootsRequested: stats.rootsRequested,
+      directoriesVisited: stats.directoriesVisited,
+      candidatesFound: stats.candidatesFound,
+      skippedCount: stats.skippedCount,
+      errorCount: stats.errorCount
+    },
+    ...(limitReached ? { limitReached } : {})
   })
+
+  const emitSkip = async function* (
+    skip: DiscoverySkip
+  ): AsyncGenerator<DiscoveryEvent, void, void> {
+    stats.skippedCount++
+    const event: DiscoveryEvent = { kind: 'skip', skip }
+    if (options.onEvent) {
+      await options.onEvent(event)
+    }
+    yield event
+  }
+
+  const emitError = async function* (
+    error: DiscoveryError
+  ): AsyncGenerator<DiscoveryEvent, void, void> {
+    stats.errorCount++
+    const event: DiscoveryEvent = { kind: 'error', error }
+    if (options.onEvent) {
+      await options.onEvent(event)
+    }
+    yield event
+  }
+
+  const emitCandidate = async function* (
+    candidate: DiscoveredCandidate
+  ): AsyncGenerator<DiscoveryEvent, void, void> {
+    stats.candidatesFound++
+    const event: DiscoveryEvent = { kind: 'candidate', candidate }
+    if (options.onCandidate) {
+      await options.onCandidate(candidate)
+    }
+    if (options.onEvent) {
+      await options.onEvent(event)
+    }
+    yield event
+  }
 
   for (const rawRoot of options.roots) {
     if (signal?.aborted) {
-      return buildResult('cancelled')
+      return buildSummary('cancelled')
     }
 
     const rootPath = resolve(rawRoot)
+    const rootName = basename(rootPath) || rootPath
+
+    const rootDecision = evaluateDirectoryEntry(rootPath, rootName, policy)
+    if (rootDecision.action === 'skip') {
+      yield* emitSkip({
+        path: rootPath,
+        reason: rootDecision.reason,
+        detail: rootDecision.detail
+      })
+      continue
+    }
 
     let rootStats
     try {
       rootStats = await fsAdapter.lstat(rootPath)
     } catch (error) {
+      if (signal?.aborted) {
+        return buildSummary('cancelled')
+      }
       const classified = classifyFsError(error, 'root_not_found')
-      errors.push({
+      yield* emitError({
         path: rootPath,
         code: classified.code,
         message: classified.message,
@@ -118,8 +278,12 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
       continue
     }
 
+    if (signal?.aborted) {
+      return buildSummary('cancelled')
+    }
+
     if (rootStats.isSymbolicLink()) {
-      skips.push({
+      yield* emitSkip({
         path: rootPath,
         reason: 'symbolic_link_or_junction',
         detail: 'Source root is a symbolic link or directory junction'
@@ -128,7 +292,7 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
     }
 
     if (!rootStats.isDirectory()) {
-      errors.push({
+      yield* emitError({
         path: rootPath,
         code: 'root_not_directory',
         message: 'Source root is not a directory'
@@ -140,8 +304,11 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
     try {
       canonicalRoot = await fsAdapter.realpath(rootPath)
     } catch (error) {
+      if (signal?.aborted) {
+        return buildSummary('cancelled')
+      }
       const classified = classifyFsError(error, 'unreadable_directory')
-      errors.push({
+      yield* emitError({
         path: rootPath,
         code: classified.code,
         message: classified.message,
@@ -150,21 +317,163 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
       continue
     }
 
-    const queue: string[] = [rootPath]
+    if (signal?.aborted) {
+      return buildSummary('cancelled')
+    }
 
-    while (queue.length > 0) {
+    if (normalizePathForComparison(canonicalRoot) !== normalizePathForComparison(rootPath)) {
+      const canonicalRootDecision = evaluateDirectoryEntry(
+        canonicalRoot,
+        basename(canonicalRoot) || canonicalRoot,
+        policy
+      )
+      if (canonicalRootDecision.action === 'skip') {
+        yield* emitSkip({
+          path: rootPath,
+          reason: canonicalRootDecision.reason,
+          detail: canonicalRootDecision.detail
+        })
+        continue
+      }
+    }
+
+    const pendingDirs = new BoundedFifoQueue<QueuedDirectory>(maxPendingDirectories)
+    pendingDirs.enqueue({
+      dirPath: rootPath,
+      expectedRealPath: canonicalRoot,
+      isRoot: true
+    })
+
+    while (pendingDirs.size > 0) {
       if (signal?.aborted) {
-        return buildResult('cancelled')
+        return buildSummary('cancelled')
       }
 
-      const currentDir = queue.shift()!
+      const queued = pendingDirs.dequeue()!
+      const currentDir = queued.dirPath
+
+      if (!queued.isRoot) {
+        const currentName = basename(currentDir) || currentDir
+        const recheckedPolicy = evaluateDirectoryEntry(currentDir, currentName, policy)
+        if (recheckedPolicy.action === 'skip') {
+          yield* emitSkip({
+            path: currentDir,
+            reason: recheckedPolicy.reason,
+            detail: recheckedPolicy.detail
+          })
+          continue
+        }
+
+        let currentStats
+        try {
+          currentStats = await fsAdapter.lstat(currentDir)
+        } catch (error) {
+          if (signal?.aborted) {
+            return buildSummary('cancelled')
+          }
+          const classified = classifyFsError(error, 'unreadable_directory')
+          yield* emitError({
+            path: currentDir,
+            code: classified.code,
+            message: classified.message,
+            errno: classified.errno
+          })
+          continue
+        }
+
+        if (signal?.aborted) {
+          return buildSummary('cancelled')
+        }
+
+        if (currentStats.isSymbolicLink()) {
+          yield* emitSkip({
+            path: currentDir,
+            reason: 'symbolic_link_or_junction',
+            detail: `Queued directory "${currentName}" changed into a symbolic link or junction before opening`
+          })
+          continue
+        }
+
+        if (!currentStats.isDirectory()) {
+          yield* emitSkip({
+            path: currentDir,
+            reason: 'non_regular_entry',
+            detail: `Queued directory "${currentName}" is no longer a directory before opening`
+          })
+          continue
+        }
+
+        let currentRealPath: string
+        try {
+          currentRealPath = await fsAdapter.realpath(currentDir)
+        } catch (error) {
+          if (signal?.aborted) {
+            return buildSummary('cancelled')
+          }
+          const classified = classifyFsError(error, 'unreadable_directory')
+          yield* emitError({
+            path: currentDir,
+            code: classified.code,
+            message: classified.message,
+            errno: classified.errno
+          })
+          continue
+        }
+
+        if (signal?.aborted) {
+          return buildSummary('cancelled')
+        }
+
+        if (
+          !isInsideApprovedRoot(canonicalRoot, currentRealPath) ||
+          normalizePathForComparison(currentRealPath) !==
+            normalizePathForComparison(queued.expectedRealPath)
+        ) {
+          yield* emitSkip({
+            path: currentDir,
+            reason: 'outside_approved_root',
+            detail: `Queued directory resolves outside approved root or changed canonical target (${currentRealPath})`
+          })
+          continue
+        }
+
+        if (
+          normalizePathForComparison(currentRealPath) !== normalizePathForComparison(currentDir)
+        ) {
+          const realPolicyDecision = evaluateDirectoryEntry(
+            currentRealPath,
+            basename(currentRealPath) || currentRealPath,
+            policy
+          )
+          if (realPolicyDecision.action === 'skip') {
+            yield* emitSkip({
+              path: currentDir,
+              reason: realPolicyDecision.reason,
+              detail: realPolicyDecision.detail
+            })
+            continue
+          }
+        }
+      }
+
+      if (stats.directoriesVisited >= maxVisitedDirectories) {
+        return buildSummary('resource_limit_reached', {
+          limit: 'maxVisitedDirectories',
+          maxAllowed: maxVisitedDirectories,
+          observed: stats.directoriesVisited + 1,
+          message: `Maximum visited directories limit (${maxVisitedDirectories}) reached before opening "${currentDir}"`
+        })
+      }
 
       let dirHandle
       try {
         dirHandle = await fsAdapter.opendir(currentDir)
       } catch (error) {
+        if (signal?.aborted) {
+          return buildSummary('cancelled')
+        }
         const classified = classifyFsError(error, 'unreadable_directory')
-        errors.push({
+        yield* emitError({
           path: currentDir,
           code: classified.code,
           message: classified.message,
@@ -173,21 +482,23 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
         continue
       }
 
-      directoriesVisited++
-      const discoveredSubdirs: string[] = []
+      stats.directoriesVisited++
 
       try {
         while (true) {
           if (signal?.aborted) {
-            return buildResult('cancelled')
+            return buildSummary('cancelled')
           }
 
           let entry
           try {
             entry = await dirHandle.read()
           } catch (error) {
+            if (signal?.aborted) {
+              return buildSummary('cancelled')
+            }
             const classified = classifyFsError(error, 'unreadable_directory')
-            errors.push({
+            yield* emitError({
               path: currentDir,
               code: classified.code,
               message: classified.message,
@@ -201,14 +512,14 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
           }
 
           if (signal?.aborted) {
-            return buildResult('cancelled')
+            return buildSummary('cancelled')
           }
 
           const entryName = entry.name || basename(currentDir)
           const entryPath = join(currentDir, entryName)
 
           if (entry.isSymbolicLink()) {
-            skips.push({
+            yield* emitSkip({
               path: entryPath,
               reason: 'symbolic_link_or_junction',
               detail: `Entry "${entryName}" is a symbolic link or directory junction`
@@ -219,7 +530,7 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
           if (entry.isDirectory()) {
             const dirDecision = evaluateDirectoryEntry(entryPath, entryName, policy)
             if (dirDecision.action === 'skip') {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: dirDecision.reason,
                 detail: dirDecision.detail
@@ -231,8 +542,11 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
             try {
               subStats = await fsAdapter.lstat(entryPath)
             } catch (error) {
+              if (signal?.aborted) {
+                return buildSummary('cancelled')
+              }
               const classified = classifyFsError(error, 'unreadable_entry')
-              errors.push({
+              yield* emitError({
                 path: entryPath,
                 code: classified.code,
                 message: classified.message,
@@ -241,8 +555,12 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
               continue
             }
 
+            if (signal?.aborted) {
+              return buildSummary('cancelled')
+            }
+
             if (subStats.isSymbolicLink()) {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: 'symbolic_link_or_junction',
                 detail: `Directory "${entryName}" is a symbolic link or junction`
@@ -251,7 +569,7 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
             }
 
             if (!subStats.isDirectory()) {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: 'non_regular_entry',
                 detail: `Entry "${entryName}" is no longer a directory`
@@ -263,8 +581,11 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
             try {
               realSubPath = await fsAdapter.realpath(entryPath)
             } catch (error) {
+              if (signal?.aborted) {
+                return buildSummary('cancelled')
+              }
               const classified = classifyFsError(error, 'unreadable_directory')
-              errors.push({
+              yield* emitError({
                 path: entryPath,
                 code: classified.code,
                 message: classified.message,
@@ -273,8 +594,12 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
               continue
             }
 
+            if (signal?.aborted) {
+              return buildSummary('cancelled')
+            }
+
             if (!isInsideApprovedRoot(canonicalRoot, realSubPath)) {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: 'outside_approved_root',
                 detail: `Directory resolves outside approved root (${canonicalRoot})`
@@ -282,14 +607,42 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
               continue
             }
 
-            discoveredSubdirs.push(entryPath)
+            if (normalizePathForComparison(realSubPath) !== normalizePathForComparison(entryPath)) {
+              const realSubDecision = evaluateDirectoryEntry(
+                realSubPath,
+                basename(realSubPath) || entryName,
+                policy
+              )
+              if (realSubDecision.action === 'skip') {
+                yield* emitSkip({
+                  path: entryPath,
+                  reason: realSubDecision.reason,
+                  detail: realSubDecision.detail
+                })
+                continue
+              }
+            }
+
+            const enqueued = pendingDirs.enqueue({
+              dirPath: entryPath,
+              expectedRealPath: realSubPath,
+              isRoot: false
+            })
+            if (!enqueued) {
+              return buildSummary('resource_limit_reached', {
+                limit: 'maxPendingDirectories',
+                maxAllowed: maxPendingDirectories,
+                observed: pendingDirs.size + 1,
+                message: `Maximum pending directories limit (${maxPendingDirectories}) reached while queueing "${entryPath}"`
+              })
+            }
             continue
           }
 
           if (entry.isFile()) {
             const fileDecision = evaluateFileEntry(entryName, policy)
             if (fileDecision.action === 'skip') {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: fileDecision.reason,
                 detail: fileDecision.detail
@@ -301,8 +654,11 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
             try {
               fileStats = await fsAdapter.lstat(entryPath)
             } catch (error) {
+              if (signal?.aborted) {
+                return buildSummary('cancelled')
+              }
               const classified = classifyFsError(error, 'unreadable_entry')
-              errors.push({
+              yield* emitError({
                 path: entryPath,
                 code: classified.code,
                 message: classified.message,
@@ -311,8 +667,12 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
               continue
             }
 
+            if (signal?.aborted) {
+              return buildSummary('cancelled')
+            }
+
             if (fileStats.isSymbolicLink()) {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: 'symbolic_link_or_junction',
                 detail: `File "${entryName}" is a symbolic link`
@@ -321,7 +681,7 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
             }
 
             if (!fileStats.isFile()) {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: 'non_regular_entry',
                 detail: `Entry "${entryName}" is not a regular file`
@@ -333,8 +693,11 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
             try {
               realFilePath = await fsAdapter.realpath(entryPath)
             } catch (error) {
+              if (signal?.aborted) {
+                return buildSummary('cancelled')
+              }
               const classified = classifyFsError(error, 'unreadable_entry')
-              errors.push({
+              yield* emitError({
                 path: entryPath,
                 code: classified.code,
                 message: classified.message,
@@ -343,8 +706,12 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
               continue
             }
 
+            if (signal?.aborted) {
+              return buildSummary('cancelled')
+            }
+
             if (!isInsideApprovedRoot(canonicalRoot, realFilePath)) {
-              skips.push({
+              yield* emitSkip({
                 path: entryPath,
                 reason: 'outside_approved_root',
                 detail: `File resolves outside approved root (${canonicalRoot})`
@@ -363,12 +730,11 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
               filesystemModifiedAt: toHonestIsoTimestamp(fileStats.mtimeMs)
             }
 
-            candidates.push(candidate)
-            options.onCandidate?.(candidate)
+            yield* emitCandidate(candidate)
             continue
           }
 
-          skips.push({
+          yield* emitSkip({
             path: entryPath,
             reason: 'non_regular_entry',
             detail: `Entry "${entryName}" is neither a regular file nor a directory`
@@ -377,12 +743,90 @@ export async function discoverFiles(options: DiscoveryOptions): Promise<Discover
       } finally {
         await dirHandle.close()
       }
-
-      for (const subdir of discoveredSubdirs) {
-        queue.push(subdir)
-      }
     }
   }
 
-  return buildResult(signal?.aborted ? 'cancelled' : 'completed')
+  return buildSummary(signal?.aborted ? 'cancelled' : 'completed')
+}
+
+/**
+ * Bounded convenience collector built on top of `scanSourceRoots`.
+ *
+ * Collects candidates, skips, and errors in memory up to `limits.maxCollectedRecords`
+ * (defaults to `DEFAULT_MAX_COLLECTED_RECORDS` = 50,000). If the collected record limit
+ * is exceeded, closes the underlying stream deterministically and returns
+ * `status: 'resource_limit_reached'` with `limitReached` metadata.
+ *
+ * For unbounded-size scans with zero record retention, consume `scanSourceRoots` directly.
+ */
+export async function discoverFiles(options: DiscoveryOptions): Promise<DiscoveryResult> {
+  const maxCollectedRecords = options.limits?.maxCollectedRecords ?? DEFAULT_MAX_COLLECTED_RECORDS
+
+  const candidates: DiscoveredCandidate[] = []
+  const skips: DiscoverySkip[] = []
+  const errors: DiscoveryError[] = []
+
+  const liveStats: MutableDiscoveryStats = {
+    rootsRequested: options.roots.length,
+    directoriesVisited: 0,
+    candidatesFound: 0,
+    skippedCount: 0,
+    errorCount: 0
+  }
+
+  const stream = scanSourceRootsInternal(options, liveStats)
+
+  while (true) {
+    const step = await stream.next()
+    if (step.done) {
+      const summary = step.value
+      return {
+        status: summary.status,
+        candidates,
+        skips,
+        errors,
+        stats: summary.stats,
+        ...(summary.limitReached ? { limitReached: summary.limitReached } : {})
+      }
+    }
+
+    const event = step.value
+    const totalCollected = candidates.length + skips.length + errors.length
+    if (totalCollected >= maxCollectedRecords) {
+      const limitReached: DiscoveryLimitReached = {
+        limit: 'maxCollectedRecords',
+        maxAllowed: maxCollectedRecords,
+        observed: totalCollected + 1,
+        message: `Maximum collected records limit (${maxCollectedRecords}) reached in discoverFiles collector`
+      }
+      const snapshotStats = {
+        rootsRequested: liveStats.rootsRequested,
+        directoriesVisited: liveStats.directoriesVisited,
+        candidatesFound: liveStats.candidatesFound,
+        skippedCount: liveStats.skippedCount,
+        errorCount: liveStats.errorCount
+      }
+      await stream.return({
+        status: 'resource_limit_reached',
+        stats: snapshotStats,
+        limitReached
+      })
+      return {
+        status: 'resource_limit_reached',
+        candidates,
+        skips,
+        errors,
+        stats: snapshotStats,
+        limitReached
+      }
+    }
+
+    if (event.kind === 'candidate') {
+      candidates.push(event.candidate)
+    } else if (event.kind === 'skip') {
+      skips.push(event.skip)
+    } else {
+      errors.push(event.error)
+    }
+  }
 }

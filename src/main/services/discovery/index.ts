@@ -13,6 +13,7 @@ export {
   DEFAULT_SOFTWARE_CLUTTER_FILE_NAMES,
   evaluateDirectoryEntry,
   evaluateFileEntry,
+  isPathOrAncestorExcluded,
   normalizePathForComparison,
   resolveDiscoveryPolicy,
   type DirectoryDecision,
@@ -20,15 +21,28 @@ export {
   type FileDecision,
   type ResolvedDiscoveryPolicy
 } from './policy'
-export { discoverFiles, isInsideApprovedRoot } from './scanner'
+export {
+  BoundedFifoQueue,
+  DEFAULT_MAX_COLLECTED_RECORDS,
+  DEFAULT_MAX_PENDING_DIRECTORIES,
+  DEFAULT_MAX_VISITED_DIRECTORIES,
+  discoverFiles,
+  isInsideApprovedRoot,
+  scanSourceRoots
+} from './scanner'
 export type {
   DiscoveredCandidate,
   DiscoveryError,
   DiscoveryErrorCode,
+  DiscoveryEvent,
+  DiscoveryLimitKind,
+  DiscoveryLimitReached,
   DiscoveryOptions,
+  DiscoveryResourceLimits,
   DiscoveryResult,
   DiscoverySkip,
   DiscoverySkipReason,
   DiscoveryStats,
-  DiscoveryStatus
+  DiscoveryStatus,
+  DiscoverySummary
 } from './types'

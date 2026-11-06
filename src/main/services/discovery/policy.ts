@@ -1,4 +1,4 @@
-import { extname, resolve } from 'node:path'
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ItemKind } from '../../../shared/types/domain'
 import type { DiscoverySkipReason } from './types'
 
@@ -197,19 +197,64 @@ export type DirectoryDecision =
   | { readonly action: 'traverse' }
   | { readonly action: 'skip'; readonly reason: DiscoverySkipReason; readonly detail: string }
 
+/**
+ * Checks whether `targetPath` matches an entry in `excludedPaths` or is nested
+ * inside an excluded ancestor path.
+ */
+export function isPathOrAncestorExcluded(
+  targetPath: string,
+  excludedPaths: ReadonlySet<string>
+): string | null {
+  if (excludedPaths.size === 0) {
+    return null
+  }
+  const normalizedTarget = normalizePathForComparison(targetPath)
+  if (excludedPaths.has(normalizedTarget)) {
+    return normalizedTarget
+  }
+  for (const excludedPath of excludedPaths) {
+    const rel = relative(excludedPath, normalizedTarget)
+    if (rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
+      return excludedPath
+    }
+  }
+  return null
+}
+
+/**
+ * Evaluates a directory against the discovery exclusion policy.
+ *
+ * Precedence order (for both explicitly supplied source roots and nested directories):
+ * 1. Explicit path exclusions (`excludedPaths`, matching the directory itself or any
+ *    ancestor directory) -> `excluded_directory`
+ * 2. Explicit directory name exclusions (`excludedDirectoryNames` on `dirName`)
+ *    -> `excluded_directory`
+ * 3. Software/build clutter directory names (`softwareClutterDirectoryNames` on `dirName`)
+ *    -> `software_clutter_directory`
+ * 4. Hidden/system directory names (`hiddenAndSystemNames` or dot-prefixed `dirName`
+ *    when `excludeHiddenEntries` is enabled) -> `hidden_or_system_entry`
+ *
+ * Note on source roots: name-based rules (2-4) are evaluated against the root's own
+ * basename (`dirName`), never against ancestor path segments above an explicitly
+ * supplied root.
+ */
 export function evaluateDirectoryEntry(
   dirPath: string,
   dirName: string,
   policy: ResolvedDiscoveryPolicy
 ): DirectoryDecision {
-  const normalizedPath = normalizePathForComparison(dirPath)
   const lowerName = dirName.toLowerCase()
+  const matchedExcludedPath = isPathOrAncestorExcluded(dirPath, policy.excludedPaths)
 
-  if (policy.excludedPaths.has(normalizedPath)) {
+  if (matchedExcludedPath !== null) {
+    const normalizedPath = normalizePathForComparison(dirPath)
     return {
       action: 'skip',
       reason: 'excluded_directory',
-      detail: 'Directory path is in the configured exclusion list'
+      detail:
+        matchedExcludedPath === normalizedPath
+          ? 'Directory path is in the configured exclusion list'
+          : `Directory path is nested under excluded ancestor "${matchedExcludedPath}"`
     }
   }
 

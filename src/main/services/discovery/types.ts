@@ -61,7 +61,41 @@ export interface DiscoveryError {
   readonly errno?: string
 }
 
-export type DiscoveryStatus = 'completed' | 'cancelled'
+export type DiscoveryEvent =
+  | { readonly kind: 'candidate'; readonly candidate: DiscoveredCandidate }
+  | { readonly kind: 'skip'; readonly skip: DiscoverySkip }
+  | { readonly kind: 'error'; readonly error: DiscoveryError }
+
+export type DiscoveryStatus = 'completed' | 'cancelled' | 'resource_limit_reached'
+
+export type DiscoveryLimitKind =
+  'maxPendingDirectories' | 'maxVisitedDirectories' | 'maxCollectedRecords'
+
+export interface DiscoveryLimitReached {
+  readonly limit: DiscoveryLimitKind
+  readonly maxAllowed: number
+  readonly observed: number
+  readonly message: string
+}
+
+export interface DiscoveryResourceLimits {
+  /**
+   * Maximum number of pending subdirectories held in the traversal queue at one time.
+   * Defaults to `DEFAULT_MAX_PENDING_DIRECTORIES` (10,000).
+   */
+  readonly maxPendingDirectories?: number
+  /**
+   * Maximum total directories opened across the scan.
+   * Defaults to `DEFAULT_MAX_VISITED_DIRECTORIES` (100,000).
+   */
+  readonly maxVisitedDirectories?: number
+  /**
+   * Maximum total records (`candidates + skips + errors`) retained by the bounded
+   * `discoverFiles` collector. Not used by streaming `scanSourceRoots`.
+   * Defaults to `DEFAULT_MAX_COLLECTED_RECORDS` (50,000).
+   */
+  readonly maxCollectedRecords?: number
+}
 
 export interface DiscoveryStats {
   readonly rootsRequested: number
@@ -71,18 +105,24 @@ export interface DiscoveryStats {
   readonly errorCount: number
 }
 
-export interface DiscoveryResult {
+export interface DiscoverySummary {
   readonly status: DiscoveryStatus
+  readonly stats: DiscoveryStats
+  readonly limitReached?: DiscoveryLimitReached
+}
+
+export interface DiscoveryResult extends DiscoverySummary {
   readonly candidates: readonly DiscoveredCandidate[]
   readonly skips: readonly DiscoverySkip[]
   readonly errors: readonly DiscoveryError[]
-  readonly stats: DiscoveryStats
 }
 
 export interface DiscoveryOptions {
   readonly roots: readonly string[]
   readonly policy?: DiscoveryPolicyConfig
+  readonly limits?: DiscoveryResourceLimits
   readonly fsAdapter?: ReadOnlyFsAdapter
   readonly signal?: AbortSignal
-  readonly onCandidate?: (candidate: DiscoveredCandidate) => void
+  readonly onEvent?: (event: DiscoveryEvent) => void | Promise<void>
+  readonly onCandidate?: (candidate: DiscoveredCandidate) => void | Promise<void>
 }
