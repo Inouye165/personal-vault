@@ -948,7 +948,7 @@ describe('Stage 2A: Read-only discovery service', () => {
       expect(closed).toBe(1)
     })
 
-    it('provides an O(1) FIFO queue without array shift', () => {
+    it('provides an O(1) FIFO queue without array shift and rejects invalid capacities', () => {
       const queue = new BoundedFifoQueue<number>(3)
       expect(queue.enqueue(10)).toBe(true)
       expect(queue.enqueue(20)).toBe(true)
@@ -962,6 +962,182 @@ describe('Stage 2A: Read-only discovery service', () => {
       expect(queue.dequeue()).toBe(50)
       expect(queue.dequeue()).toBeUndefined()
       expect(queue.size).toBe(0)
+
+      for (const badCapacity of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        0,
+        -1,
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1
+      ]) {
+        expect(() => new BoundedFifoQueue<number>(badCapacity)).toThrow(RangeError)
+      }
+    })
+
+    it('rejects invalid resource limits in discoverFiles before performing any filesystem work or callbacks', async () => {
+      const root = join(fixtureRoot, 'unopened-root')
+      let fsCalls = 0
+      let callbackCalls = 0
+
+      const trackingAdapter: ReadOnlyFsAdapter = {
+        realpath: async (p) => {
+          fsCalls++
+          return p
+        },
+        lstat: async () => {
+          fsCalls++
+          return makeStats('dir')
+        },
+        opendir: async (): Promise<ReadOnlyDirHandle> => {
+          fsCalls++
+          return { read: async () => null, close: async () => {} }
+        }
+      }
+
+      const invalidValues = [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        0,
+        -1,
+        -100,
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1
+      ]
+
+      // Exact reviewer reproduction case
+      await expect(
+        discoverFiles({
+          roots: [root],
+          fsAdapter: trackingAdapter,
+          limits: {
+            maxCollectedRecords: Number.NaN,
+            maxVisitedDirectories: Number.NaN
+          },
+          onCandidate: () => {
+            callbackCalls++
+          },
+          onEvent: () => {
+            callbackCalls++
+          }
+        })
+      ).rejects.toThrow(RangeError)
+
+      for (const badValue of invalidValues) {
+        for (const key of [
+          'maxPendingDirectories',
+          'maxVisitedDirectories',
+          'maxCollectedRecords'
+        ] as const) {
+          await expect(
+            discoverFiles({
+              roots: [root],
+              fsAdapter: trackingAdapter,
+              limits: { [key]: badValue },
+              onCandidate: () => {
+                callbackCalls++
+              },
+              onEvent: () => {
+                callbackCalls++
+              }
+            })
+          ).rejects.toThrow(new RegExp(`${key}.*positive safe integer`, 'i'))
+        }
+      }
+
+      expect(fsCalls).toBe(0)
+      expect(callbackCalls).toBe(0)
+    })
+
+    it('validates streaming limits lazily when scanSourceRoots iteration starts without touching the filesystem', async () => {
+      const root = join(fixtureRoot, 'unopened-stream-root')
+      let fsCalls = 0
+      let callbackCalls = 0
+
+      const trackingAdapter: ReadOnlyFsAdapter = {
+        realpath: async (p) => {
+          fsCalls++
+          return p
+        },
+        lstat: async () => {
+          fsCalls++
+          return makeStats('dir')
+        },
+        opendir: async (): Promise<ReadOnlyDirHandle> => {
+          fsCalls++
+          return { read: async () => null, close: async () => {} }
+        }
+      }
+
+      const invalidValues = [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        0,
+        -1,
+        2.75,
+        Number.MAX_SAFE_INTEGER + 1
+      ]
+
+      for (const badValue of invalidValues) {
+        for (const key of [
+          'maxPendingDirectories',
+          'maxVisitedDirectories',
+          'maxCollectedRecords'
+        ] as const) {
+          const stream = scanSourceRoots({
+            roots: [root],
+            fsAdapter: trackingAdapter,
+            limits: { [key]: badValue },
+            onCandidate: () => {
+              callbackCalls++
+            },
+            onEvent: () => {
+              callbackCalls++
+            }
+          })
+          // Async-generator validation is lazy until iteration begins
+          expect(fsCalls).toBe(0)
+          await expect(stream.next()).rejects.toThrow(
+            new RegExp(`${key}.*positive safe integer`, 'i')
+          )
+        }
+      }
+
+      expect(fsCalls).toBe(0)
+      expect(callbackCalls).toBe(0)
+
+      // Verify scanSourceRoots does not enforce collector-only maxCollectedRecords during streaming
+      const streamAdapter: ReadOnlyFsAdapter = {
+        realpath: async (p) => p,
+        lstat: async (p) => (p === root ? makeStats('dir') : makeStats('file', 10)),
+        opendir: async (): Promise<ReadOnlyDirHandle> => {
+          const entries = [makeDirent('1.jpg', 'file'), makeDirent('2.jpg', 'file')]
+          let idx = 0
+          return {
+            read: async () => entries[idx++] ?? null,
+            close: async () => {}
+          }
+        }
+      }
+      const validStream = scanSourceRoots({
+        roots: [root],
+        fsAdapter: streamAdapter,
+        limits: { maxCollectedRecords: 1 }
+      })
+      const streamedEvents: DiscoveryEvent[] = []
+      while (true) {
+        const next = await validStream.next()
+        if (next.done) {
+          expect(next.value.status).toBe('completed')
+          expect(next.value.stats.candidatesFound).toBe(2)
+          break
+        }
+        streamedEvents.push(next.value)
+      }
+      expect(streamedEvents).toHaveLength(2)
     })
   })
 })

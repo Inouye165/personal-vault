@@ -30,11 +30,11 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 ## Stage 2: Read-Only Discovery, Metadata Inventory, and Resumable Scan Jobs
 
-Status: **in progress — Stage 2A complete (including bounded streaming/backpressure, root exclusions, and pre-open directory revalidation); subsequent Stage 2 tasks pending** (see HANDOFF.md).
+Status: **incomplete — Stage 2A implemented and awaiting independent review; Stage 2B and Stage 2C not started** (see HANDOFF.md).
 
 - [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
-- [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, bounded resource limits (`maxPendingDirectories`, `maxVisitedDirectories`, `maxCollectedRecords` with `resource_limit_reached` reporting), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.
-- [x] **Stage 2A**: Pre-`opendir` revalidation of queued directories (`lstat`, `realpath`, policy, and approved-root containment) plus symlink/junction skipping (with sandbox-aware real junction probing and deterministic adapter tests).
+- [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, validated resource limits (`resolveDiscoveryLimits` enforcing positive safe integers for `maxPendingDirectories`, `maxVisitedDirectories`, and collector-only `maxCollectedRecords`), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.
+- [x] **Stage 2A**: Shared root, child, and pre-`opendir` queued directory validation (`inspectDirectoryTarget`) and file-candidate inspection (`inspectFileEntry`), plus symlink/junction skipping (with sandbox-aware real junction probing and deterministic adapter tests).
 - [x] **Stage 2A**: Configurable candidate photo/document extension policy (including `.md` and `.txt`) with documented source-root and subdirectory exclusion precedence (`excludedPaths` including ancestor exclusions > `excludedDirectoryNames` > `softwareClutterDirectoryNames` > `hiddenAndSystemNames` / dot-entries).
 - [x] **Stage 2A**: Factual filesystem metadata inventory (original path, filename, extension, byte size, honest nullable creation and modification times) and verified source preservation.
 - [ ] **Stage 2B**: Streaming SHA-256 content hashing and SQLite catalog schema for recorded file facts and inventory persistence.

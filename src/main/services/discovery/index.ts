@@ -6,6 +6,25 @@ export {
   type ReadOnlyFsStats
 } from './fs-adapter'
 export {
+  classifyFsError,
+  inspectDirectoryTarget,
+  inspectFileEntry,
+  isInsideApprovedRoot,
+  toHonestIsoTimestamp,
+  type DirectoryInspectionContext,
+  type DirectoryInspectionOutcome,
+  type FileInspectionOutcome
+} from './inspection'
+export {
+  BoundedFifoQueue,
+  DEFAULT_MAX_COLLECTED_RECORDS,
+  DEFAULT_MAX_PENDING_DIRECTORIES,
+  DEFAULT_MAX_VISITED_DIRECTORIES,
+  resolveDiscoveryLimits,
+  validatePositiveSafeInteger,
+  type ResolvedDiscoveryLimits
+} from './limits'
+export {
   DEFAULT_DOCUMENT_EXTENSIONS,
   DEFAULT_HIDDEN_AND_SYSTEM_NAMES,
   DEFAULT_PHOTO_EXTENSIONS,
@@ -21,15 +40,7 @@ export {
   type FileDecision,
   type ResolvedDiscoveryPolicy
 } from './policy'
-export {
-  BoundedFifoQueue,
-  DEFAULT_MAX_COLLECTED_RECORDS,
-  DEFAULT_MAX_PENDING_DIRECTORIES,
-  DEFAULT_MAX_VISITED_DIRECTORIES,
-  discoverFiles,
-  isInsideApprovedRoot,
-  scanSourceRoots
-} from './scanner'
+export { discoverFiles, scanSourceRoots } from './scanner'
 export type {
   DiscoveredCandidate,
   DiscoveryError,
