@@ -146,6 +146,39 @@ export function validateRecordHashObservationInput(input: RecordHashObservationI
   validateSafeInteger(input.hashedAtMs, 'hashedAtMs', 1)
 }
 
+export function validateDiscoveryCandidateInput(candidate: DiscoveryCandidateInput): void {
+  if (!candidate.originalPath || typeof candidate.originalPath !== 'string') {
+    throw new TypeError('originalPath must be a non-empty string')
+  }
+  if (!candidate.fileName || typeof candidate.fileName !== 'string') {
+    throw new TypeError('fileName must be a non-empty string')
+  }
+  if (typeof candidate.extension !== 'string') {
+    throw new TypeError('extension must be a string')
+  }
+  validateSafeInteger(candidate.byteSize, 'byteSize', 0)
+  if (
+    candidate.birthtimeMs !== null &&
+    (typeof candidate.birthtimeMs !== 'number' || !Number.isFinite(candidate.birthtimeMs))
+  ) {
+    throw new RangeError(
+      `birthtimeMs must be null or a finite number, received: ${String(candidate.birthtimeMs)}`
+    )
+  }
+  if (
+    candidate.mtimeMs !== null &&
+    (typeof candidate.mtimeMs !== 'number' || !Number.isFinite(candidate.mtimeMs))
+  ) {
+    throw new RangeError(
+      `mtimeMs must be null or a finite number, received: ${String(candidate.mtimeMs)}`
+    )
+  }
+  validateSafeInteger(candidate.discoveredAtMs, 'discoveredAtMs', 1)
+  if (candidate.category !== 'photo' && candidate.category !== 'document') {
+    throw new TypeError(`Invalid category: ${String(candidate.category)}`)
+  }
+}
+
 export function isObservationTimestampMatching(
   observedMtimeMs: number | null,
   recordedMtimeMs: number | null
@@ -157,8 +190,14 @@ export function isObservationTimestampMatching(
     // Conservative null matching: one null and one non-null is an unambiguous mismatch
     return false
   }
-  // Tolerates sub-millisecond precision loss (< 1.0 ms), rejects shifts >= 1.0 ms
-  return Math.abs(observedMtimeMs - recordedMtimeMs) < 1.0
+  // Stage 2B precision contract:
+  // If discovery expectation was recorded as an integer (e.g. truncated precision),
+  // tolerate differences strictly within 1.0 ms (|observed - recorded| < 1.0 ms).
+  // If recorded has fractional milliseconds, exact comparison is enforced.
+  if (Number.isInteger(recordedMtimeMs)) {
+    return Math.abs(observedMtimeMs - recordedMtimeMs) < 1.0
+  }
+  return observedMtimeMs === recordedMtimeMs
 }
 
 export class CatalogDatabase {
@@ -220,8 +259,8 @@ export class CatalogDatabase {
     if (this.closed) {
       return
     }
-    this.closed = true
     this.db.close()
+    this.closed = true
   }
 
   public isClosed(): boolean {
@@ -338,10 +377,7 @@ export class CatalogDatabase {
 
     // Pre-validate candidates before mutation
     for (const candidate of candidates) {
-      validateSafeInteger(candidate.byteSize, 'byteSize', 0)
-      if (candidate.category !== 'photo' && candidate.category !== 'document') {
-        throw new TypeError(`Invalid category: ${String(candidate.category)}`)
-      }
+      validateDiscoveryCandidateInput(candidate)
     }
 
     let insertedCount = 0
@@ -357,7 +393,7 @@ export class CatalogDatabase {
       }
 
       const selectFileStmt = this.db.prepare(
-        'SELECT id, original_path FROM file_locations WHERE original_path = ?;'
+        'SELECT id, original_path, file_name, extension, category FROM file_locations WHERE original_path = ?;'
       )
 
       const selectCurrentObsStmt = this.db.prepare(`
@@ -405,7 +441,14 @@ export class CatalogDatabase {
       for (const candidate of candidates) {
         const normalizedPath = normalizePathForLookup(candidate.originalPath)
         const existingFile = selectFileStmt.get(candidate.originalPath) as unknown as
-          { id: number; original_path: string } | undefined
+          | {
+              id: number
+              original_path: string
+              file_name: string
+              extension: string
+              category: string
+            }
+          | undefined
 
         if (!existingFile) {
           const fileRow = insertFileStmt.get(
@@ -440,8 +483,10 @@ export class CatalogDatabase {
 
           const sizeChanged = !currentObs || currentObs.byte_size !== candidate.byteSize
           const mtimeChanged = !currentObs || currentObs.filesystem_mtime_ms !== candidate.mtimeMs
+          const birthtimeChanged =
+            !currentObs || currentObs.filesystem_birthtime_ms !== candidate.birthtimeMs
 
-          if (sizeChanged || mtimeChanged) {
+          if (sizeChanged || mtimeChanged || birthtimeChanged) {
             if (currentObs) {
               deactivateObsStmt.run(currentObs.id)
               const invRes = invalidateHashesStmt.run(currentObs.id)
@@ -461,6 +506,23 @@ export class CatalogDatabase {
             updateFileLocationStmt.run(now, existingFile.id)
             updatedCount++
           } else {
+            if (
+              existingFile.file_name !== candidate.fileName ||
+              existingFile.extension !== candidate.extension ||
+              existingFile.category !== candidate.category
+            ) {
+              this.db
+                .prepare(
+                  'UPDATE file_locations SET file_name = ?, extension = ?, category = ?, updated_at_ms = ? WHERE id = ?;'
+                )
+                .run(
+                  candidate.fileName,
+                  candidate.extension,
+                  candidate.category,
+                  now,
+                  existingFile.id
+                )
+            }
             updateObsLastSeenStmt.run(candidate.discoveredAtMs, currentObs.id)
             updateFileLocationStmt.run(now, existingFile.id)
             unchangedCount++

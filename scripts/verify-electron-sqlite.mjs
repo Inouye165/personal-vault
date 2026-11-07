@@ -3,17 +3,18 @@
  * Personal Vault — Electron SQLite Repository Verification
  *
  * Exercises the actual CatalogDatabase module inside the real Electron runtime:
- * - Explicit database initialization and schema migration
+ * - Explicit database initialization and schema migration (v2)
  * - Transactional discovery persistence and source root registration
  * - SHA-256 hash observation recording and active hash lookup
- * - Reopen durability across database connections
+ * - Reopen durability across independent database connections
  * - Changed-file discovery fact preservation and active hash invalidation
  * - Foreign-key enforcement and cascading deletion
  *
- * Works in both GUI Electron, headless environments, and Node CLI using Electron's runtime.
+ * Supports both standard built bundle and unpacked application (--mode=unpacked).
  * Usage:
  *   node scripts/verify-electron-sqlite.mjs
  *   npm run verify:sqlite
+ *   npm run verify:sqlite:unpacked
  */
 
 import { spawnSync } from 'node:child_process'
@@ -25,74 +26,143 @@ import electronPath from 'electron'
 
 const __dirname = resolve(fileURLToPath(import.meta.url), '..')
 const rootDir = resolve(__dirname, '..')
-const catalogBundlePath = join(rootDir, 'out', 'main', 'catalog.js')
 
-// If running in regular Node (e.g. `node scripts/verify-electron-sqlite.mjs`),
-// re-launch under Electron's Node runtime (ELECTRON_RUN_AS_NODE=1) to ensure
-// Electron's exact runtime and embedded SQLite driver are exercised.
-if (!process.versions.electron) {
-  if (!existsSync(catalogBundlePath)) {
-    console.log('[verify-sqlite] Compiling catalog bundle via electron-vite...')
-    const buildRes = spawnSync('npm', ['run', 'build'], {
-      cwd: rootDir,
-      stdio: 'inherit',
-      shell: true
-    })
-    if (buildRes.status !== 0) {
-      console.error('[verify-sqlite] Build failed before SQLite verification.')
-      process.exit(buildRes.status ?? 1)
-    }
+const isUnpackedMode = process.argv.includes('--mode=unpacked')
+
+function getUnpackedExecutablePath(root) {
+  if (process.platform === 'win32') {
+    return join(root, 'dist', 'win-unpacked', 'Personal Vault.exe')
   }
-
-  console.log('[verify-sqlite] Launching verification inside Electron runtime...')
-  const child = spawnSync(
-    electronPath,
-    [fileURLToPath(import.meta.url), ...process.argv.slice(2)],
-    {
-      cwd: rootDir,
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: '1',
-        ELECTRON_NO_ATTACH_CONSOLE: '1'
-      }
-    }
-  )
-
-  process.exit(child.status ?? 1)
+  if (process.platform === 'darwin') {
+    return join(
+      root,
+      'dist',
+      'mac-unpacked',
+      'Personal Vault.app',
+      'Contents',
+      'MacOS',
+      'Personal Vault'
+    )
+  }
+  return join(root, 'dist', 'linux-unpacked', 'personal-vault')
 }
 
-// Running inside Electron's runtime
-process.on('uncaughtException', (err) => {
-  console.error('[verify-sqlite] UNCAUGHT EXCEPTION:', err)
-  process.exit(1)
-})
+function getUnpackedAsarPath(root) {
+  if (process.platform === 'darwin') {
+    return join(
+      root,
+      'dist',
+      'mac-unpacked',
+      'Personal Vault.app',
+      'Contents',
+      'Resources',
+      'app.asar'
+    )
+  }
+  const folder = process.platform === 'win32' ? 'win-unpacked' : 'linux-unpacked'
+  return join(root, 'dist', folder, 'resources', 'app.asar')
+}
 
-process.on('unhandledRejection', (err) => {
-  console.error('[verify-sqlite] UNHANDLED REJECTION:', err)
-  process.exit(1)
-})
+// ---------------------------------------------------------------------------
+// Outer Node Launcher (when not running under Electron's runtime)
+// ---------------------------------------------------------------------------
+if (!process.versions.electron) {
+  const binaryPath = isUnpackedMode ? getUnpackedExecutablePath(rootDir) : electronPath
 
-async function runVerification() {
-  console.log(
-    `[verify-sqlite] Running in Electron runtime (Node ${process.versions.node}, Electron ${process.versions.electron}, SQLite ${process.versions.sqlite ?? 'built-in'})...`
-  )
-
-  if (!existsSync(catalogBundlePath)) {
-    throw new Error(`Catalog bundle not found at ${catalogBundlePath}. Run npm run build first.`)
+  if (isUnpackedMode) {
+    if (!existsSync(binaryPath)) {
+      console.log('[verify-sqlite] Unpacked binary not found. Running `npm run build:unpack`...')
+      const packRes = spawnSync('npm', ['run', 'build:unpack'], {
+        cwd: rootDir,
+        stdio: 'inherit',
+        shell: true
+      })
+      if (packRes.status !== 0) {
+        console.error('[verify-sqlite] Unpacked build failed.')
+        process.exitCode = packRes.status ?? 1
+      }
+    }
+  } else {
+    const catalogBundlePath = join(rootDir, 'out', 'main', 'catalog.js')
+    if (!existsSync(catalogBundlePath)) {
+      console.log('[verify-sqlite] Compiling catalog bundle via electron-vite...')
+      const buildRes = spawnSync('npm', ['run', 'build'], {
+        cwd: rootDir,
+        stdio: 'inherit',
+        shell: true
+      })
+      if (buildRes.status !== 0) {
+        console.error('[verify-sqlite] Build failed before SQLite verification.')
+        process.exitCode = buildRes.status ?? 1
+      }
+    }
   }
 
-  const catalogUrl = pathToFileURL(catalogBundlePath).href
-  const { CatalogDatabase } = await import(catalogUrl)
-  if (!CatalogDatabase || typeof CatalogDatabase.open !== 'function') {
-    throw new TypeError('CatalogDatabase.open is not exported by out/main/catalog.js')
-  }
+  if (process.exitCode && process.exitCode !== 0) {
+    // Abort if pre-build failed
+  } else {
+    console.log(
+      `[verify-sqlite] Launching verification using ${isUnpackedMode ? 'unpacked executable' : 'Electron runtime'}...`
+    )
+    console.log(`[verify-sqlite] Target binary: ${binaryPath}`)
 
-  const tempDir = mkdtempSync(join(tmpdir(), 'pv-electron-sqlite-verify-'))
-  const catalogPath = join(tempDir, 'verified-catalog.db')
+    const child = spawnSync(
+      binaryPath,
+      [fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+      {
+        cwd: rootDir,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1',
+          ELECTRON_NO_ATTACH_CONSOLE: '1'
+        }
+      }
+    )
+
+    process.exitCode = child.status ?? 1
+  }
+} else {
+  // ---------------------------------------------------------------------------
+  // Inner Electron Runtime Execution
+  // ---------------------------------------------------------------------------
+  const catalogTargetModule = isUnpackedMode
+    ? join(getUnpackedAsarPath(rootDir), 'out', 'main', 'catalog.js')
+    : join(rootDir, 'out', 'main', 'catalog.js')
+
+  console.log(`[verify-sqlite] Environment Diagnostics:`)
+  console.log(`  - Mode: ${isUnpackedMode ? 'unpacked (asar)' : 'built (out/main)'}`)
+  console.log(`  - Electron version: ${process.versions.electron}`)
+  console.log(`  - Node version: ${process.versions.node}`)
+  console.log(`  - SQLite: built-in node:sqlite`)
+  console.log(`  - Target catalog module: ${catalogTargetModule}`)
+
+  if (!existsSync(catalogTargetModule) && !isUnpackedMode) {
+    console.error(`[verify-sqlite] Catalog bundle not found at: ${catalogTargetModule}`)
+    process.exitCode = 1
+  } else {
+    runVerification(catalogTargetModule)
+  }
+}
+
+async function runVerification(catalogModulePath) {
+  let tempDir = null
   let db = null
+  let success = false
 
   try {
+    const catalogUrl = pathToFileURL(catalogModulePath).href
+    console.log(`  - Loading catalog module via dynamic import...`)
+    const catalogMod = await import(catalogUrl)
+    const CatalogDatabase = catalogMod.CatalogDatabase
+
+    if (!CatalogDatabase || typeof CatalogDatabase.open !== 'function') {
+      throw new TypeError(`CatalogDatabase.open is not exported by ${catalogModulePath}`)
+    }
+
+    tempDir = mkdtempSync(join(tmpdir(), 'pv-electron-sqlite-verify-'))
+    const catalogPath = join(tempDir, 'verified-catalog.db')
+
     // Step 1: Explicit initialization & migrations
     console.log('  1. Initializing catalog database at temporary path...')
     db = CatalogDatabase.open({ catalogPath })
@@ -118,8 +188,9 @@ async function runVerification() {
         category: 'photo'
       }
     ])
-    if (batchRes.insertedCount !== 1)
+    if (batchRes.insertedCount !== 1) {
       throw new Error(`Expected 1 inserted file, got ${batchRes.insertedCount}`)
+    }
 
     // Step 4: Record SHA-256 hash observation
     console.log('  4. Recording SHA-256 hash observation...')
@@ -193,14 +264,14 @@ async function runVerification() {
       throw new Error('Discovery observations were not cascade-deleted')
     }
 
-    db.close()
-    db = null
+    success = true
     console.log(
-      '[verify-sqlite] ALL CHECKS PASSED: CatalogDatabase operates correctly in Electron runtime.'
+      `[verify-sqlite] ALL CHECKS PASSED: CatalogDatabase operates correctly in Electron runtime (${isUnpackedMode ? 'unpacked' : 'built'}).`
     )
-    process.exit(0)
   } catch (error) {
     console.error('[verify-sqlite] VERIFICATION FAILED:', error)
+    process.exitCode = 1
+  } finally {
     if (db && !db.isClosed()) {
       try {
         db.close()
@@ -208,14 +279,16 @@ async function runVerification() {
         // ignore
       }
     }
-    process.exit(1)
-  } finally {
-    try {
-      rmSync(tempDir, { recursive: true, force: true })
-    } catch {
-      // ignore
+    if (tempDir) {
+      try {
+        rmSync(tempDir, { recursive: true, force: true })
+      } catch {
+        // ignore
+      }
     }
   }
-}
 
-runVerification()
+  if (success) {
+    process.exitCode = 0
+  }
+}

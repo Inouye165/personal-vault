@@ -172,6 +172,7 @@ src/
    - **Versioned Transactional Schema Migrations**:
      - Pre-checks schema compatibility (`checkSchemaCompatibility`) via `sqlite_master` in both read-only and read-write modes BEFORE changing journal mode or running DDL.
      - Preserves existing database contents, schema, and journal mode (e.g. `DELETE` mode is never overwritten with `WAL` when encountering a future schema).
+     - Versioned migrations (`CURRENT_SCHEMA_VERSION = 2`): safely accounts for both earlier version-1 layouts: the original `baa82e6` layout (inline facts in `file_locations`) and the interim `25a1b4f` layout (with `discovery_observations`). Safely inspects schema structure, migrating `baa82e6` data into `discovery_observations` and rebuilding `hash_observations` with `discovery_observation_id` without fact loss, and rejects unrecognized/corrupted layouts with `MigrationError`.
      - Unsupported future schema versions (`version > CURRENT_SCHEMA_VERSION`) fail immediately with `UnsupportedSchemaVersionError` without modifying the database.
      - Failed open attempts close the connection cleanly without leaking handles.
      - Migrations execute inside an explicit transaction (`BEGIN TRANSACTION` ... `COMMIT`), rolling back changes completely on error.
@@ -182,21 +183,25 @@ src/
    - **Fact vs. Inference Separation & Timestamp Honesty**:
      - Filesystem dates (`filesystem_birthtime_ms`, `filesystem_mtime_ms`) are recorded as immutable discovery facts.
      - `inferred_capture_time_ms` is kept distinct and initialized to `null`. Unknown values remain `null`; filesystem dates are never fabricated as capture dates.
+     - Timestamp matching adheres to Stage 2B precision contract (`isObservationTimestampMatching`): when both discovery and hash observations retain fractional milliseconds, exact comparison is enforced; reduced tolerance (< 1.0 ms) is applied only when the discovery expectation was recorded as an integer; null mismatches are strictly rejected.
    - **Preserved Discovery History & Hash Validity**:
      - Discovery facts are stored immutably in `discovery_observations`.
-     - When a subsequent discovery scan observes that a file's `byte_size` or `filesystem_mtime_ms` has changed, the prior observation is marked `is_current = 0` (retaining prior sizes and timestamps in history), and a new observation is created with `is_current = 1`.
+     - When a subsequent discovery scan observes that a file's `byte_size`, `filesystem_mtime_ms`, or `filesystem_birthtime_ms` (including transitions to/from `null`) has changed, the prior observation is marked `is_current = 0` (retaining prior sizes and timestamps in history), and a new observation is created with `is_current = 1`.
      - Database constraint `idx_disc_obs_current` enforces at most one current discovery observation per file location.
      - Hash observations in `hash_observations` are tied directly to the specific `discovery_observation_id` they verify. A changed observation does not inherit an earlier verified hash.
      - Database constraint `idx_hash_obs_current` enforces at most one active verified hash per discovery observation.
-     - If discovery observes identical size and mtime, `last_seen_at_ms` is updated while active hash validity is preserved without duplicate rows.
+     - If discovery observes identical size, birthtime, and mtime, `last_seen_at_ms` is updated while active hash validity is preserved without duplicate rows.
    - **Foreign Keys, Cascades & Full Transaction Rollback**:
      - Foreign keys are enforced (`PRAGMA foreign_keys = ON;`).
      - Deleting a source cascades deletion to associated `file_locations`, `discovery_observations`, and `hash_observations` (`ON DELETE CASCADE`).
      - Batch persistence (`persistDiscoveryBatch`, `recordHashObservationsBatch`) executes in a single transaction with automatic rollback if any candidate or observation fails validation. Source root registration is included within the transaction so failed batches leave no orphaned source records.
    - **Enforced Resource Limits & Bounded Queries**:
      - Enforces finite batch size limits (`MAX_BATCH_SIZE = 1000`) before database mutation; oversized batches are rejected eagerly with `RangeError`.
+     - Validates candidate discovery inputs strictly (finite numbers or null for timestamps, non-negative safe integers for sizes).
      - Validates pagination parameters (`offset`, `limit`, `maxLocationsPerGroup`) as finite safe integers, rejecting `NaN`, negative offsets, fractions, and invalid limits.
      - Reads are bounded using `LIMIT` and `OFFSET` across all entity queries (`listSources`, `getDiscoveryObservationsForFile`, `getHashObservationsForFile`, `queryFileLocations`, `getDuplicateGroups`), with member locations bounded per duplicate group to prevent unbounded memory allocation.
+   - **Deterministic Lifecycle & Cleanup**:
+     - `CatalogDatabase.close()` transitions `isClosed()` to `true` only after the underlying SQLite connection closure succeeds.
    - **Source Preservation Invariance**:
      - Database writes affect strictly the app-owned SQLite catalog file.
      - Source files on disk remain strictly read-only and unaltered.

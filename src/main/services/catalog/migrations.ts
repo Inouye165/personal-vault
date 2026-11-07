@@ -3,13 +3,14 @@
  *
  * Implements transactional, versioned database schema migrations.
  * Guarantees that reopening existing catalogs is safe and idempotent,
+ * accounts for both v1 schema layouts (baa82e6 and 25a1b4f),
  * and fails safely without database modifications if an unsupported future version is met.
  */
 
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 1
+export const CURRENT_SCHEMA_VERSION = 2
 
 interface Migration {
   readonly version: number
@@ -17,12 +18,33 @@ interface Migration {
   readonly up: (db: DatabaseSync) => void
 }
 
+interface ColumnInfo {
+  readonly cid: number
+  readonly name: string
+  readonly type: string
+  readonly notnull: number
+  readonly dflt_value: unknown
+  readonly pk: number
+}
+
+function getTableNames(db: DatabaseSync): string[] {
+  const rows = db.prepare("SELECT name FROM sqlite_master WHERE type='table';").all() as Array<{
+    name: string
+  }>
+  return rows.map((r) => r.name)
+}
+
+function getTableColumns(db: DatabaseSync, tableName: string): string[] {
+  const rows = db.prepare(`PRAGMA table_info('${tableName}');`).all() as unknown as ColumnInfo[]
+  return rows.map((r) => r.name)
+}
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
     name: 'initial_catalog_schema',
     up: (db: DatabaseSync) => {
-      // 1. Source roots inventory
+      // Original Stage 2C baa82e6 layout
       db.exec(`
         CREATE TABLE IF NOT EXISTS sources (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,11 +53,156 @@ const MIGRATIONS: readonly Migration[] = [
           created_at_ms INTEGER NOT NULL,
           updated_at_ms INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS file_locations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+          original_path TEXT NOT NULL,
+          normalized_path TEXT NOT NULL UNIQUE,
+          file_name TEXT NOT NULL,
+          extension TEXT NOT NULL,
+          category TEXT NOT NULL CHECK (category IN ('photo', 'document')),
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          filesystem_birthtime_ms NUMERIC,
+          filesystem_mtime_ms NUMERIC,
+          inferred_capture_time_ms INTEGER,
+          first_discovered_at_ms INTEGER NOT NULL,
+          last_seen_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_file_locations_source ON file_locations(source_id);
+        CREATE INDEX IF NOT EXISTS idx_file_locations_category ON file_locations(category);
+        CREATE INDEX IF NOT EXISTS idx_file_locations_normalized_path ON file_locations(normalized_path);
+
+        CREATE TABLE IF NOT EXISTS hash_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms NUMERIC,
+          hashed_at_ms INTEGER NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_hash_obs_file_active ON hash_observations(file_location_id, is_active);
+        CREATE INDEX IF NOT EXISTS idx_hash_obs_sha256 ON hash_observations(sha256);
+      `)
+    }
+  },
+  {
+    version: 2,
+    name: 'discovery_observations_and_strict_hashes',
+    up: (db: DatabaseSync) => {
+      const tables = getTableNames(db)
+      if (
+        !tables.includes('sources') ||
+        !tables.includes('file_locations') ||
+        !tables.includes('hash_observations')
+      ) {
+        throw new Error('Required tables (sources, file_locations, hash_observations) are missing')
+      }
+
+      const fileLocCols = getTableColumns(db, 'file_locations')
+      const hashObsCols = getTableColumns(db, 'hash_observations')
+
+      // Case A: Revised 25a1b4f layout (already has discovery_observations)
+      if (tables.includes('discovery_observations')) {
+        const discCols = getTableColumns(db, 'discovery_observations')
+        const isValidDisc =
+          discCols.includes('file_location_id') &&
+          discCols.includes('byte_size') &&
+          discCols.includes('is_current')
+        const isValidHash = hashObsCols.includes('discovery_observation_id')
+        const isValidFile =
+          fileLocCols.includes('original_path') && fileLocCols.includes('category')
+
+        if (!isValidDisc || !isValidHash || !isValidFile) {
+          throw new Error(
+            'Unrecognized schema layout: discovery_observations exists but table structure is invalid'
+          )
+        }
+        // Already adheres to the revised layout; schema migration 2 bookkeeping is sufficient.
+        return
+      }
+
+      // Case B: Original baa82e6 layout (inline facts in file_locations, hash tied to file_location)
+      const isBaa82e6File =
+        fileLocCols.includes('byte_size') &&
+        fileLocCols.includes('first_discovered_at_ms') &&
+        fileLocCols.includes('last_seen_at_ms')
+      const isBaa82e6Hash =
+        hashObsCols.includes('file_location_id') &&
+        !hashObsCols.includes('discovery_observation_id')
+
+      if (!isBaa82e6File || !isBaa82e6Hash) {
+        throw new Error('Unrecognized version 1 schema structure: cannot migrate to version 2')
+      }
+
+      // 1. Create discovery_observations table
+      db.exec(`
+        CREATE TABLE discovery_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          filesystem_birthtime_ms NUMERIC,
+          filesystem_mtime_ms NUMERIC,
+          inferred_capture_time_ms INTEGER,
+          observed_at_ms INTEGER NOT NULL,
+          last_seen_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
       `)
 
-      // 2. Discovered file locations (verbatim original paths and filenames preserved)
+      // 2. Populate discovery_observations with historical facts from file_locations
       db.exec(`
-        CREATE TABLE IF NOT EXISTS file_locations (
+        INSERT INTO discovery_observations (
+          id, file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+          inferred_capture_time_ms, observed_at_ms, last_seen_at_ms, is_current
+        )
+        SELECT
+          id, id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+          inferred_capture_time_ms, first_discovered_at_ms, last_seen_at_ms, 1
+        FROM file_locations;
+
+        CREATE INDEX idx_disc_obs_file ON discovery_observations(file_location_id);
+        CREATE UNIQUE INDEX idx_disc_obs_current ON discovery_observations(file_location_id) WHERE is_current = 1;
+      `)
+
+      // 3. Rebuild hash_observations to reference discovery_observations
+      db.exec(`
+        CREATE TABLE hash_observations_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms NUMERIC,
+          hashed_at_ms INTEGER NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+        );
+
+        INSERT INTO hash_observations_new (
+          id, file_location_id, discovery_observation_id, sha256,
+          observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+        )
+        SELECT
+          h.id, h.file_location_id, d.id, h.sha256,
+          h.observed_byte_size, h.observed_mtime_ms, h.hashed_at_ms, h.is_active
+        FROM hash_observations h
+        JOIN discovery_observations d ON d.file_location_id = h.file_location_id AND d.is_current = 1;
+
+        DROP TABLE hash_observations;
+        ALTER TABLE hash_observations_new RENAME TO hash_observations;
+
+        CREATE INDEX idx_hash_obs_file ON hash_observations(file_location_id);
+        CREATE INDEX idx_hash_obs_disc ON hash_observations(discovery_observation_id);
+        CREATE INDEX idx_hash_obs_sha256 ON hash_observations(sha256);
+        CREATE UNIQUE INDEX idx_hash_obs_current ON hash_observations(discovery_observation_id) WHERE is_active = 1;
+      `)
+
+      // 4. Rebuild file_locations to remove obsolete inline observation columns and enforce original_path UNIQUE
+      db.exec(`
+        CREATE TABLE file_locations_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
           original_path TEXT NOT NULL UNIQUE,
@@ -47,46 +214,21 @@ const MIGRATIONS: readonly Migration[] = [
           updated_at_ms INTEGER NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_file_locations_source ON file_locations(source_id);
-        CREATE INDEX IF NOT EXISTS idx_file_locations_category ON file_locations(category);
-        CREATE INDEX IF NOT EXISTS idx_file_locations_normalized_path ON file_locations(normalized_path);
-      `)
+        INSERT INTO file_locations_new (
+          id, source_id, original_path, normalized_path, file_name, extension, category,
+          created_at_ms, updated_at_ms
+        )
+        SELECT
+          id, source_id, original_path, normalized_path, file_name, extension, category,
+          first_discovered_at_ms, last_seen_at_ms
+        FROM file_locations;
 
-      // 3. Immutable discovery observations (history preserved on content change)
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS discovery_observations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
-          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
-          filesystem_birthtime_ms INTEGER,
-          filesystem_mtime_ms INTEGER,
-          inferred_capture_time_ms INTEGER,
-          observed_at_ms INTEGER NOT NULL,
-          last_seen_at_ms INTEGER NOT NULL,
-          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
-        );
+        DROP TABLE file_locations;
+        ALTER TABLE file_locations_new RENAME TO file_locations;
 
-        CREATE INDEX IF NOT EXISTS idx_disc_obs_file ON discovery_observations(file_location_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_disc_obs_current ON discovery_observations(file_location_id) WHERE is_current = 1;
-      `)
-
-      // 4. SHA-256 hash observations tied directly to discovery observations
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS hash_observations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
-          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
-          sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
-          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
-          observed_mtime_ms INTEGER,
-          hashed_at_ms INTEGER NOT NULL,
-          is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_hash_obs_file ON hash_observations(file_location_id);
-        CREATE INDEX IF NOT EXISTS idx_hash_obs_disc ON hash_observations(discovery_observation_id);
-        CREATE INDEX IF NOT EXISTS idx_hash_obs_sha256 ON hash_observations(sha256);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_hash_obs_current ON hash_observations(discovery_observation_id) WHERE is_active = 1;
+        CREATE INDEX idx_file_locations_source ON file_locations(source_id);
+        CREATE INDEX idx_file_locations_category ON file_locations(category);
+        CREATE INDEX idx_file_locations_normalized_path ON file_locations(normalized_path);
       `)
     }
   }
@@ -152,6 +294,7 @@ export function runMigrations(db: DatabaseSync): void {
   )
 
   for (const migration of pendingMigrations) {
+    db.exec('PRAGMA foreign_keys = OFF;')
     db.exec('BEGIN TRANSACTION;')
     try {
       migration.up(db)
@@ -167,6 +310,8 @@ export function runMigrations(db: DatabaseSync): void {
         // Rollback attempt
       }
       throw new MigrationError(migration.version, (error as Error).message)
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON;')
     }
   }
 }

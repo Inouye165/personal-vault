@@ -10,6 +10,9 @@ import {
   CatalogDatabase,
   UnsupportedSchemaVersionError,
   DatabaseClosedError,
+  MigrationError,
+  CURRENT_SCHEMA_VERSION,
+  isObservationTimestampMatching,
   normalizePathForLookup
 } from '../../src/main/services/catalog'
 import type { DiscoveryCandidateInput } from '../../src/main/services/catalog'
@@ -67,10 +70,27 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
       // Calling close again is idempotent and does not throw
       expect(() => db!.close()).not.toThrow()
     })
+
+    it('keeps isClosed() false if underlying db.close() throws', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const rawDb = db.getRawDatabaseForTesting()
+      const originalClose = rawDb.close.bind(rawDb)
+      rawDb.close = () => {
+        throw new Error('Forced close failure')
+      }
+
+      expect(() => db!.close()).toThrow('Forced close failure')
+      expect(db.isClosed()).toBe(false)
+
+      // Restore and close properly
+      rawDb.close = originalClose
+      db.close()
+      expect(db.isClosed()).toBe(true)
+    })
   })
 
   describe('Schema Migrations and Reopening Durability', () => {
-    it('applies initial migration version 1 and records migration history', () => {
+    it('records migrations up to current version', () => {
       db = CatalogDatabase.open({ catalogPath })
       const rawDb = new DatabaseSync(catalogPath)
       try {
@@ -81,12 +101,252 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
           .all() as Array<{ version: number; name: string; applied_at_ms: number }>
 
         expect(migrations.length).toBeGreaterThanOrEqual(1)
-        expect(migrations[0]?.version).toBe(1)
-        expect(migrations[0]?.name).toBe('initial_catalog_schema')
-        expect(typeof migrations[0]?.applied_at_ms).toBe('number')
+        expect(migrations[migrations.length - 1]?.version).toBe(CURRENT_SCHEMA_VERSION)
       } finally {
         rawDb.close()
       }
+    })
+
+    it('migrates original baa82e6 schema (v1 without discovery_observations) to v2 preserving all data and active hashes', () => {
+      // 1. Manually construct a database matching the exact baa82e6 schema layout
+      const rawDb = new DatabaseSync(catalogPath)
+      try {
+        rawDb.exec(`
+          CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            applied_at_ms INTEGER NOT NULL
+          );
+          INSERT INTO schema_migrations (version, name, applied_at_ms)
+          VALUES (1, 'initial_catalog_schema', 1700000000000);
+
+          CREATE TABLE sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path TEXT NOT NULL,
+            normalized_root_path TEXT NOT NULL UNIQUE,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+          );
+
+          CREATE TABLE file_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            original_path TEXT NOT NULL,
+            normalized_path TEXT NOT NULL UNIQUE,
+            file_name TEXT NOT NULL,
+            extension TEXT NOT NULL,
+            category TEXT NOT NULL CHECK (category IN ('photo', 'document')),
+            byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+            filesystem_birthtime_ms INTEGER,
+            filesystem_mtime_ms INTEGER,
+            inferred_capture_time_ms INTEGER,
+            first_discovered_at_ms INTEGER NOT NULL,
+            last_seen_at_ms INTEGER NOT NULL
+          );
+
+          CREATE TABLE hash_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+            sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+            observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+            observed_mtime_ms INTEGER,
+            hashed_at_ms INTEGER NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+          );
+
+          INSERT INTO sources (id, root_path, normalized_root_path, created_at_ms, updated_at_ms)
+          VALUES (1, 'D:\\Photos', 'd:\\photos', 1700000000000, 1700000000000);
+
+          INSERT INTO file_locations (
+            id, source_id, original_path, normalized_path, file_name, extension, category,
+            byte_size, filesystem_birthtime_ms, filesystem_mtime_ms, inferred_capture_time_ms,
+            first_discovered_at_ms, last_seen_at_ms
+          ) VALUES (
+            1, 1, 'D:\\Photos\\lake.jpg', 'd:\\photos\\lake.jpg', 'lake.jpg', 'jpg', 'photo',
+            5000, 1690000000000, 1690000500000, NULL, 1700000010000, 1700000020000
+          );
+
+          INSERT INTO hash_observations (
+            id, file_location_id, sha256, observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+          ) VALUES (
+            1, 1, '${'f'.repeat(64)}', 5000, 1690000500000, 1700000030000, 1
+          );
+        `)
+      } finally {
+        rawDb.close()
+      }
+
+      // 2. Open catalog using CatalogDatabase: must run migration to v2 cleanly
+      db = CatalogDatabase.open({ catalogPath })
+
+      // 3. Verify migration table has version 2
+      const checkDb = new DatabaseSync(catalogPath)
+      try {
+        const row = checkDb
+          .prepare('SELECT MAX(version) as max_version FROM schema_migrations')
+          .get() as { max_version: number }
+        expect(row.max_version).toBe(2)
+      } finally {
+        checkDb.close()
+      }
+
+      // 4. Verify queryFileLocations returns the file with preserved facts and active hash
+      const files = db.queryFileLocations()
+      expect(files.items).toHaveLength(1)
+      const file = files.items[0]!
+      expect(file.originalPath).toBe('D:\\Photos\\lake.jpg')
+      expect(file.byteSize).toBe(5000)
+      expect(file.filesystemBirthtimeMs).toBe(1690000000000)
+      expect(file.filesystemMtimeMs).toBe(1690000500000)
+      expect(file.activeHash).toBe('f'.repeat(64))
+
+      // 5. Verify discovery observation was created and linked to the active hash
+      const discHistory = db.getDiscoveryObservationsForFile(file.id)
+      expect(discHistory.items).toHaveLength(1)
+      expect(discHistory.items[0]?.isCurrent).toBe(true)
+      expect(discHistory.items[0]?.byteSize).toBe(5000)
+
+      const hashHistory = db.getHashObservationsForFile(file.id)
+      expect(hashHistory.items).toHaveLength(1)
+      expect(hashHistory.items[0]?.isActive).toBe(true)
+      expect(hashHistory.items[0]?.discoveryObservationId).toBe(discHistory.items[0]!.id)
+
+      // 6. Verify durability across reopen
+      db.close()
+      db = CatalogDatabase.open({ catalogPath })
+      const reopened = db.getFileLocationByPath('D:\\Photos\\lake.jpg')
+      expect(reopened?.activeHash).toBe('f'.repeat(64))
+    })
+
+    it('migrates revised 25a1b4f schema (v1 with discovery_observations) to v2 idempotently', () => {
+      // 1. Manually construct a database matching the 25a1b4f layout
+      const rawDb = new DatabaseSync(catalogPath)
+      try {
+        rawDb.exec(`
+          CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            applied_at_ms INTEGER NOT NULL
+          );
+          INSERT INTO schema_migrations (version, name, applied_at_ms)
+          VALUES (1, 'initial_catalog_schema', 1700000000000);
+
+          CREATE TABLE sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path TEXT NOT NULL,
+            normalized_root_path TEXT NOT NULL UNIQUE,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+          );
+
+          CREATE TABLE file_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            original_path TEXT NOT NULL UNIQUE,
+            normalized_path TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            extension TEXT NOT NULL,
+            category TEXT NOT NULL CHECK (category IN ('photo', 'document')),
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+          );
+
+          CREATE TABLE discovery_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+            byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+            filesystem_birthtime_ms INTEGER,
+            filesystem_mtime_ms INTEGER,
+            inferred_capture_time_ms INTEGER,
+            observed_at_ms INTEGER NOT NULL,
+            last_seen_at_ms INTEGER NOT NULL,
+            is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+          );
+          CREATE UNIQUE INDEX idx_disc_obs_current ON discovery_observations(file_location_id) WHERE is_current = 1;
+
+          CREATE TABLE hash_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+            discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+            sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+            observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+            observed_mtime_ms INTEGER,
+            hashed_at_ms INTEGER NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+          );
+          CREATE UNIQUE INDEX idx_hash_obs_current ON hash_observations(discovery_observation_id) WHERE is_active = 1;
+
+          INSERT INTO sources (id, root_path, normalized_root_path, created_at_ms, updated_at_ms)
+          VALUES (1, 'D:\\Docs', 'd:\\docs', 1700000000000, 1700000000000);
+
+          INSERT INTO file_locations (
+            id, source_id, original_path, normalized_path, file_name, extension, category,
+            created_at_ms, updated_at_ms
+          ) VALUES (
+            1, 1, 'D:\\Docs\\manual.pdf', 'd:\\docs\\manual.pdf', 'manual.pdf', 'pdf', 'document',
+            1700000010000, 1700000020000
+          );
+
+          INSERT INTO discovery_observations (
+            id, file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+            inferred_capture_time_ms, observed_at_ms, last_seen_at_ms, is_current
+          ) VALUES (
+            1, 1, 1234, 1690000000000, 1690000100000, NULL, 1700000010000, 1700000020000, 1
+          );
+
+          INSERT INTO hash_observations (
+            id, file_location_id, discovery_observation_id, sha256,
+            observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+          ) VALUES (
+            1, 1, 1, '${'e'.repeat(64)}', 1234, 1690000100000, 1700000030000, 1
+          );
+        `)
+      } finally {
+        rawDb.close()
+      }
+
+      // 2. Open catalog
+      db = CatalogDatabase.open({ catalogPath })
+
+      // 3. Verify max version is 2
+      const checkDb = new DatabaseSync(catalogPath)
+      try {
+        const row = checkDb
+          .prepare('SELECT MAX(version) as max_version FROM schema_migrations')
+          .get() as { max_version: number }
+        expect(row.max_version).toBe(2)
+      } finally {
+        checkDb.close()
+      }
+
+      const files = db.queryFileLocations()
+      expect(files.items).toHaveLength(1)
+      expect(files.items[0]?.activeHash).toBe('e'.repeat(64))
+    })
+
+    it('rejects corrupted or unrecognized version 1 schema layout with MigrationError', () => {
+      const rawDb = new DatabaseSync(catalogPath)
+      try {
+        rawDb.exec(`
+          CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            applied_at_ms INTEGER NOT NULL
+          );
+          INSERT INTO schema_migrations (version, name, applied_at_ms)
+          VALUES (1, 'initial_catalog_schema', 1700000000000);
+
+          -- Unexpected layout: corrupt table with completely wrong columns
+          CREATE TABLE file_locations (
+            id INTEGER PRIMARY KEY,
+            random_column TEXT
+          );
+        `)
+      } finally {
+        rawDb.close()
+      }
+
+      expect(() => CatalogDatabase.open({ catalogPath })).toThrow(MigrationError)
     })
 
     it('safely reopens an existing catalog without re-running migrations or losing data', () => {
@@ -817,6 +1077,241 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
           hashedAtMs: Date.now()
         })
       }).toThrow(/mismatch/i)
+    })
+
+    it('enforces Stage 2B precision contract for timestamp comparison', () => {
+      // Direct unit tests for isObservationTimestampMatching
+      expect(isObservationTimestampMatching(1000.1, 1000.8)).toBe(false)
+      expect(isObservationTimestampMatching(1000.1, 1000.1)).toBe(true)
+      expect(isObservationTimestampMatching(1000.4, 1000)).toBe(true)
+      expect(isObservationTimestampMatching(1001.0, 1000)).toBe(false)
+      expect(isObservationTimestampMatching(null, 1000)).toBe(false)
+      expect(isObservationTimestampMatching(1000, null)).toBe(false)
+      expect(isObservationTimestampMatching(null, null)).toBe(true)
+
+      // Integration test with CatalogDatabase:
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\fractional.jpg'
+
+      // Discovery recorded fractional mtime 1000.1
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'fractional.jpg',
+          extension: 'jpg',
+          byteSize: 500,
+          birthtimeMs: null,
+          mtimeMs: 1000.1,
+          discoveredAtMs: 2000,
+          category: 'photo'
+        }
+      ])
+
+      // Attempt to record hash observation with differing fractional mtime 1000.8 must fail!
+      expect(() => {
+        db!.recordHashObservation({
+          originalPath,
+          sha256: 'b'.repeat(64),
+          observedByteSize: 500,
+          observedMtimeMs: 1000.8,
+          hashedAtMs: 2500
+        })
+      }).toThrow(/mtime mismatch/i)
+
+      // Record hash observation with exact fractional mtime 1000.1 must succeed!
+      expect(() => {
+        db!.recordHashObservation({
+          originalPath,
+          sha256: 'c'.repeat(64),
+          observedByteSize: 500,
+          observedMtimeMs: 1000.1,
+          hashedAtMs: 2600
+        })
+      }).not.toThrow()
+
+      expect(db.getFileLocationByPath(originalPath)?.activeHash).toBe('c'.repeat(64))
+    })
+
+    it('detects creation timestamp changes (birthtimeMs) and preserves both observations in history', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\birthtime.jpg'
+      const hash = 'a'.repeat(64)
+
+      // Initial discovery with birthtimeMs: 10, mtime: 100, size: 50
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'birthtime.jpg',
+          extension: 'jpg',
+          byteSize: 50,
+          birthtimeMs: 10,
+          mtimeMs: 100,
+          discoveredAtMs: 1000,
+          category: 'photo'
+        }
+      ])
+
+      db.recordHashObservation({
+        originalPath,
+        sha256: hash,
+        observedByteSize: 50,
+        observedMtimeMs: 100,
+        hashedAtMs: 1050
+      })
+
+      const initialFile = db.getFileLocationByPath(originalPath)
+      expect(initialFile?.activeHash).toBe(hash)
+      expect(initialFile?.filesystemBirthtimeMs).toBe(10)
+
+      // Subsequent discovery: birthtime changed from 10 to 20, size and mtime unchanged!
+      const updateRes = db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'birthtime.jpg',
+          extension: 'jpg',
+          byteSize: 50,
+          birthtimeMs: 20, // Changed!
+          mtimeMs: 100,
+          discoveredAtMs: 2000,
+          category: 'photo'
+        }
+      ])
+
+      expect(updateRes.updatedCount).toBe(1)
+      expect(updateRes.invalidatedHashCount).toBe(1)
+
+      const updatedFile = db.getFileLocationByPath(originalPath)
+      expect(updatedFile?.filesystemBirthtimeMs).toBe(20)
+      expect(updatedFile?.activeHash).toBeNull() // active hash invalidated!
+
+      // Verify both observations are preserved in history
+      const history = db.getDiscoveryObservationsForFile(updatedFile!.id)
+      expect(history.totalCount).toBe(2)
+      expect(history.items[0]?.filesystemBirthtimeMs).toBe(20)
+      expect(history.items[0]?.isCurrent).toBe(true)
+      expect(history.items[1]?.filesystemBirthtimeMs).toBe(10)
+      expect(history.items[1]?.isCurrent).toBe(false)
+    })
+
+    it('detects birthtimeMs transitions between null and known values', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\birthtime-null.jpg'
+
+      // Initial discovery with birthtimeMs: null
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'birthtime-null.jpg',
+          extension: 'jpg',
+          byteSize: 50,
+          birthtimeMs: null,
+          mtimeMs: 100,
+          discoveredAtMs: 1000,
+          category: 'photo'
+        }
+      ])
+
+      // Transition from null to 50
+      const toValueRes = db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'birthtime-null.jpg',
+          extension: 'jpg',
+          byteSize: 50,
+          birthtimeMs: 50,
+          mtimeMs: 100,
+          discoveredAtMs: 2000,
+          category: 'photo'
+        }
+      ])
+      expect(toValueRes.updatedCount).toBe(1)
+
+      // Transition from 50 back to null
+      const toNullRes = db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'birthtime-null.jpg',
+          extension: 'jpg',
+          byteSize: 50,
+          birthtimeMs: null,
+          mtimeMs: 100,
+          discoveredAtMs: 3000,
+          category: 'photo'
+        }
+      ])
+      expect(toNullRes.updatedCount).toBe(1)
+
+      // Idempotent retry: same facts again with birthtimeMs: null
+      const retryRes = db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'birthtime-null.jpg',
+          extension: 'jpg',
+          byteSize: 50,
+          birthtimeMs: null,
+          mtimeMs: 100,
+          discoveredAtMs: 4000,
+          category: 'photo'
+        }
+      ])
+      expect(retryRes.unchangedCount).toBe(1)
+      expect(retryRes.updatedCount).toBe(0)
+
+      const file = db.getFileLocationByPath(originalPath)!
+      const history = db.getDiscoveryObservationsForFile(file.id)
+      expect(history.totalCount).toBe(3)
+    })
+
+    it('validates discovery candidate inputs strictly', () => {
+      db = CatalogDatabase.open({ catalogPath })
+
+      // Negative size
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath: 'D:\\Photos\\bad1.jpg',
+            fileName: 'bad1.jpg',
+            extension: 'jpg',
+            byteSize: -1,
+            birthtimeMs: null,
+            mtimeMs: 1000,
+            discoveredAtMs: 1000,
+            category: 'photo'
+          }
+        ])
+      }).toThrow(RangeError)
+
+      // Non-finite mtime
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath: 'D:\\Photos\\bad2.jpg',
+            fileName: 'bad2.jpg',
+            extension: 'jpg',
+            byteSize: 100,
+            birthtimeMs: null,
+            mtimeMs: NaN,
+            discoveredAtMs: 1000,
+            category: 'photo'
+          }
+        ])
+      }).toThrow(RangeError)
+
+      // Non-finite birthtime
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath: 'D:\\Photos\\bad3.jpg',
+            fileName: 'bad3.jpg',
+            extension: 'jpg',
+            byteSize: 100,
+            birthtimeMs: Infinity,
+            mtimeMs: 1000,
+            discoveredAtMs: 1000,
+            category: 'photo'
+          }
+        ])
+      }).toThrow(RangeError)
     })
   })
 
