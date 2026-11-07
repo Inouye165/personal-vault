@@ -523,8 +523,18 @@ input:focus-visible {
   background-color: #f59f00;
 }
 
+.scan-progress-fill.completed-with-errors {
+  background-color: #f59f00;
+}
+
 .scan-progress-fill.failed {
   background-color: #c92a2a;
+}
+
+.status-badge.status-warning {
+  background-color: rgba(245, 159, 0, 0.15);
+  color: #fcc419;
+  border: 1px solid rgba(245, 159, 0, 0.3);
 }
 
 .scan-stats-grid {

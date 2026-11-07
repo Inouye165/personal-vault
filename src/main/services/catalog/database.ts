@@ -38,6 +38,7 @@ import type {
   SourceRecord,
   UnhashedCountResult,
   UnhashedFileRecord,
+  UnhashedFilesOptions,
   UpdateScanJobProgressInput
 } from './types'
 
@@ -1348,7 +1349,7 @@ export class CatalogDatabase {
 
   public getUnhashedFilesForRoots(
     roots: readonly string[],
-    options?: PaginationOptions
+    options?: UnhashedFilesOptions
   ): readonly UnhashedFileRecord[] {
     this.assertOpen()
     if (!Array.isArray(roots) || roots.length === 0) return []
@@ -1358,8 +1359,15 @@ export class CatalogDatabase {
       options?.limit !== undefined
         ? validateSafeInteger(options.limit, 'limit', 1, MAX_PAGE_LIMIT)
         : 1000
+
+    const hasAfterId = options?.afterId !== undefined
+    const afterId = hasAfterId ? validateSafeInteger(options!.afterId!, 'afterId', 0) : 0
+    const whereAfterId = hasAfterId ? 'AND fl.id > ?' : ''
     const offset =
-      options?.offset !== undefined ? validateSafeInteger(options.offset, 'offset', 0) : 0
+      !hasAfterId && options?.offset !== undefined
+        ? validateSafeInteger(options.offset, 'offset', 0)
+        : 0
+    const offsetClause = hasAfterId ? '' : 'OFFSET ?'
 
     const stmt = this.db.prepare(`
       SELECT
@@ -1375,10 +1383,14 @@ export class CatalogDatabase {
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
       WHERE s.normalized_root_path IN (${placeholders})
         AND h.id IS NULL
+        ${whereAfterId}
       ORDER BY fl.id ASC
-      LIMIT ? OFFSET ?;
+      LIMIT ? ${offsetClause};
     `)
-    const rows = stmt.all(...normalizedRoots, limit, offset) as Array<{
+    const params = hasAfterId
+      ? [...normalizedRoots, afterId, limit]
+      : [...normalizedRoots, limit, offset]
+    const rows = stmt.all(...params) as Array<{
       file_location_id: number
       original_path: string
       discovery_observation_id: number

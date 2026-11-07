@@ -191,6 +191,10 @@ export interface UnhashedCountResult {
   readonly totalBytes: number
 }
 
+export interface UnhashedFilesOptions extends PaginationOptions {
+  readonly afterId?: number
+}
+
 export interface DuplicateGroupOptions extends PaginationOptions {
   readonly maxLocationsPerGroup?: number
 }

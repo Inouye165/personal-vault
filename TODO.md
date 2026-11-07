@@ -32,7 +32,7 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 Status: **complete for Stage 2D — awaiting independent review; Stage 2 complete pending acceptance** (see HANDOFF.md).
 
-Verification: implementation host **239 passed, 0 skipped** across all 11 test files, with strict typecheck, lint, formatting, production build, real Electron smoke checks (built, unpacked), Electron SQLite repository verification (`verify:sqlite`), unpacked ASAR package verification (`verify:sqlite:unpacked`), and Electron scan workflow verification (`verify:scan`) passed.
+Verification: implementation host **251 passed, 0 skipped** across all 11 test files, with strict typecheck, lint, formatting, production build, real Electron smoke checks (built, unpacked), Electron SQLite repository verification (`verify:sqlite`), unpacked ASAR package verification (`verify:sqlite:unpacked`), and Electron scan workflow verification in built and unpacked modes (`verify:scan`, `verify:scan:unpacked`) passed.
 
 - [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
 - [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, validated resource limits (`resolveDiscoveryLimits` enforcing positive safe integers for `maxPendingDirectories`, `maxVisitedDirectories`, and collector-only `maxCollectedRecords`), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.

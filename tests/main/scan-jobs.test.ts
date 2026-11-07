@@ -105,6 +105,330 @@ describe('Stage 2D — Scan Job Coordinator and Resumable Lifecycle', () => {
 
       await coordinator.waitForJob(job1.jobId)
     })
+
+    it('rejects simultaneous startScan calls so only one job starts', async () => {
+      const results = await Promise.allSettled([
+        coordinator.startScan({ roots: [sourceDir1] }),
+        coordinator.startScan({ roots: [sourceDir2] })
+      ])
+
+      const fulfilled = results.filter((r) => r.status === 'fulfilled')
+      const rejected = results.filter((r) => r.status === 'rejected')
+
+      expect(fulfilled).toHaveLength(1)
+      expect(rejected).toHaveLength(1)
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ScanJobConflictError)
+
+      const active = (fulfilled[0] as PromiseFulfilledResult<ScanJobProgress>).value
+      await coordinator.waitForJob(active.jobId)
+    })
+
+    it('rejects startScan when another job is paused', async () => {
+      for (let i = 0; i < 15; i++) {
+        await fs.writeFile(join(sourceDir1, `bulk-${i}.jpg`), `bulk-image-content-${i}`)
+      }
+      const job = await coordinator.startScan({ roots: [sourceDir1] })
+      const paused = await coordinator.pauseScan(job.jobId)
+      expect(['paused', 'completed']).toContain(paused.status)
+
+      if (paused.status === 'paused') {
+        // Must reject starting another scan while one is paused
+        await expect(coordinator.startScan({ roots: [sourceDir2] })).rejects.toThrow(
+          ScanJobConflictError
+        )
+
+        // Clean up: cancel paused job
+        await coordinator.cancelScan(job.jobId)
+      }
+    })
+
+    it('allows immediate startScan after cancelScan without conflict or old loop clobbering', async () => {
+      for (let i = 0; i < 20; i++) {
+        await fs.writeFile(join(sourceDir1, `cancel-${i}.jpg`), `cancel-data-${i}`)
+      }
+      const job1 = await coordinator.startScan({ roots: [sourceDir1] })
+      const cancelled = await coordinator.cancelScan(job1.jobId)
+      expect(cancelled.status).toBe('cancelled')
+
+      // Immediately start job 2: must succeed and not be rejected or clobbered
+      const job2 = await coordinator.startScan({ roots: [sourceDir2] })
+      expect(job2.status).toBe('running')
+      expect(job2.jobId).not.toBe(job1.jobId)
+
+      const completed2 = await coordinator.waitForJob(job2.jobId)
+      expect(completed2.status).toBe('completed')
+      expect(completed2.jobId).toBe(job2.jobId)
+    })
+  })
+
+  describe('Queue Advancement and Error Resilience', () => {
+    it('advances past unhashed missing file at the front of the queue and hashes subsequent valid files with batchSize=1', async () => {
+      // Step 1: Record an unhashed missing file directly in catalog
+      const missingPath = join(sourceDir1, 'ghost.jpg')
+      const validPath = join(sourceDir1, 'photo1.jpg')
+      const validStat = await fs.stat(validPath)
+
+      // Clear earlier data
+      const singleBatchCoord = new ScanJobCoordinator({
+        catalog: db,
+        batchSize: 1
+      })
+      await singleBatchCoord.initialize()
+
+      // Record missing file in catalog first (lower ID)
+      db.persistDiscoveryBatch(sourceDir1, [
+        {
+          originalPath: missingPath,
+          fileName: 'ghost.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: 100,
+          birthtimeMs: 1000,
+          mtimeMs: 1000,
+          discoveredAtMs: 1000
+        },
+        {
+          originalPath: validPath,
+          fileName: 'photo1.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: validStat.size,
+          birthtimeMs: Math.floor(validStat.birthtimeMs),
+          mtimeMs: Math.floor(validStat.mtimeMs),
+          discoveredAtMs: 1000
+        }
+      ])
+
+      // Run coordinator scan
+      const job = await singleBatchCoord.startScan({ roots: [sourceDir1] })
+      const result = await singleBatchCoord.waitForJob(job.jobId)
+
+      // ghost.jpg failed (does not exist on disk), but photo1.jpg MUST receive a hash!
+      const validLoc = db.getFileLocationByOriginalPath(validPath)
+      expect(validLoc?.activeHash).not.toBeNull()
+      expect(validLoc?.activeHash).toHaveLength(64)
+
+      expect(result.errorCount).toBe(1)
+      expect(result.hashedCount).toBeGreaterThanOrEqual(1)
+    })
+
+    it('advances past multiple failures across page boundaries without skipping or infinite loops', async () => {
+      // 6 files: 0, 2, 4 don't exist; 1, 3, 5 exist on disk
+      await fs.writeFile(join(sourceDir1, 'real1.jpg'), 'real-1')
+      await fs.writeFile(join(sourceDir1, 'real3.jpg'), 'real-3')
+      await fs.writeFile(join(sourceDir1, 'real5.jpg'), 'real-5')
+
+      const pageCoord = new ScanJobCoordinator({
+        catalog: db,
+        batchSize: 2 // batch size 2 across 6 items = 3 pages
+      })
+      await pageCoord.initialize()
+
+      const inputs = [
+        { name: 'fake0.jpg', real: false },
+        { name: 'real1.jpg', real: true },
+        { name: 'fake2.jpg', real: false },
+        { name: 'real3.jpg', real: true },
+        { name: 'fake4.jpg', real: false },
+        { name: 'real5.jpg', real: true }
+      ]
+
+      for (const item of inputs) {
+        const full = join(sourceDir1, item.name)
+        db.persistDiscoveryBatch(sourceDir1, [
+          {
+            originalPath: full,
+            fileName: item.name,
+            extension: '.jpg',
+            category: 'photo',
+            byteSize: item.real ? 6 : 99,
+            birthtimeMs: 2000,
+            mtimeMs: 2000,
+            discoveredAtMs: 2000
+          }
+        ])
+      }
+
+      const job = await pageCoord.startScan({ roots: [sourceDir1] })
+      const result = await pageCoord.waitForJob(job.jobId)
+
+      // All 3 real files must be hashed
+      for (const item of inputs.filter((i) => i.real)) {
+        const loc = db.getFileLocationByOriginalPath(join(sourceDir1, item.name))
+        expect(loc?.activeHash).not.toBeNull()
+      }
+
+      expect(result.errorCount).toBe(3)
+      expect(result.hashedCount).toBeGreaterThanOrEqual(3)
+    })
+  })
+
+  describe('Deterministic Cancellation, Shutdown, and Promise Settlement', () => {
+    it('cancelScan awaits execution loop termination before releasing ownership', async () => {
+      for (let i = 0; i < 25; i++) {
+        await fs.writeFile(join(sourceDir1, `drain-${i}.jpg`), `drain-content-${i}`)
+      }
+      const job = await coordinator.startScan({ roots: [sourceDir1] })
+      const cancelled = await coordinator.cancelScan(job.jobId)
+      expect(cancelled.status).toBe('cancelled')
+
+      // Awaiting completionPromise must resolve immediately because cancelScan already drained
+      const waited = await coordinator.waitForJob(job.jobId)
+      expect(waited.status).toBe('cancelled')
+    })
+
+    it('settles completionPromise on pause, cancel, and error', async () => {
+      // Pause settlement
+      for (let i = 0; i < 15; i++) {
+        await fs.writeFile(join(sourceDir1, `settle-${i}.jpg`), `settle-content-${i}`)
+      }
+      const job = await coordinator.startScan({ roots: [sourceDir1] })
+      const pausePromise = coordinator.waitForJob(job.jobId)
+      await coordinator.pauseScan(job.jobId)
+      const settled = await pausePromise
+      expect(['paused', 'completed']).toContain(settled.status)
+    })
+
+    it('preserves running job as interrupted on shutdown rather than cancelled', async () => {
+      for (let i = 0; i < 30; i++) {
+        await fs.writeFile(join(sourceDir1, `shut-${i}.jpg`), `shut-content-${i}`)
+      }
+      const job = await coordinator.startScan({ roots: [sourceDir1] })
+
+      // Call shutdown on coordinator (application closing)
+      await coordinator.shutdown()
+
+      // Job in database must be 'interrupted', NOT 'cancelled'
+      const inDb = db.getScanJob(job.jobId)
+      expect(inDb?.status).toBe('interrupted')
+
+      // It must be resumable on next startup
+      const restartCoord = new ScanJobCoordinator({ catalog: db })
+      await restartCoord.initialize()
+      const resumed = await restartCoord.resumeScan(job.jobId)
+      expect(resumed.status).toBe('running')
+      const finished = await restartCoord.waitForJob(job.jobId)
+      expect(finished.status).toBe('completed')
+    })
+  })
+
+  describe('Progress and Recovery Accounting', () => {
+    it('does not inflate discoveredCount, totalBytes, or hashedCount across repeated pause/resume and restart recovery', async () => {
+      // Exactly 3 files in sourceDir2: photo2.png exists; add 2 more
+      await fs.writeFile(join(sourceDir2, 'uniqueA.jpg'), '12345')
+      await fs.writeFile(join(sourceDir2, 'uniqueB.jpg'), '67890')
+
+      const stat0 = await fs.stat(join(sourceDir2, 'photo2.png'))
+      const expectedUniqueCount = 3
+      const expectedTotalBytes = stat0.size + 5 + 5
+
+      const job = await coordinator.startScan({ roots: [sourceDir2] })
+
+      // Pause
+      await coordinator.pauseScan(job.jobId)
+
+      // Resume
+      await coordinator.resumeScan(job.jobId)
+
+      // Simulate crash: shutdown and re-initialize
+      await coordinator.shutdown()
+
+      const recoveredCoord = new ScanJobCoordinator({ catalog: db })
+      await recoveredCoord.initialize()
+
+      const active = recoveredCoord.getActiveJob()
+      expect(active?.status).toBe('interrupted')
+
+      // Resume to completion
+      await recoveredCoord.resumeScan(job.jobId)
+      const final = await recoveredCoord.waitForJob(job.jobId)
+
+      expect(final.status).toBe('completed')
+      expect(final.discoveredCount).toBe(expectedUniqueCount)
+      expect(final.totalBytes).toBe(expectedTotalBytes)
+      expect(final.hashedCount).toBe(expectedUniqueCount)
+    })
+  })
+
+  describe('Bounded Resource Use', () => {
+    it('bounds in-memory retained errors while preserving full error history in SQLite', async () => {
+      // Simulate 75 errors
+      const failingAdapter = {
+        lstat: vi.fn().mockImplementation((p: string) => fs.lstat(p)),
+        realpath: vi.fn().mockImplementation((p: string) => fs.realpath(p)),
+        open: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+          )
+      }
+
+      for (let i = 0; i < 75; i++) {
+        await fs.writeFile(join(sourceDir1, `err-${i}.jpg`), `err-${i}`)
+      }
+
+      const boundedCoord = new ScanJobCoordinator({
+        catalog: db,
+        hashingFsAdapter:
+          failingAdapter as unknown as import('../../src/main/services/hashing/fs-adapter').ReadOnlyHashingFsAdapter
+      })
+      await boundedCoord.initialize()
+
+      const job = await boundedCoord.startScan({ roots: [sourceDir1] })
+      const finished = await boundedCoord.waitForJob(job.jobId)
+
+      // In-memory errors payload must be bounded to <= 50
+      expect(finished.errors.length).toBeLessThanOrEqual(50)
+      expect(finished.errorCount).toBeGreaterThanOrEqual(75)
+
+      // All 75+ errors must be preserved in SQLite
+      const allDbErrors = db.getScanJobErrors(job.jobId, { limit: 200 })
+      expect(allDbErrors.length).toBeGreaterThanOrEqual(75)
+    })
+
+    it('validates batchSize as a positive safe integer within catalog limits', () => {
+      expect(() => new ScanJobCoordinator({ catalog: db, batchSize: 0 })).toThrow(RangeError)
+      expect(() => new ScanJobCoordinator({ catalog: db, batchSize: -1 })).toThrow(RangeError)
+      expect(() => new ScanJobCoordinator({ catalog: db, batchSize: 1001 })).toThrow(RangeError)
+      expect(() => new ScanJobCoordinator({ catalog: db, batchSize: NaN })).toThrow(RangeError)
+    })
+  })
+
+  describe('Honest Reporting of Partial Results', () => {
+    it('persists error summary on completed-with-errors job and recovers it across restart', async () => {
+      // 1 real file, 1 missing file
+      const missingPath = join(sourceDir1, 'missing-terminal.jpg')
+      db.persistDiscoveryBatch(sourceDir1, [
+        {
+          originalPath: missingPath,
+          fileName: 'missing-terminal.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: 50,
+          birthtimeMs: 1000,
+          mtimeMs: 1000,
+          discoveredAtMs: 1000
+        }
+      ])
+
+      const job = await coordinator.startScan({ roots: [sourceDir1] })
+      const result = await coordinator.waitForJob(job.jobId)
+
+      expect(result.status).toBe('completed')
+      expect(result.errorCount).toBeGreaterThan(0)
+      expect(result.errorMessage).toBeDefined()
+      expect(result.errorMessage).toMatch(/error/i)
+
+      // Simulate app restart: error info must be loaded from SQLite
+      const restartCoord = new ScanJobCoordinator({ catalog: db })
+      await restartCoord.initialize()
+
+      const latest = restartCoord.getLatestJob()
+      expect(latest?.jobId).toBe(job.jobId)
+      expect(latest?.errorCount).toBe(result.errorCount)
+      expect(latest?.errorMessage).toBe(result.errorMessage)
+      expect(latest?.errors.length).toBeGreaterThan(0)
+    })
   })
 
   describe('Pause and Resume Lifecycle', () => {

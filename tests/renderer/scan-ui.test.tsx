@@ -197,5 +197,12 @@ describe('Stage 2D — Scan Job UI Integration', () => {
 
     expect(screen.getByText(/permission_denied/i)).toBeInTheDocument()
     expect(screen.getByText(/locked\.jpg/)).toBeInTheDocument()
+
+    // Must report 90%, NOT force 100%
+    const progressbar = screen.getByRole('progressbar')
+    expect(progressbar).toHaveAttribute('aria-valuenow', '90')
+
+    // Must display honest status text reflecting errors, not a clean success
+    expect(screen.getAllByText(/completed with errors/i).length).toBeGreaterThanOrEqual(1)
   })
 })

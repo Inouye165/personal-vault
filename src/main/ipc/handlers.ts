@@ -6,6 +6,7 @@ import {
   JobActionResponseSchema,
   JobIdRequestSchema,
   NavigationTabSchema,
+  ScanJobProgressSchema,
   SelectRootsResponseSchema,
   StartScanRequestSchema,
   VaultStatusSchema,
@@ -103,75 +104,91 @@ export function registerIpcHandlers({
     return result.data
   })
 
+  const formatActionResponse = (payload: {
+    success: boolean
+    job?: unknown
+    error?: string
+  }): JobActionResponse => {
+    const res = validatePayload(JobActionResponseSchema, payload)
+    if (!res.success) {
+      throw new Error(`Invalid JobActionResponse payload in main: ${res.error}`)
+    }
+    return res.data
+  }
+
   handle(IPC_CHANNELS.SCAN_START_JOB, async (raw: unknown): Promise<JobActionResponse> => {
     const parsed = validatePayload(StartScanRequestSchema, raw)
     if (!parsed.success) {
-      return { success: false, error: parsed.error }
+      return formatActionResponse({ success: false, error: parsed.error })
     }
     if (!coordinator) {
-      return { success: false, error: 'ScanJobCoordinator not available' }
+      return formatActionResponse({ success: false, error: 'ScanJobCoordinator not available' })
     }
     try {
       const job = await coordinator.startScan(parsed.data)
-      const res = validatePayload(JobActionResponseSchema, { success: true, job })
-      if (!res.success) throw new Error(res.error)
-      return res.data
+      return formatActionResponse({ success: true, job })
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      return formatActionResponse({
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      })
     }
   })
 
   handle(IPC_CHANNELS.SCAN_PAUSE_JOB, async (raw: unknown): Promise<JobActionResponse> => {
     const parsed = validatePayload(JobIdRequestSchema, raw)
     if (!parsed.success) {
-      return { success: false, error: parsed.error }
+      return formatActionResponse({ success: false, error: parsed.error })
     }
     if (!coordinator) {
-      return { success: false, error: 'ScanJobCoordinator not available' }
+      return formatActionResponse({ success: false, error: 'ScanJobCoordinator not available' })
     }
     try {
       const job = await coordinator.pauseScan(parsed.data.jobId)
-      const res = validatePayload(JobActionResponseSchema, { success: true, job })
-      if (!res.success) throw new Error(res.error)
-      return res.data
+      return formatActionResponse({ success: true, job })
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      return formatActionResponse({
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      })
     }
   })
 
   handle(IPC_CHANNELS.SCAN_RESUME_JOB, async (raw: unknown): Promise<JobActionResponse> => {
     const parsed = validatePayload(JobIdRequestSchema, raw)
     if (!parsed.success) {
-      return { success: false, error: parsed.error }
+      return formatActionResponse({ success: false, error: parsed.error })
     }
     if (!coordinator) {
-      return { success: false, error: 'ScanJobCoordinator not available' }
+      return formatActionResponse({ success: false, error: 'ScanJobCoordinator not available' })
     }
     try {
       const job = await coordinator.resumeScan(parsed.data.jobId)
-      const res = validatePayload(JobActionResponseSchema, { success: true, job })
-      if (!res.success) throw new Error(res.error)
-      return res.data
+      return formatActionResponse({ success: true, job })
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      return formatActionResponse({
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      })
     }
   })
 
   handle(IPC_CHANNELS.SCAN_CANCEL_JOB, async (raw: unknown): Promise<JobActionResponse> => {
     const parsed = validatePayload(JobIdRequestSchema, raw)
     if (!parsed.success) {
-      return { success: false, error: parsed.error }
+      return formatActionResponse({ success: false, error: parsed.error })
     }
     if (!coordinator) {
-      return { success: false, error: 'ScanJobCoordinator not available' }
+      return formatActionResponse({ success: false, error: 'ScanJobCoordinator not available' })
     }
     try {
       const job = await coordinator.cancelScan(parsed.data.jobId)
-      const res = validatePayload(JobActionResponseSchema, { success: true, job })
-      if (!res.success) throw new Error(res.error)
-      return res.data
+      return formatActionResponse({ success: true, job })
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      return formatActionResponse({
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      })
     }
   })
 
@@ -190,7 +207,14 @@ export function registerIpcHandlers({
     coordinator.onProgress((progress) => {
       const win = getMainWindow()
       if (win && !win.isDestroyed()) {
-        win.webContents.send(IPC_CHANNELS.SCAN_PROGRESS_EVENT, progress)
+        const validated = validatePayload(ScanJobProgressSchema, progress)
+        if (validated.success) {
+          win.webContents.send(IPC_CHANNELS.SCAN_PROGRESS_EVENT, validated.data)
+        } else {
+          console.error(
+            `Invalid outgoing ScanJobProgress event payload in main: ${validated.error}`
+          )
+        }
       }
     })
   }

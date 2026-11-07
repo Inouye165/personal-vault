@@ -90,8 +90,15 @@ export function ScanJobsPanel({
 
   // Calculate percentage
   let percentage = 0
-  if (job.status === 'completed') {
-    percentage = 100
+  const isCompleted = job.status === 'completed'
+  const hasErrors = job.errorCount > 0
+
+  if (isCompleted) {
+    if (job.totalFilesToHash > 0) {
+      percentage = Math.min(100, Math.round((job.hashedCount / job.totalFilesToHash) * 100))
+    } else {
+      percentage = hasErrors ? 0 : 100
+    }
   } else if (job.phase === 'hashing' && job.totalFilesToHash > 0) {
     percentage = Math.min(100, Math.round((job.hashedCount / job.totalFilesToHash) * 100))
   } else if (job.discoveredCount > 0) {
@@ -104,6 +111,19 @@ export function ScanJobsPanel({
       {actionError && (
         <div className="notice notice-error" role="alert">
           <p>{actionError}</p>
+        </div>
+      )}
+
+      {isCompleted && hasErrors && (
+        <div className="notice notice-warning" role="alert">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <strong>Scan Completed with Errors</strong>
+            <p>
+              {job.errorMessage || `${job.errorCount} file(s) encountered errors during the scan.`}{' '}
+              Healthy files have been indexed and verified.
+            </p>
+          </div>
         </div>
       )}
 
@@ -133,12 +153,17 @@ export function ScanJobsPanel({
       <div className="scan-header">
         <div className="scan-title-row">
           <h3 className="scan-title">Source Scan</h3>
-          <span className={`status-badge status-${job.status}`}>
+          <span
+            className={`status-badge ${isCompleted && hasErrors ? 'status-warning' : `status-${job.status}`}`}
+          >
             {job.status === 'running' && <span className="status-dot ready" aria-hidden="true" />}
             {job.status === 'paused' && <PauseCircle size={14} aria-hidden="true" />}
-            {job.status === 'completed' && <CheckCircle size={14} aria-hidden="true" />}
+            {isCompleted && !hasErrors && <CheckCircle size={14} aria-hidden="true" />}
+            {isCompleted && hasErrors && <AlertTriangle size={14} aria-hidden="true" />}
             {job.status === 'interrupted' && <AlertTriangle size={14} aria-hidden="true" />}
-            <span className="status-text">{job.status}</span>
+            <span className="status-text">
+              {isCompleted && hasErrors ? 'Completed with errors' : job.status}
+            </span>
           </span>
         </div>
         <p className="scan-phase-text">
@@ -154,7 +179,10 @@ export function ScanJobsPanel({
         aria-valuemax={100}
         aria-label="Scan progress"
       >
-        <div className={`scan-progress-fill ${job.status}`} style={{ width: `${percentage}%` }} />
+        <div
+          className={`scan-progress-fill ${isCompleted && hasErrors ? 'completed-with-errors' : job.status}`}
+          style={{ width: `${percentage}%` }}
+        />
       </div>
 
       <div className="scan-stats-grid">

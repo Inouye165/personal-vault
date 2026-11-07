@@ -48,5 +48,6 @@ export type {
   UpdateScanJobProgressInput,
   RecordScanJobErrorInput,
   UnhashedFileRecord,
+  UnhashedFilesOptions,
   UnhashedCountResult
 } from './types'

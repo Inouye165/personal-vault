@@ -90,12 +90,24 @@ if (!app.requestSingleInstanceLock()) {
     })
   })
 
-  app.on('before-quit', () => {
-    if (coordinator?.hasActiveJob()) {
-      void coordinator.cancelActiveJob()
-    }
-    if (catalog && !catalog.isClosed()) {
-      catalog.close()
+  let isQuitting = false
+  app.on('before-quit', (event) => {
+    if (!isQuitting) {
+      isQuitting = true
+      event.preventDefault()
+      const doShutdown = async (): Promise<void> => {
+        try {
+          if (coordinator) {
+            await coordinator.shutdown()
+          }
+        } finally {
+          if (catalog && !catalog.isClosed()) {
+            catalog.close()
+          }
+          app.quit()
+        }
+      }
+      void doShutdown()
     }
   })
 

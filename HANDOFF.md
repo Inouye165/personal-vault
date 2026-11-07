@@ -112,17 +112,32 @@ Stage 2D implements resumable background scan jobs, SQLite job state and checkpo
 2. Implemented `ScanJobCoordinator` with event loop yielding, discovery batching, streaming hashing, pause/resume/cancel state transitions, and restart recovery.
 3. Added scan channels, Zod schemas, preload bridge methods, and sender-checked IPC handlers.
 4. Implemented `useScanJobs` hook, `ScanJobsPanel` UI component, and integrated into `App.tsx` and `EmptyState.tsx`.
-5. Ran `npm test`: **All 239 tests passed across 11 test suites (0 skipped)**.
+5. ### 2.4 Independent Review Corrections (Pass 2)
 
-### 2.3 Refactor & Quality Gates
+Following independent review feedback, seven issues were identified and addressed using failing behavioral regression tests before implementation:
 
-1. Addressed all TypeScript compiler issues across `tsconfig.node.json` and `tsconfig.web.json` (0 errors).
-2. Resolved all ESLint warnings and formatting issues with Prettier (0 errors, 0 warnings, 100% compliant).
-3. Verified production bundle compilation with `npm run build`.
-4. Updated `scripts/smoke.mjs` line 230 to assert the expanded `window.api` surface (`cancelScan`, `getActiveScanJob`, `getAppInfo`, `getVaultStatus`, `onScanProgress`, `pauseScan`, `resumeScan`, `selectRoots`, `setTab`, `startScan`).
-5. Verified real Electron GUI smoke checks: `npm run smoke:built` and `npm run smoke:unpacked` passed with exit code 0.
-6. Verified SQLite repository persistence in unpacked ASAR package: `npm run verify:sqlite:unpacked` passed all 8 checks.
-7. Verified real Electron scan workflow: `npm run verify:scan` passed all 8 checks.
+1. **Hash Queue Traversal Past Failures**:
+   - _Failing test_: Added test verifying coordinator advances past an unhashed missing file with `batchSize: 1` without skipping valid files, and across page boundaries without infinite loops. Initial run: failed with valid file never receiving a hash.
+   - _Resolution_: Implemented keyset pagination (`afterId`) in `CatalogDatabase.getUnhashedFilesForRoots` (`WHERE fl.id > ? ORDER BY fl.id ASC LIMIT ?`) and updated `ScanJobCoordinator` loop to advance `lastSeenLocationId` rather than repeatedly requesting page 1 and filtering in memory.
+2. **Lifecycle Serialization & Ownership Reservation**:
+   - _Failing test_: Added tests for simultaneous `startScan` conflict rejection and starting a scan while a job is `paused`. Initial run: both simultaneous calls succeeded.
+   - _Resolution_: Added synchronous `isStarting` ownership reservation flag and updated `hasActiveJob()` to treat `paused` as active in both in-memory coordinator and database state. Guarded execution loop completion against clearing newer active jobs.
+3. **Deterministic Cancellation & Application Shutdown**:
+   - _Failing test_: Added test ensuring `cancelScan` awaits loop termination, and test ensuring `coordinator.shutdown()` marks running jobs as `interrupted` (not `cancelled`) to preserve recoverable state on app exit.
+   - _Resolution_: Updated `cancelScan` to await `completionPromise`. Added `coordinator.shutdown()` wired to `app.on('before-quit')` in `src/main/index.ts` to await drain before closing the catalog database.
+4. **Accurate Progress & Recovery Accounting**:
+   - _Failing test_: Added test verifying repeated pause/resume and restart recovery do not inflate `discoveredCount`, `totalBytes`, or `hashedCount`. Initial run: counts doubled on resume.
+   - _Resolution_: Reset pass-specific discovery counters (`passDiscoveredCount`, `passTotalBytes`) for each discovery pass, and computed baseline hashed counts from catalog unhashed differences (`total - unhashedCount`).
+5. **Bounded Resource Utilization**:
+   - _Failing test_: Added test ensuring in-memory errors are capped while full history is retained in SQLite, and validation test for `batchSize: 0`.
+   - _Resolution_: Capped in-memory `state.errors` to `MAX_RETAINED_ERRORS = 50` with FIFO shifting, while recording every error durably to SQLite `scan_job_errors`. Added `validateBatchSize` requiring a positive safe integer within catalog limits (`1 <= batchSize <= 1000`).
+6. **Honest Reporting of Partial Results**:
+   - _Failing test_: Added tests in `tests/main/scan-jobs.test.ts` and `tests/renderer/scan-ui.test.tsx` verifying that jobs with errors persist an error summary, display "Completed with errors", show a warning badge and alert notice, and display actual percentage (e.g. 90%) rather than forcing 100%.
+   - _Resolution_: Updated `ScanJobCoordinator` to persist `errorMessage` summary on completion when `errorCount > 0`. Updated `ScanJobsPanel.tsx` to compute actual ratio when errors occur, render `.status-warning` badge, and show warning notice.
+7. **Real Electron Scan Verification over IPC**:
+   - _Resolution_: Rewrote `scripts/verify-electron-scan.mjs` to launch real Electron, exercise `window.api.startScan`, `pauseScan` (mandatory assertion), `resumeScan`, receive real IPC progress events via `onScanProgress`, simulate SQLite crash state, relaunch, recover active job as `interrupted`, resume and revalidate a modified file, and verify source file invariance. Added `--mode=unpacked` support via `npm run verify:scan:unpacked`.
+
+Ran `npm test`: **All 251 tests passed across 11 test suites (0 skipped)**.
 
 ---
 
@@ -130,32 +145,34 @@ Stage 2D implements resumable background scan jobs, SQLite job state and checkpo
 
 Execution results on implementation host (`D:\organizer`):
 
-| Command                          | Result   | Details                                                                                 |
-| -------------------------------- | -------- | --------------------------------------------------------------------------------------- |
-| `npm test`                       | **PASS** | 11 test files: 239 passed, 0 skipped repository-wide                                    |
-| `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)  |
-| `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                     |
-| `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                        |
-| `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer    |
-| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                 |
-| `npm run build:unpack`           | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                  |
-| `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)       |
-| `npm run verify:scan`            | **PASS** | Real Electron runtime exercises complete scan job lifecycle and recovery (8/8 checks)   |
-| `npm run smoke:built`            | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron          |
-| `npm run smoke:unpacked`         | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks |
+| Command                          | Result   | Details                                                                                  |
+| -------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `npm test`                       | **PASS** | 11 test files: 251 passed, 0 skipped repository-wide                                     |
+| `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)   |
+| `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                      |
+| `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                         |
+| `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer     |
+| `npm run build:unpack`           | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                   |
+| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                  |
+| `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)        |
+| `npm run verify:scan`            | **PASS** | Real Electron runtime exercises scan workflow, IPC boundary, pause/resume, crash (11/11) |
+| `npm run verify:scan:unpacked`   | **PASS** | Unpacked desktop binary exercises scan workflow, IPC boundary, recovery (11/11)          |
+| `npm run smoke:built`            | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron           |
+| `npm run smoke:unpacked`         | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks  |
 
 ---
 
 ## 4. Known Limitations & Boundaries
 
-- **Single Active Scan Job Constraint**: Personal Vault enforces at most one active scan job (`running` or `paused`) at any time. Starting another job while one is active returns `ActiveJobConflictError`.
+- **Single Active Scan Job Constraint**: Personal Vault enforces at most one active scan job (`running` or `paused`) at any time. Starting another job while one is active returns `ActiveJobConflictError`. Ownership is reserved synchronously (`isStarting`) before asynchronous root validation to eliminate race conditions.
 - **Cooperative Event Loop Yielding vs Worker Threads**: Scan jobs execute cooperatively in the main process with `setImmediate` yields between file batches and chunk reads. This prevents IPC serialization bottlenecks and keeps the main process responsive. Background multi-threaded worker pools are deferred to future stages if CPU-heavy tasks (e.g. OCR or local AI) demand dedicated threads.
 - **Out-of-Band File Changes**: Modifications to files on disk made outside Personal Vault are detected on the subsequent scan pass or resume: discovery notes size or timestamp changes, deactivates earlier observations, invalidates hashes, and re-hashes changed files.
-- **Non-Fatal Error Visibility**: Unreadable files (e.g., `EACCES`) are logged to `scan_job_errors` and surfaced in the UI. They do not halt the scan job, but ensure partial scans are never misrepresented as complete.
+- **Non-Fatal Error Visibility & Honest Reporting**: Unreadable files (e.g., `EACCES`) are logged to `scan_job_errors` and surfaced in the UI. They do not halt the scan job, but ensure partial scans are never misrepresented as complete. Jobs finishing with errors display "Completed with errors" status, warning badges, actual completion percentage, and persisted error summaries.
+- **Deterministic Shutdown & Crash Recovery**: Normal application quit marks running scan jobs as `interrupted` in SQLite during shutdown drain, enabling resume upon relaunch. Abrupt process termination is detected on subsequent coordinator initialization and similarly marked `interrupted`.
 - **Source Preservation Invariance**: Originals remain strictly read-only. Personal Vault performs no file moves, writes, edits, or deletes on source roots.
 
 ---
 
 ## 5. Immediate Recommended Next Task
 
-**Independent review of Stage 2D on `feat/stage-2d-scan-jobs`. Upon acceptance and merge to `main`, Stage 2 will be complete, allowing Stage 3 (Exact duplicate grouping and review) to begin.**
+**Independent review of Stage 2D review corrections on `feat/stage-2d-scan-jobs`. Upon acceptance and merge to `main`, Stage 2 will be complete, allowing Stage 3 (Exact duplicate grouping and review) to begin.**

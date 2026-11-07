@@ -4,7 +4,8 @@ import {
   type ScanJobRecord,
   type ScanJobStatus,
   type ScanJobPhase,
-  type DiscoveryCandidateInput
+  type DiscoveryCandidateInput,
+  MAX_BATCH_SIZE
 } from '../catalog'
 import { scanSourceRoots } from '../discovery'
 import { hashFile } from '../hashing'
@@ -20,8 +21,20 @@ import type {
   StartScanOptions
 } from './types'
 
+const MAX_RETAINED_ERRORS = 50
+
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve))
+}
+
+function validateBatchSize(size: number | undefined): number {
+  if (size === undefined) return 100
+  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_BATCH_SIZE) {
+    throw new RangeError(
+      `batchSize must be a positive safe integer between 1 and ${MAX_BATCH_SIZE}, got ${size}`
+    )
+  }
+  return size
 }
 
 interface ActiveJobState {
@@ -56,12 +69,13 @@ export class ScanJobCoordinator {
   private readonly batchSize: number
   private readonly progressListeners = new Set<ScanJobProgressCallback>()
   private activeJob: ActiveJobState | null = null
+  private isStarting = false
 
   constructor(options: ScanJobCoordinatorOptions) {
     this.catalog = options.catalog
     this.discoveryFsAdapter = options.discoveryFsAdapter
     this.hashingFsAdapter = options.hashingFsAdapter
-    this.batchSize = options.batchSize ?? 100
+    this.batchSize = validateBatchSize(options.batchSize)
   }
 
   public async initialize(): Promise<number> {
@@ -87,7 +101,15 @@ export class ScanJobCoordinator {
   }
 
   public hasActiveJob(): boolean {
-    return this.activeJob !== null && this.activeJob.status === 'running'
+    if (this.isStarting) return true
+    if (
+      this.activeJob !== null &&
+      (this.activeJob.status === 'running' || this.activeJob.status === 'paused')
+    ) {
+      return true
+    }
+    const dbJob = this.catalog.getActiveScanJob()
+    return dbJob !== null && (dbJob.status === 'running' || dbJob.status === 'paused')
   }
 
   public getActiveJob(): ScanJobProgress | null {
@@ -109,29 +131,34 @@ export class ScanJobCoordinator {
   }
 
   public async startScan(options: StartScanOptions): Promise<ScanJobProgress> {
-    if (this.hasActiveJob()) {
-      throw new ScanJobConflictError('A scan job is already actively running')
+    if (this.isStarting || this.hasActiveJob()) {
+      throw new ScanJobConflictError('A scan job is already actively running or paused')
     }
 
-    if (!Array.isArray(options.roots) || options.roots.length === 0) {
-      throw new RangeError('options.roots must be a non-empty array of paths')
-    }
-
-    // Verify each root exists on disk
-    for (const root of options.roots) {
-      if (typeof root !== 'string' || root.trim() === '') {
-        throw new TypeError('options.roots contains an invalid path entry')
+    this.isStarting = true
+    try {
+      if (!Array.isArray(options.roots) || options.roots.length === 0) {
+        throw new RangeError('options.roots must be a non-empty array of paths')
       }
-      const stat = await fs.stat(root)
-      if (!stat.isDirectory()) {
-        throw new Error(`Configured root path is not a directory: ${root}`)
+
+      // Verify each root exists on disk
+      for (const root of options.roots) {
+        if (typeof root !== 'string' || root.trim() === '') {
+          throw new TypeError('options.roots contains an invalid path entry')
+        }
+        const stat = await fs.stat(root)
+        if (!stat.isDirectory()) {
+          throw new Error(`Configured root path is not a directory: ${root}`)
+        }
       }
+
+      const now = Date.now()
+      const jobRecord = this.catalog.createScanJob({ roots: options.roots, nowMs: now })
+
+      return this.spawnJobExecution(jobRecord.id, options.roots, now)
+    } finally {
+      this.isStarting = false
     }
-
-    const now = Date.now()
-    const jobRecord = this.catalog.createScanJob({ roots: options.roots, nowMs: now })
-
-    return this.spawnJobExecution(jobRecord.id, options.roots, now)
   }
 
   public async pauseScan(jobId: number): Promise<ScanJobProgress> {
@@ -144,7 +171,7 @@ export class ScanJobCoordinator {
           new Promise((resolve) => setTimeout(resolve, 2000))
         ])
       }
-      if (this.activeJob) {
+      if (this.activeJob && this.activeJob.jobId === jobId) {
         return this.toProgress(this.activeJob)
       }
       const job = this.catalog.getScanJob(jobId)
@@ -165,8 +192,27 @@ export class ScanJobCoordinator {
   }
 
   public async resumeScan(jobId: number): Promise<ScanJobProgress> {
-    if (this.hasActiveJob()) {
-      throw new ScanJobConflictError('Cannot resume while another scan job is actively running')
+    if (this.isStarting) {
+      throw new ScanJobConflictError('Another scan job is currently starting')
+    }
+
+    if (this.activeJob !== null) {
+      if (this.activeJob.jobId !== jobId || this.activeJob.status === 'running') {
+        throw new ScanJobConflictError(
+          'Cannot resume while another scan job is actively running or paused'
+        )
+      }
+    } else {
+      const activeDb = this.catalog.getActiveScanJob()
+      if (
+        activeDb !== null &&
+        activeDb.id !== jobId &&
+        (activeDb.status === 'running' || activeDb.status === 'paused')
+      ) {
+        throw new ScanJobConflictError(
+          'Cannot resume while another scan job is actively running or paused'
+        )
+      }
     }
 
     const job = this.catalog.getScanJob(jobId)
@@ -185,12 +231,30 @@ export class ScanJobCoordinator {
 
   public async cancelScan(jobId: number): Promise<ScanJobProgress> {
     if (this.activeJob && this.activeJob.jobId === jobId) {
-      this.activeJob.status = 'cancelled'
-      this.activeJob.abortController.abort()
-      this.catalog.updateScanJobStatus(jobId, 'cancelled', { nowMs: Date.now() })
-      const progress = this.toProgress(this.activeJob)
+      const state = this.activeJob
+      state.status = 'cancelled'
+      state.abortController.abort()
+
+      // Await active loop termination before clearing state and releasing ownership
+      try {
+        await state.completionPromise
+      } catch {
+        // Suppress
+      }
+
+      if (!this.catalog.isClosed()) {
+        try {
+          this.catalog.updateScanJobStatus(jobId, 'cancelled', { nowMs: Date.now() })
+        } catch {
+          // Suppress
+        }
+      }
+
+      const progress = this.toProgress(state)
       this.notifyProgress(progress)
-      this.activeJob = null
+      if (this.activeJob?.jobId === jobId) {
+        this.activeJob = null
+      }
       return progress
     }
 
@@ -209,6 +273,36 @@ export class ScanJobCoordinator {
       return this.cancelScan(this.activeJob.jobId)
     }
     return null
+  }
+
+  public async shutdown(): Promise<void> {
+    if (this.activeJob && this.activeJob.status === 'running') {
+      const state = this.activeJob
+      state.status = 'interrupted'
+      state.abortController.abort()
+
+      try {
+        await state.completionPromise
+      } catch {
+        // Suppress
+      }
+
+      if (!this.catalog.isClosed()) {
+        try {
+          this.catalog.updateScanJobStatus(state.jobId, 'interrupted', { nowMs: Date.now() })
+        } catch {
+          // Suppress
+        }
+      }
+
+      if (this.activeJob?.jobId === state.jobId) {
+        this.activeJob = null
+      }
+    } else if (this.activeJob && this.activeJob.status === 'paused') {
+      if (this.activeJob?.jobId) {
+        this.activeJob = null
+      }
+    }
   }
 
   public async waitForJob(jobId: number): Promise<ScanJobProgress> {
@@ -234,14 +328,16 @@ export class ScanJobCoordinator {
 
     const abortController = new AbortController()
 
-    // Load initial counts from DB (e.g. on resume)
+    // Load initial counts from DB
     const existing = this.catalog.getScanJob(jobId)
-    const existingErrors = this.catalog.getScanJobErrors(jobId).map((e) => ({
-      path: e.path,
-      code: e.code,
-      message: e.message,
-      phase: e.phase
-    }))
+    const existingErrors = this.catalog
+      .getScanJobErrors(jobId, { limit: MAX_RETAINED_ERRORS })
+      .map((e) => ({
+        path: e.path,
+        code: e.code,
+        message: e.message,
+        phase: e.phase
+      }))
 
     const state: ActiveJobState = {
       jobId,
@@ -276,8 +372,25 @@ export class ScanJobCoordinator {
     return progress
   }
 
+  private isCancelled(state: ActiveJobState): boolean {
+    return state.abortController.signal.aborted || (state.status as string) === 'cancelled'
+  }
+
+  private isInterrupted(state: ActiveJobState): boolean {
+    return (state.status as string) === 'interrupted'
+  }
+
   private async executeJobLoop(state: ActiveJobState): Promise<void> {
     try {
+      const pushError = (err: ScanJobStructuredError): void => {
+        state.errorCount++
+        if (state.errors.length >= MAX_RETAINED_ERRORS) {
+          state.errors.shift()
+        }
+        state.errors.push(err)
+        this.catalog.recordScanJobError(state.jobId, err)
+      }
+
       // -----------------------------------------------------------
       // Phase 1: Discovery & Observation Revalidation
       // -----------------------------------------------------------
@@ -287,6 +400,10 @@ export class ScanJobCoordinator {
 
       const candidateBatchesByRoot = new Map<string, DiscoveryCandidateInput[]>()
       let uncommittedCandidates = 0
+
+      // Reset pass-specific discovery counts to prevent inflation on resume
+      let passDiscoveredCount = 0
+      let passTotalBytes = 0
 
       const commitCandidates = (): void => {
         for (const [sourceRoot, batch] of candidateBatchesByRoot) {
@@ -311,9 +428,15 @@ export class ScanJobCoordinator {
       })
 
       for await (const event of discoveryGenerator) {
-        if (state.abortController.signal.aborted || state.status === 'cancelled') {
+        if (this.isCancelled(state)) {
           commitCandidates()
           this.handleCancelled(state)
+          return
+        }
+
+        if (this.isInterrupted(state)) {
+          commitCandidates()
+          this.handleInterrupted(state)
           return
         }
 
@@ -324,8 +447,10 @@ export class ScanJobCoordinator {
         }
 
         if (event.kind === 'candidate') {
-          state.discoveredCount++
-          state.totalBytes += event.candidate.byteSize
+          passDiscoveredCount++
+          passTotalBytes += event.candidate.byteSize
+          state.discoveredCount = passDiscoveredCount
+          state.totalBytes = passTotalBytes
           state.currentPath = event.candidate.absolutePath
 
           let list = candidateBatchesByRoot.get(event.candidate.rootPath)
@@ -362,15 +487,12 @@ export class ScanJobCoordinator {
         } else if (event.kind === 'skip') {
           state.skippedCount++
         } else if (event.kind === 'error') {
-          state.errorCount++
-          const structured: ScanJobStructuredError = {
+          pushError({
             path: event.error.path,
             code: event.error.code,
             message: event.error.message,
             phase: 'discovery'
-          }
-          state.errors.push(structured)
-          this.catalog.recordScanJobError(state.jobId, structured)
+          })
         }
       }
 
@@ -378,6 +500,11 @@ export class ScanJobCoordinator {
       state.currentPath = undefined
       state.updatedAtMs = Date.now()
       this.notifyProgress(this.toProgress(state))
+
+      if (this.isInterrupted(state)) {
+        this.handleInterrupted(state)
+        return
+      }
 
       if (state.pauseRequested) {
         this.handlePaused(state)
@@ -389,18 +516,28 @@ export class ScanJobCoordinator {
       // -----------------------------------------------------------
       state.phase = 'hashing'
       const unhashedCounts = this.catalog.countUnhashedFilesForRoots(state.roots)
-      state.totalFilesToHash = state.hashedCount + unhashedCounts.count
+      const totalFilesInRoots = state.discoveredCount
+      state.totalFilesToHash = totalFilesInRoots
+      state.hashedCount = Math.max(0, totalFilesInRoots - unhashedCounts.count)
+      state.hashedBytes = Math.max(0, state.totalBytes - unhashedCounts.totalBytes)
+
       this.catalog.updateScanJobProgress(state.jobId, {
         phase: 'hashing',
-        totalFilesToHash: state.totalFilesToHash
+        totalFilesToHash: state.totalFilesToHash,
+        hashedCount: state.hashedCount,
+        hashedBytes: state.hashedBytes
       })
       this.notifyProgress(this.toProgress(state))
 
-      const attemptedLocationIds = new Set<number>()
-
+      let lastSeenLocationId = 0
       while (true) {
-        if (state.abortController.signal.aborted || state.status === 'cancelled') {
+        if (this.isCancelled(state)) {
           this.handleCancelled(state)
+          return
+        }
+
+        if (this.isInterrupted(state)) {
+          this.handleInterrupted(state)
           return
         }
 
@@ -410,22 +547,24 @@ export class ScanJobCoordinator {
         }
 
         const unhashedBatch = this.catalog.getUnhashedFilesForRoots(state.roots, {
-          limit: this.batchSize
+          limit: this.batchSize,
+          afterId: lastSeenLocationId
         })
 
-        const pendingBatch = unhashedBatch.filter(
-          (file) => !attemptedLocationIds.has(file.fileLocationId)
-        )
-
-        if (pendingBatch.length === 0) {
+        if (unhashedBatch.length === 0) {
           break
         }
 
-        for (const file of pendingBatch) {
-          attemptedLocationIds.add(file.fileLocationId)
+        for (const file of unhashedBatch) {
+          lastSeenLocationId = file.fileLocationId
 
-          if (state.abortController.signal.aborted) {
+          if (this.isCancelled(state)) {
             this.handleCancelled(state)
+            return
+          }
+
+          if (this.isInterrupted(state)) {
+            this.handleInterrupted(state)
             return
           }
 
@@ -477,26 +616,20 @@ export class ScanJobCoordinator {
             state.hashedCount++
             state.hashedBytes += hashResult.byteSize
           } else if (hashResult.status === 'file_changed') {
-            state.errorCount++
-            const structured: ScanJobStructuredError = {
+            pushError({
               path: file.originalPath,
               code: 'file_changed',
               message: hashResult.message,
               phase: 'hashing'
-            }
-            state.errors.push(structured)
-            this.catalog.recordScanJobError(state.jobId, structured)
+            })
           } else if (hashResult.status === 'rejected' || hashResult.status === 'error') {
-            state.errorCount++
             const code = hashResult.status === 'rejected' ? hashResult.reason : hashResult.code
-            const structured: ScanJobStructuredError = {
+            pushError({
               path: file.originalPath,
               code,
               message: hashResult.message,
               phase: 'hashing'
-            }
-            state.errors.push(structured)
-            this.catalog.recordScanJobError(state.jobId, structured)
+            })
           }
 
           state.updatedAtMs = Date.now()
@@ -519,7 +652,12 @@ export class ScanJobCoordinator {
       state.completedAtMs = Date.now()
       state.updatedAtMs = state.completedAtMs
 
+      if (state.errorCount > 0) {
+        state.errorMessage = `${state.errorCount} file(s) encountered errors during scan`
+      }
+
       this.catalog.updateScanJobStatus(state.jobId, 'completed', {
+        errorMessage: state.errorMessage,
         completedAtMs: state.completedAtMs,
         nowMs: state.completedAtMs
       })
@@ -527,11 +665,16 @@ export class ScanJobCoordinator {
       const finalProgress = this.toProgress(state)
       this.notifyProgress(finalProgress)
       state.resolveCompletion(finalProgress)
-      this.activeJob = null
+      if (this.activeJob?.jobId === state.jobId) {
+        this.activeJob = null
+      }
     } catch (error) {
       if (this.catalog.isClosed()) {
         state.status = 'cancelled'
-        this.activeJob = null
+        if (this.activeJob?.jobId === state.jobId) {
+          this.activeJob = null
+        }
+        state.resolveCompletion(this.toProgress(state))
         return
       }
       state.status = 'failed'
@@ -548,7 +691,9 @@ export class ScanJobCoordinator {
       const finalProgress = this.toProgress(state)
       this.notifyProgress(finalProgress)
       state.resolveCompletion(finalProgress)
-      this.activeJob = null
+      if (this.activeJob?.jobId === state.jobId) {
+        this.activeJob = null
+      }
     }
   }
 
@@ -566,7 +711,28 @@ export class ScanJobCoordinator {
     const progress = this.toProgress(state)
     this.notifyProgress(progress)
     state.resolveCompletion(progress)
-    this.activeJob = null
+    if (this.activeJob?.jobId === state.jobId) {
+      this.activeJob = null
+    }
+  }
+
+  private handleInterrupted(state: ActiveJobState): void {
+    state.status = 'interrupted'
+    state.currentPath = undefined
+    state.updatedAtMs = Date.now()
+    if (!this.catalog.isClosed()) {
+      try {
+        this.catalog.updateScanJobStatus(state.jobId, 'interrupted', { nowMs: state.updatedAtMs })
+      } catch {
+        // Suppress catalog error on interrupted status update
+      }
+    }
+    const progress = this.toProgress(state)
+    this.notifyProgress(progress)
+    state.resolveCompletion(progress)
+    if (this.activeJob?.jobId === state.jobId) {
+      this.activeJob = null
+    }
   }
 
   private handleCancelled(state: ActiveJobState): void {
@@ -583,7 +749,9 @@ export class ScanJobCoordinator {
     const progress = this.toProgress(state)
     this.notifyProgress(progress)
     state.resolveCompletion(progress)
-    this.activeJob = null
+    if (this.activeJob?.jobId === state.jobId) {
+      this.activeJob = null
+    }
   }
 
   private toProgress(state: ActiveJobState): ScanJobProgress {
@@ -600,7 +768,7 @@ export class ScanJobCoordinator {
       skippedCount: state.skippedCount,
       errorCount: state.errorCount,
       currentPath: state.currentPath,
-      errors: state.errors.slice(-50), // keep recent 50
+      errors: state.errors.slice(-MAX_RETAINED_ERRORS),
       errorMessage: state.errorMessage,
       startedAtMs: state.startedAtMs,
       updatedAtMs: state.updatedAtMs,
@@ -609,12 +777,14 @@ export class ScanJobCoordinator {
   }
 
   private dbJobToProgress(job: ScanJobRecord): ScanJobProgress {
-    const errors = this.catalog.getScanJobErrors(job.id, { limit: 50 }).map((e) => ({
-      path: e.path,
-      code: e.code,
-      message: e.message,
-      phase: e.phase
-    }))
+    const errors = this.catalog
+      .getScanJobErrors(job.id, { limit: MAX_RETAINED_ERRORS })
+      .map((e) => ({
+        path: e.path,
+        code: e.code,
+        message: e.message,
+        phase: e.phase
+      }))
     return {
       jobId: job.id,
       status: job.status,
