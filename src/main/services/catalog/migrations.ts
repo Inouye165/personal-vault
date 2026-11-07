@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 3
+export const CURRENT_SCHEMA_VERSION = 4
 
 interface Migration {
   readonly version: number
@@ -250,6 +250,7 @@ const MIGRATIONS: readonly Migration[] = [
           skipped_count INTEGER NOT NULL DEFAULT 0 CHECK (skipped_count >= 0),
           error_count INTEGER NOT NULL DEFAULT 0 CHECK (error_count >= 0),
           error_message TEXT,
+          is_dismissed INTEGER NOT NULL DEFAULT 0,
           created_at_ms INTEGER NOT NULL,
           updated_at_ms INTEGER NOT NULL,
           started_at_ms INTEGER NOT NULL,
@@ -270,6 +271,26 @@ const MIGRATIONS: readonly Migration[] = [
         );
 
         CREATE INDEX IF NOT EXISTS idx_scan_job_errors_job ON scan_job_errors(job_id);
+      `)
+    }
+  },
+  {
+    version: 4,
+    name: 'scan_job_files_and_dismissal',
+    up: (db: DatabaseSync) => {
+      const jobCols = getTableColumns(db, 'scan_jobs')
+      if (!jobCols.includes('is_dismissed')) {
+        db.exec('ALTER TABLE scan_jobs ADD COLUMN is_dismissed INTEGER NOT NULL DEFAULT 0;')
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS scan_job_files (
+          job_id INTEGER NOT NULL REFERENCES scan_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          PRIMARY KEY (job_id, file_location_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scan_job_files_location ON scan_job_files(file_location_id);
       `)
     }
   }

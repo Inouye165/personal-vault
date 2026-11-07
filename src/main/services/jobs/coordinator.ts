@@ -7,6 +7,7 @@ import {
   type DiscoveryCandidateInput,
   MAX_BATCH_SIZE
 } from '../catalog'
+import { normalizePathForLookup } from '../catalog/path-normalization'
 import { scanSourceRoots } from '../discovery'
 import { hashFile } from '../hashing'
 import type { HashCandidateExpectation } from '../hashing/types'
@@ -35,6 +36,22 @@ function validateBatchSize(size: number | undefined): number {
     )
   }
   return size
+}
+
+function getEffectiveRoots(roots: readonly string[]): string[] {
+  const sorted = [...new Set(roots)].sort((a, b) => a.length - b.length)
+  const effective: string[] = []
+  for (const r of sorted) {
+    const norm = normalizePathForLookup(r)
+    const isDescendant = effective.some((parent) => {
+      const parentNorm = normalizePathForLookup(parent)
+      return norm === parentNorm || norm.startsWith(parentNorm + '/')
+    })
+    if (!isDescendant) {
+      effective.push(r)
+    }
+  }
+  return effective
 }
 
 interface ActiveJobState {
@@ -121,13 +138,17 @@ export class ScanJobCoordinator {
     return this.dbJobToProgress(dbJob)
   }
 
-  public getLatestJob(): ScanJobProgress | null {
+  public getLatestJob(options?: { unDismissedOnly?: boolean }): ScanJobProgress | null {
     if (this.activeJob) {
       return this.toProgress(this.activeJob)
     }
-    const dbJob = this.catalog.getLatestScanJob()
+    const dbJob = this.catalog.getLatestScanJob(options)
     if (!dbJob) return null
     return this.dbJobToProgress(dbJob)
+  }
+
+  public dismissScanJob(jobId: number): void {
+    this.catalog.dismissScanJob(jobId)
   }
 
   public async startScan(options: StartScanOptions): Promise<ScanJobProgress> {
@@ -373,6 +394,7 @@ export class ScanJobCoordinator {
   }
 
   private isCancelled(state: ActiveJobState): boolean {
+    if (this.isInterrupted(state)) return false
     return state.abortController.signal.aborted || (state.status as string) === 'cancelled'
   }
 
@@ -398,17 +420,21 @@ export class ScanJobCoordinator {
       this.catalog.updateScanJobProgress(state.jobId, { phase: 'discovery' })
       this.notifyProgress(this.toProgress(state))
 
+      // Clear any previously recorded scan job files for this job to support clean revalidation on resume/restart
+      this.catalog.clearScanJobFiles(state.jobId)
+
       const candidateBatchesByRoot = new Map<string, DiscoveryCandidateInput[]>()
       let uncommittedCandidates = 0
 
       // Reset pass-specific discovery counts to prevent inflation on resume
       let passDiscoveredCount = 0
       let passTotalBytes = 0
+      const seenCandidatePaths = new Set<string>()
 
       const commitCandidates = (): void => {
         for (const [sourceRoot, batch] of candidateBatchesByRoot) {
           if (batch.length > 0) {
-            this.catalog.persistDiscoveryBatch(sourceRoot, batch)
+            this.catalog.persistDiscoveryBatch(sourceRoot, batch, state.jobId)
             batch.length = 0
           }
         }
@@ -421,22 +447,23 @@ export class ScanJobCoordinator {
         })
       }
 
+      const effectiveRoots = getEffectiveRoots(state.roots)
       const discoveryGenerator = scanSourceRoots({
-        roots: state.roots,
+        roots: effectiveRoots,
         signal: state.abortController.signal,
         fsAdapter: this.discoveryFsAdapter
       })
 
       for await (const event of discoveryGenerator) {
-        if (this.isCancelled(state)) {
-          commitCandidates()
-          this.handleCancelled(state)
-          return
-        }
-
         if (this.isInterrupted(state)) {
           commitCandidates()
           this.handleInterrupted(state)
+          return
+        }
+
+        if (this.isCancelled(state)) {
+          commitCandidates()
+          this.handleCancelled(state)
           return
         }
 
@@ -447,6 +474,11 @@ export class ScanJobCoordinator {
         }
 
         if (event.kind === 'candidate') {
+          if (seenCandidatePaths.has(event.candidate.absolutePath)) {
+            continue
+          }
+          seenCandidatePaths.add(event.candidate.absolutePath)
+
           passDiscoveredCount++
           passTotalBytes += event.candidate.byteSize
           state.discoveredCount = passDiscoveredCount
@@ -515,9 +547,12 @@ export class ScanJobCoordinator {
       // Phase 2: Streaming SHA-256 Hashing of Unhashed Files
       // -----------------------------------------------------------
       state.phase = 'hashing'
-      const unhashedCounts = this.catalog.countUnhashedFilesForRoots(state.roots)
-      const totalFilesInRoots = state.discoveredCount
+      this.catalog.linkUnhashedFilesForRootsToJob(state.jobId, state.roots)
+      const unhashedCounts = this.catalog.countUnhashedFilesForJob(state.jobId)
+      const totalFilesInRoots = Math.max(state.discoveredCount, unhashedCounts.count)
+      state.discoveredCount = totalFilesInRoots
       state.totalFilesToHash = totalFilesInRoots
+      state.totalBytes = Math.max(state.totalBytes, unhashedCounts.totalBytes)
       state.hashedCount = Math.max(0, totalFilesInRoots - unhashedCounts.count)
       state.hashedBytes = Math.max(0, state.totalBytes - unhashedCounts.totalBytes)
 
@@ -531,13 +566,13 @@ export class ScanJobCoordinator {
 
       let lastSeenLocationId = 0
       while (true) {
-        if (this.isCancelled(state)) {
-          this.handleCancelled(state)
+        if (this.isInterrupted(state)) {
+          this.handleInterrupted(state)
           return
         }
 
-        if (this.isInterrupted(state)) {
-          this.handleInterrupted(state)
+        if (this.isCancelled(state)) {
+          this.handleCancelled(state)
           return
         }
 
@@ -546,7 +581,7 @@ export class ScanJobCoordinator {
           return
         }
 
-        const unhashedBatch = this.catalog.getUnhashedFilesForRoots(state.roots, {
+        const unhashedBatch = this.catalog.getUnhashedFilesForJob(state.jobId, {
           limit: this.batchSize,
           afterId: lastSeenLocationId
         })
@@ -558,13 +593,13 @@ export class ScanJobCoordinator {
         for (const file of unhashedBatch) {
           lastSeenLocationId = file.fileLocationId
 
-          if (this.isCancelled(state)) {
-            this.handleCancelled(state)
+          if (this.isInterrupted(state)) {
+            this.handleInterrupted(state)
             return
           }
 
-          if (this.isInterrupted(state)) {
-            this.handleInterrupted(state)
+          if (this.isCancelled(state)) {
+            this.handleCancelled(state)
             return
           }
 
@@ -669,8 +704,16 @@ export class ScanJobCoordinator {
         this.activeJob = null
       }
     } catch (error) {
+      if (this.isInterrupted(state)) {
+        this.handleInterrupted(state)
+        return
+      }
+      if (this.isCancelled(state)) {
+        this.handleCancelled(state)
+        return
+      }
       if (this.catalog.isClosed()) {
-        state.status = 'cancelled'
+        state.status = 'interrupted'
         if (this.activeJob?.jobId === state.jobId) {
           this.activeJob = null
         }

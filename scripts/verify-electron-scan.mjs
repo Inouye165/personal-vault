@@ -55,18 +55,26 @@ function killTree(child) {
 }
 
 async function findPageTarget(port, deadline) {
+  let lastError = null
+  let lastTargets = null
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`)
       const targets = await res.json()
+      lastTargets = targets
       const page = targets.find((t) => t.type === 'page' && t.url && !t.url.startsWith('devtools:'))
       if (page) return page
-    } catch {
-      // Waiting for CDP endpoint
+    } catch (err) {
+      lastError = err
     }
-    await sleep(200)
+    await sleep(250)
   }
-  throw new Error('Timed out waiting for application window')
+  const diag = {
+    port,
+    lastError: lastError?.message ?? null,
+    lastTargets
+  }
+  throw new Error(`Timed out waiting for application window. Diagnostics: ${JSON.stringify(diag)}`)
 }
 
 function connectCdp(url) {
@@ -233,11 +241,20 @@ async function run() {
         hasPauseScan: typeof window.api?.pauseScan === 'function',
         hasResumeScan: typeof window.api?.resumeScan === 'function',
         hasCancelScan: typeof window.api?.cancelScan === 'function',
+        hasGetActiveScanJob: typeof window.api?.getActiveScanJob === 'function',
+        hasGetLatestScanJob: typeof window.api?.getLatestScanJob === 'function',
+        hasDismissScanJob: typeof window.api?.dismissScanJob === 'function',
         hasOnScanProgress: typeof window.api?.onScanProgress === 'function'
       }))()`
     )
 
-    if (!apiCheck.hasApi || !apiCheck.hasStartScan || !apiCheck.hasOnScanProgress) {
+    if (
+      !apiCheck.hasApi ||
+      !apiCheck.hasStartScan ||
+      !apiCheck.hasGetLatestScanJob ||
+      !apiCheck.hasDismissScanJob ||
+      !apiCheck.hasOnScanProgress
+    ) {
       throw new Error(
         `window.api bridge missing required scan methods: ${JSON.stringify(apiCheck)}`
       )
@@ -284,7 +301,7 @@ async function run() {
     }
 
     console.log('  6. Awaiting scan completion through real IPC progress events...')
-    const completeDeadline = Date.now() + 10000
+    const completeDeadline = Date.now() + 15000
     let completedJob = null
     while (Date.now() < completeDeadline) {
       const completed = await evaluate(
@@ -327,46 +344,78 @@ async function run() {
       throw new Error('No progress events received in renderer via window.api.onScanProgress')
     }
 
-    console.log('  8. Testing restart recovery: simulating crash state in SQLite...')
-    // Close CDP and terminate first Electron instance
+    console.log('  8. Testing terminal job restoration and dismissal across IPC...')
+    const latestCheck = await evaluate(cdp, `window.api.getLatestScanJob()`)
+    if (
+      !latestCheck.job ||
+      latestCheck.job.jobId !== jobId ||
+      latestCheck.job.status !== 'completed'
+    ) {
+      throw new Error(
+        `getLatestScanJob failed to return terminal job: ${JSON.stringify(latestCheck)}`
+      )
+    }
+    const dismissRes = await evaluate(cdp, `window.api.dismissScanJob(${jobId})`)
+    if (!dismissRes.success) {
+      throw new Error(`dismissScanJob failed: ${JSON.stringify(dismissRes)}`)
+    }
+    const latestAfterDismiss = await evaluate(cdp, `window.api.getLatestScanJob()`)
+    if (latestAfterDismiss.job !== null) {
+      throw new Error(`Expected null after dismissal, got: ${JSON.stringify(latestAfterDismiss)}`)
+    }
+
+    console.log(
+      '  9. Testing crash recovery: starting in-progress scan and killing process mid-flight...'
+    )
+    const crashSubdir = join(sourceDir, 'crash-files')
+    mkdirSync(crashSubdir, { recursive: true })
+    for (let i = 0; i < 300; i++) {
+      writeFileSync(join(crashSubdir, `crash-${i}.jpg`), `content-data-${i}`)
+    }
+
+    const job2Start = await evaluate(
+      cdp,
+      `window.api.startScan({ roots: [${JSON.stringify(sourceDir)}] })`
+    )
+    if (!job2Start.success || !job2Start.job || job2Start.job.status !== 'running') {
+      throw new Error(`Failed to start second scan for crash test: ${JSON.stringify(job2Start)}`)
+    }
+    const job2Id = job2Start.job.jobId
+
+    // Abruptly terminate Electron mid-scan while it is actively running
     cdp.close()
+    cdp = null
     killTree(child)
     child = null
     await sleep(1500)
 
-    // Insert a running job record into SQLite to simulate an uncompleted job before crash
-    const dbPath = join(userDataDir, 'vault-catalog.db')
-    const { DatabaseSync } = await import('node:sqlite')
-    const simDb = new DatabaseSync(dbPath)
-    const now = Date.now()
-    const crashJobRes = simDb
-      .prepare(
-        `INSERT INTO scan_jobs (roots_json, status, phase, discovered_count, hashed_count, total_files_to_hash, total_bytes, hashed_bytes, skipped_count, error_count, created_at_ms, updated_at_ms, started_at_ms)
-         VALUES (?, 'running', 'hashing', 23, 23, 23, 1000, 1000, 0, 0, ?, ?, ?);`
-      )
-      .run(JSON.stringify([sourceDir]), now - 5000, now - 5000, now - 5000)
-    simDb.close()
-    console.log(`     Simulated crashed running job #${crashJobRes.lastInsertRowid} in DB.`)
-
-    console.log('  9. Relaunching application on same userData to verify restart recovery...')
+    console.log('  10. Relaunching application on same userData to verify crash recovery...')
     const port2 = await getFreePort()
     child = await launchApp(userDataDir, port2)
-    const page2 = await findPageTarget(port2, Date.now() + 20000)
+    const page2 = await findPageTarget(port2, Date.now() + 30000)
     cdp = await connectCdp(page2.webSocketDebuggerUrl)
     await cdp.send('Runtime.enable')
     await waitForApi(cdp)
 
     const recovered = await evaluate(cdp, `window.api.getActiveScanJob()`)
-    console.log(`     Recovered active job status: ${recovered.job?.status}`)
-
-    if (!recovered.job || recovered.job.status !== 'interrupted') {
-      throw new Error(`Expected recovered job status 'interrupted', got: ${recovered.job?.status}`)
+    console.log(
+      `      Recovered active job status: ${recovered.job?.status}, jobId: ${recovered.job?.jobId}`
+    )
+    if (
+      !recovered.job ||
+      recovered.job.status !== 'interrupted' ||
+      recovered.job.jobId !== job2Id
+    ) {
+      throw new Error(
+        `Expected recovered job status 'interrupted' for job #${job2Id}, got: ${JSON.stringify(recovered)}`
+      )
     }
 
-    console.log('  10. Testing resume and revalidation of modified file on recovered job...')
-    // Modify photo1 out-of-band
-    await sleep(50)
-    writeFileSync(file1, 'MODIFIED-PHOTO-1-NEW-BYTES')
+    console.log('  11. Testing resume and revalidation of modified file on recovered job...')
+    const newBytes = 'MODIFIED-PHOTO-1-NEW-BYTES-EXACT-RECOVERY'
+    writeFileSync(file1, newBytes)
+    const { createHash } = await import('node:crypto')
+    const expectedHash = createHash('sha256').update(newBytes).digest('hex')
 
     // Set up progress accumulation on relaunched window
     await evaluate(
@@ -409,9 +458,107 @@ async function run() {
       throw new Error('Resumed job failed to complete')
     }
 
-    console.log('  11. Verifying source preservation invariance...')
+    console.log(
+      '  12. Verifying database state: current observation digest and deactivated old observation...'
+    )
+    const dbPath = join(userDataDir, 'vault-catalog.db')
+    const { DatabaseSync } = await import('node:sqlite')
+    const verifyDb = new DatabaseSync(dbPath)
+    try {
+      const rows = verifyDb
+        .prepare(
+          `
+          SELECT fl.original_path, d.id as obs_id, d.byte_size, d.is_current, h.sha256, h.is_active
+          FROM file_locations fl
+          JOIN discovery_observations d ON d.file_location_id = fl.id
+          LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id
+          WHERE fl.original_path = ?
+          ORDER BY d.id ASC;
+        `
+        )
+        .all(file1)
+
+      if (rows.length < 2) {
+        throw new Error(`Expected at least 2 observations for modified file, got ${rows.length}`)
+      }
+      const oldObs = rows[rows.length - 2]
+      const currentObs = rows[rows.length - 1]
+
+      if (oldObs.is_current !== 0 || oldObs.is_active !== 0) {
+        throw new Error(`Old observation was not properly deactivated: ${JSON.stringify(oldObs)}`)
+      }
+      if (currentObs.is_current !== 1 || currentObs.is_active !== 1) {
+        throw new Error(`Current observation is not active: ${JSON.stringify(currentObs)}`)
+      }
+      if (currentObs.sha256 !== expectedHash) {
+        throw new Error(
+          `Active digest ${currentObs.sha256} does not match expected ${expectedHash}`
+        )
+      }
+      if (currentObs.byte_size !== newBytes.length) {
+        throw new Error(`Byte size ${currentObs.byte_size} does not match ${newBytes.length}`)
+      }
+    } finally {
+      verifyDb.close()
+    }
+
+    console.log('  13. Testing ordinary quit/reopen recovery...')
+    const quitSourceDir = join(tempDir, 'quit-roots')
+    mkdirSync(quitSourceDir, { recursive: true })
+    for (let i = 0; i < 40; i++) {
+      writeFileSync(join(quitSourceDir, `quit-${i}.jpg`), Buffer.alloc(16384, (i + 2) % 256))
+    }
+    const job3Start = await evaluate(
+      cdp,
+      `window.api.startScan({ roots: [${JSON.stringify(quitSourceDir)}] })`
+    )
+    if (!job3Start.success || !job3Start.job || job3Start.job.status !== 'running') {
+      throw new Error(`Failed to start scan for quit test: ${JSON.stringify(job3Start)}`)
+    }
+    const job3Id = job3Start.job.jobId
+    await sleep(20)
+
+    // Trigger ordinary application close via CDP window.close()
+    await evaluate(cdp, `window.close()`)
+    cdp.close()
+    cdp = null
+
+    // Wait for process to exit cleanly on its own via before-quit shutdown
+    const exitDeadline = Date.now() + 10000
+    while (Date.now() < exitDeadline && child.exitCode === null) {
+      await sleep(200)
+    }
+    if (child.exitCode === null) {
+      killTree(child)
+    }
+    child = null
+    await sleep(1000)
+
+    // Relaunch instance 3 to verify graceful shutdown preserved recoverable state
+    const port3 = await getFreePort()
+    child = await launchApp(userDataDir, port3)
+    const page3 = await findPageTarget(port3, Date.now() + 30000)
+    cdp = await connectCdp(page3.webSocketDebuggerUrl)
+    await cdp.send('Runtime.enable')
+    await waitForApi(cdp)
+
+    const quitRecovered = await evaluate(cdp, `window.api.getActiveScanJob()`)
+    console.log(
+      `      Graceful quit recovered job status: ${quitRecovered.job?.status}, jobId: ${quitRecovered.job?.jobId}`
+    )
+    if (
+      !quitRecovered.job ||
+      quitRecovered.job.status !== 'interrupted' ||
+      quitRecovered.job.jobId !== job3Id
+    ) {
+      throw new Error(
+        `Expected graceful quit recovered status 'interrupted' for job #${job3Id}, got: ${JSON.stringify(quitRecovered)}`
+      )
+    }
+
+    console.log('  14. Verifying source preservation invariance...')
     const content1 = readFileSync(file1, 'utf8')
-    if (content1 !== 'MODIFIED-PHOTO-1-NEW-BYTES') {
+    if (content1 !== newBytes) {
       throw new Error('Source file photo1.jpg was modified by scanner')
     }
     const content2 = readFileSync(file2, 'utf8')
@@ -420,7 +567,7 @@ async function run() {
     }
 
     console.log(
-      `[verify-scan] ALL 11 CHECKS PASSED: Real Electron scan workflow, IPC boundary, mandatory pause/resume, and crash recovery verified (${mode}).`
+      `[verify-scan] ALL 14 CHECKS PASSED: Real Electron scan workflow, IPC boundary, mandatory pause/resume, actual in-progress termination recovery, direct SQLite digest verification, graceful shutdown recovery, and source preservation verified (${mode}).`
     )
   } finally {
     if (cdp) {

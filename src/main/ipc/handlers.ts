@@ -2,7 +2,10 @@ import { app, dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/contracts/channels'
 import {
   AppInfoSchema,
+  DismissJobRequestSchema,
+  DismissJobResponseSchema,
   GetActiveJobResponseSchema,
+  GetLatestJobResponseSchema,
   JobActionResponseSchema,
   JobIdRequestSchema,
   NavigationTabSchema,
@@ -12,7 +15,9 @@ import {
   VaultStatusSchema,
   validatePayload,
   type AppInfo,
+  type DismissJobResponse,
   type GetActiveJobResponse,
+  type GetLatestJobResponse,
   type JobActionResponse,
   type SelectRootsResponse,
   type VaultStatus
@@ -197,6 +202,35 @@ export function registerIpcHandlers({
     const res = validatePayload(GetActiveJobResponseSchema, { job })
     if (!res.success) throw new Error(res.error)
     return res.data
+  })
+
+  handle(IPC_CHANNELS.SCAN_GET_LATEST_JOB, (): GetLatestJobResponse => {
+    const job = coordinator ? coordinator.getLatestJob({ unDismissedOnly: true }) : null
+    const res = validatePayload(GetLatestJobResponseSchema, { job })
+    if (!res.success) throw new Error(res.error)
+    return res.data
+  })
+
+  handle(IPC_CHANNELS.SCAN_DISMISS_JOB, (raw: unknown): DismissJobResponse => {
+    const parsed = validatePayload(DismissJobRequestSchema, raw)
+    if (!parsed.success) {
+      return DismissJobResponseSchema.parse({ success: false, error: parsed.error })
+    }
+    if (!coordinator) {
+      return DismissJobResponseSchema.parse({
+        success: false,
+        error: 'ScanJobCoordinator not available'
+      })
+    }
+    try {
+      coordinator.dismissScanJob(parsed.data.jobId)
+      return DismissJobResponseSchema.parse({ success: true })
+    } catch (err) {
+      return DismissJobResponseSchema.parse({
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    }
   })
 
   handle(IPC_CHANNELS.SCAN_PROGRESS_EVENT, (): never => {

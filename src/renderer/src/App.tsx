@@ -34,6 +34,7 @@ export function App() {
     onPauseScan: scanJobs.pauseScan,
     onResumeScan: scanJobs.resumeScan,
     onCancelScan: scanJobs.cancelScan,
+    onDismissJob: scanJobs.dismissJob,
     onClearRoots: scanJobs.clearRoots,
     onClearJob: scanJobs.clearJob
   }

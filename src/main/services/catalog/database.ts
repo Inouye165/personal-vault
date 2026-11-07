@@ -105,6 +105,7 @@ interface RawScanJobRow {
   skipped_count: number
   error_count: number
   error_message: string | null
+  is_dismissed?: number
   created_at_ms: number
   updated_at_ms: number
   started_at_ms: number
@@ -393,11 +394,15 @@ export class CatalogDatabase {
    */
   public persistDiscoveryBatch(
     sourceRoot: string,
-    candidates: readonly DiscoveryCandidateInput[]
+    candidates: readonly DiscoveryCandidateInput[],
+    jobId?: number
   ): BatchPersistenceResult {
     this.assertOpen()
     if (!sourceRoot || typeof sourceRoot !== 'string') {
       throw new TypeError('sourceRoot must be a non-empty string')
+    }
+    if (jobId !== undefined) {
+      validateSafeInteger(jobId, 'jobId', 1)
     }
 
     if (candidates.length > MAX_BATCH_SIZE) {
@@ -431,6 +436,13 @@ export class CatalogDatabase {
       if (!source) {
         source = this.registerSource(sourceRoot)
       }
+
+      const insertJobFileStmt =
+        jobId !== undefined
+          ? this.db.prepare(
+              'INSERT OR IGNORE INTO scan_job_files (job_id, file_location_id) VALUES (?, ?);'
+            )
+          : null
 
       const selectFileStmt = this.db.prepare(
         'SELECT id, original_path, file_name, extension, category FROM file_locations WHERE original_path = ?;'
@@ -510,8 +522,15 @@ export class CatalogDatabase {
             candidate.discoveredAtMs,
             candidate.discoveredAtMs
           )
+          if (insertJobFileStmt) {
+            insertJobFileStmt.run(jobId!, fileRow.id)
+          }
           insertedCount++
         } else {
+          if (insertJobFileStmt) {
+            insertJobFileStmt.run(jobId!, existingFile.id)
+          }
+
           // Reject conflicting recorded metadata before modifying records or invalidating hashes
           if (candidate.fileName !== existingFile.file_name) {
             throw new FileMetadataConflictError(
@@ -1151,6 +1170,7 @@ export class CatalogDatabase {
       skippedCount: row.skipped_count,
       errorCount: row.error_count,
       errorMessage: row.error_message,
+      isDismissed: row.is_dismissed === 1,
       createdAtMs: row.created_at_ms,
       updatedAtMs: row.updated_at_ms,
       startedAtMs: row.started_at_ms,
@@ -1205,13 +1225,20 @@ export class CatalogDatabase {
     return row ? this.mapScanJobRow(row) : null
   }
 
-  public getLatestScanJob(): ScanJobRecord | null {
+  public getLatestScanJob(options?: { unDismissedOnly?: boolean }): ScanJobRecord | null {
     this.assertOpen()
+    const where = options?.unDismissedOnly ? 'WHERE is_dismissed = 0' : ''
     const stmt = this.db.prepare(
-      'SELECT * FROM scan_jobs ORDER BY created_at_ms DESC, id DESC LIMIT 1;'
+      `SELECT * FROM scan_jobs ${where} ORDER BY created_at_ms DESC, id DESC LIMIT 1;`
     )
     const row = stmt.get() as RawScanJobRow | undefined
     return row ? this.mapScanJobRow(row) : null
+  }
+
+  public dismissScanJob(id: number): void {
+    this.assertOpen()
+    validateSafeInteger(id, 'id', 1)
+    this.db.prepare('UPDATE scan_jobs SET is_dismissed = 1 WHERE id = ?;').run(id)
   }
 
   public getActiveScanJob(): ScanJobRecord | null {
@@ -1428,6 +1455,112 @@ export class CatalogDatabase {
       count: row.count,
       totalBytes: row.total_bytes
     }
+  }
+
+  public linkUnhashedFilesForRootsToJob(jobId: number, roots: readonly string[]): number {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    if (!Array.isArray(roots) || roots.length === 0) return 0
+
+    const sep = process.platform === 'win32' ? '\\' : '/'
+    const conditions: string[] = []
+    const params: (string | number)[] = [jobId]
+
+    for (const r of roots) {
+      const normRoot = normalizePathForLookup(r)
+      const prefix = normRoot + sep
+      conditions.push('(fl.normalized_path = ? OR substr(fl.normalized_path, 1, ?) = ?)')
+      params.push(normRoot, prefix.length, prefix)
+    }
+
+    const sql = `
+      INSERT OR IGNORE INTO scan_job_files (job_id, file_location_id)
+      SELECT ?, fl.id
+      FROM file_locations fl
+      JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      WHERE h.id IS NULL
+        AND (${conditions.join(' OR ')});
+    `
+    const res = this.db.prepare(sql).run(...params)
+    return Number(res.changes)
+  }
+
+  public clearScanJobFiles(jobId: number): void {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    this.db.prepare('DELETE FROM scan_job_files WHERE job_id = ?;').run(jobId)
+  }
+
+  public countUnhashedFilesForJob(jobId: number): UnhashedCountResult {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(d.byte_size), 0) AS total_bytes
+      FROM scan_job_files sjf
+      JOIN file_locations fl ON sjf.file_location_id = fl.id
+      JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      WHERE sjf.job_id = ?
+        AND h.id IS NULL;
+    `)
+    const row = stmt.get(jobId) as { count: number; total_bytes: number } | undefined
+    return {
+      count: row?.count ?? 0,
+      totalBytes: row?.total_bytes ?? 0
+    }
+  }
+
+  public getUnhashedFilesForJob(
+    jobId: number,
+    options?: UnhashedFilesOptions
+  ): readonly UnhashedFileRecord[] {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    const limit =
+      options?.limit !== undefined
+        ? validateSafeInteger(options.limit, 'limit', 1, MAX_PAGE_LIMIT)
+        : 1000
+
+    const hasAfterId = options?.afterId !== undefined
+    const afterId = hasAfterId ? validateSafeInteger(options!.afterId!, 'afterId', 0) : 0
+    const whereAfterId = hasAfterId ? 'AND fl.id > ?' : ''
+
+    const stmt = this.db.prepare(`
+      SELECT
+        fl.id AS file_location_id,
+        fl.original_path,
+        d.id AS discovery_observation_id,
+        d.byte_size,
+        d.filesystem_birthtime_ms,
+        d.filesystem_mtime_ms
+      FROM scan_job_files sjf
+      JOIN file_locations fl ON sjf.file_location_id = fl.id
+      JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      WHERE sjf.job_id = ?
+        AND h.id IS NULL
+        ${whereAfterId}
+      ORDER BY fl.id ASC
+      LIMIT ?;
+    `)
+    const params = hasAfterId ? [jobId, afterId, limit] : [jobId, limit]
+    const rows = stmt.all(...params) as Array<{
+      file_location_id: number
+      original_path: string
+      discovery_observation_id: number
+      byte_size: number
+      filesystem_birthtime_ms: number | null
+      filesystem_mtime_ms: number | null
+    }>
+    return rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      discoveryObservationId: r.discovery_observation_id,
+      originalPath: r.original_path,
+      byteSize: r.byte_size,
+      filesystemBirthtimeMs: r.filesystem_birthtime_ms,
+      filesystemMtimeMs: r.filesystem_mtime_ms
+    }))
   }
 
   public countSources(): number {

@@ -17,6 +17,7 @@ export interface ScanJobsPanelProps {
   readonly onPauseScan: () => void
   readonly onResumeScan: () => void
   readonly onCancelScan: () => void
+  readonly onDismissJob?: (jobId: number) => void
   readonly onClearRoots: () => void
   readonly onClearJob: () => void
 }
@@ -30,6 +31,7 @@ export function ScanJobsPanel({
   onPauseScan,
   onResumeScan,
   onCancelScan,
+  onDismissJob,
   onClearRoots,
   onClearJob
 }: ScanJobsPanelProps) {
@@ -285,22 +287,32 @@ export function ScanJobsPanel({
         )}
 
         {job.status === 'completed' && (
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={onClearJob}
-            aria-label="Scan another folder"
-          >
-            <FolderSearch size={16} aria-hidden="true" />
-            <span>Scan Another Folder</span>
-          </button>
+          <>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onClearJob}
+              aria-label="Scan another folder"
+            >
+              <FolderSearch size={16} aria-hidden="true" />
+              <span>Scan Another Folder</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => (onDismissJob ? onDismissJob(job.jobId) : onClearJob())}
+              aria-label="Dismiss scan"
+            >
+              <span>Dismiss</span>
+            </button>
+          </>
         )}
 
         {(job.status === 'cancelled' || job.status === 'failed') && (
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={onClearJob}
+            onClick={() => (onDismissJob ? onDismissJob(job.jobId) : onClearJob())}
             aria-label="Dismiss scan"
           >
             <span>Dismiss</span>

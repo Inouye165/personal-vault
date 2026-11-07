@@ -117,6 +117,8 @@ describe('IPC handlers: trusted sender', () => {
       resumeScan: vi.fn(),
       cancelScan: vi.fn(),
       getActiveJob: vi.fn().mockReturnValue(null),
+      getLatestJob: vi.fn().mockReturnValue(null),
+      dismissScanJob: vi.fn(),
       onProgress: vi.fn()
     }
 
@@ -139,6 +141,15 @@ describe('IPC handlers: trusted sender', () => {
     // Get active job
     const activeRes = await invoke(IPC_CHANNELS.SCAN_GET_ACTIVE_JOB, trusted)
     expect(activeRes).toEqual({ job: null })
+
+    // Get latest job
+    const latestRes = await invoke(IPC_CHANNELS.SCAN_GET_LATEST_JOB, trusted)
+    expect(latestRes).toEqual({ job: null })
+
+    // Dismiss job
+    const dismissRes = await invoke(IPC_CHANNELS.SCAN_DISMISS_JOB, trusted, { jobId: 1 })
+    expect(dismissRes).toEqual({ success: true })
+    expect(mockCoordinator.dismissScanJob).toHaveBeenCalledWith(1)
   })
 })
 

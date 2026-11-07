@@ -10,6 +10,9 @@ import {
   JobIdRequestSchema,
   JobActionResponseSchema,
   GetActiveJobResponseSchema,
+  GetLatestJobResponseSchema,
+  DismissJobRequestSchema,
+  DismissJobResponseSchema,
   ScanJobProgressSchema,
   validatePayload,
   type AppInfo,
@@ -19,6 +22,8 @@ import {
   type StartScanRequest,
   type JobActionResponse,
   type GetActiveJobResponse,
+  type GetLatestJobResponse,
+  type DismissJobResponse,
   type ScanJobProgress
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
@@ -121,6 +126,28 @@ const api: VaultApi = {
     const result = validatePayload(GetActiveJobResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getActiveScanJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getLatestScanJob(): Promise<GetLatestJobResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SCAN_GET_LATEST_JOB)
+    const result = validatePayload(GetLatestJobResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getLatestScanJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async dismissScanJob(jobId: number): Promise<DismissJobResponse> {
+    const parsed = validatePayload(DismissJobRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid dismissScanJob request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SCAN_DISMISS_JOB, parsed.data)
+    const result = validatePayload(DismissJobResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid dismissScanJob response from main: ${result.error}`)
     }
     return result.data
   },

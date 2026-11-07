@@ -229,8 +229,10 @@ async function main() {
     else {
       const expectMethods = [
         'cancelScan',
+        'dismissScanJob',
         'getActiveScanJob',
         'getAppInfo',
+        'getLatestScanJob',
         'getVaultStatus',
         'onScanProgress',
         'pauseScan',

@@ -41,6 +41,8 @@ describe('Stage 2D — Scan Job UI Integration', () => {
     resumeScan: vi.fn(async () => ({ success: true })),
     cancelScan: vi.fn(async () => ({ success: true })),
     getActiveScanJob: vi.fn(async () => ({ job: null })),
+    getLatestScanJob: vi.fn(async () => ({ job: null })),
+    dismissScanJob: vi.fn(async () => ({ success: true })),
     onScanProgress: vi.fn((cb) => {
       progressCallback = cb
       return () => {
@@ -204,5 +206,109 @@ describe('Stage 2D — Scan Job UI Integration', () => {
 
     // Must display honest status text reflecting errors, not a clean success
     expect(screen.getAllByText(/completed with errors/i).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('restores latest terminal job on startup when no active job exists and supports dismissal', async () => {
+    const terminalJob: ScanJobProgress = {
+      jobId: 42,
+      status: 'completed',
+      phase: 'completed',
+      roots: ['D:/photos'],
+      discoveredCount: 5,
+      hashedCount: 4,
+      totalFilesToHash: 5,
+      totalBytes: 5000,
+      hashedBytes: 4000,
+      skippedCount: 0,
+      errorCount: 1,
+      errorMessage: '1 file(s) encountered errors during scan',
+      errors: [
+        {
+          path: 'D:/photos/bad.jpg',
+          code: 'eacces',
+          message: 'Permission denied',
+          phase: 'hashing'
+        }
+      ],
+      startedAtMs: 1000,
+      updatedAtMs: 2000,
+      completedAtMs: 2000
+    }
+
+    const dismissMock = vi.fn(async () => ({ success: true }))
+    window.api = {
+      ...mockApi(),
+      getActiveScanJob: vi.fn(async () => ({ job: null })),
+      getLatestScanJob: vi.fn(async () => ({ job: terminalJob })),
+      dismissScanJob: dismissMock
+    } as unknown as VaultApi
+
+    await mount()
+
+    // Persisted "Completed with errors" terminal state is restored
+    expect(screen.getAllByText(/completed with errors/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/1 file\(s\) encountered errors/i)).toBeInTheDocument()
+
+    // Dismiss button is present and clickable
+    const dismissBtn = screen.getByRole('button', { name: /dismiss/i })
+    expect(dismissBtn).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(dismissBtn)
+    })
+
+    expect(dismissMock).toHaveBeenCalledWith(42)
+    // After dismissal, the terminal card is removed
+    expect(screen.queryByText(/completed with errors/i)).not.toBeInTheDocument()
+  })
+
+  it('prioritizes active/interrupted jobs over latest terminal jobs on startup', async () => {
+    const interruptedJob: ScanJobProgress = {
+      jobId: 10,
+      status: 'interrupted',
+      phase: 'hashing',
+      roots: ['D:/photos'],
+      discoveredCount: 10,
+      hashedCount: 5,
+      totalFilesToHash: 10,
+      totalBytes: 10000,
+      hashedBytes: 5000,
+      skippedCount: 0,
+      errorCount: 0,
+      errors: [],
+      startedAtMs: 1000,
+      updatedAtMs: 2000,
+      completedAtMs: null
+    }
+
+    const terminalJob: ScanJobProgress = {
+      jobId: 9,
+      status: 'completed',
+      phase: 'completed',
+      roots: ['D:/photos'],
+      discoveredCount: 5,
+      hashedCount: 5,
+      totalFilesToHash: 5,
+      totalBytes: 5000,
+      hashedBytes: 5000,
+      skippedCount: 0,
+      errorCount: 0,
+      errors: [],
+      startedAtMs: 500,
+      updatedAtMs: 800,
+      completedAtMs: 800
+    }
+
+    window.api = {
+      ...mockApi(),
+      getActiveScanJob: vi.fn(async () => ({ job: interruptedJob })),
+      getLatestScanJob: vi.fn(async () => ({ job: terminalJob }))
+    } as unknown as VaultApi
+
+    await mount()
+
+    // Interrupted job must be shown, with resume button
+    expect(screen.getAllByText(/interrupted/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByRole('button', { name: /resume scan/i })).toBeInTheDocument()
   })
 })

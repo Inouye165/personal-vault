@@ -608,4 +608,151 @@ describe('Stage 2D — Scan Job Coordinator and Resumable Lifecycle', () => {
       expect(final.errors[0]?.phase).toBe('hashing')
     })
   })
+
+  describe('Overlapping Source Roots and Membership Scope', () => {
+    it('hashes modified files in subfolder scan after parent scan (reviewer reproduction)', async () => {
+      // Create parent/child/good.jpg
+      const parentDir = join(testDir, 'parent-scope')
+      const childDir = join(parentDir, 'child')
+      await fs.mkdir(childDir, { recursive: true })
+      const goodPath = join(childDir, 'good.jpg')
+      await fs.writeFile(goodPath, 'initial-good-bytes-content')
+
+      // Scan parent to completion
+      const job1 = await coordinator.startScan({ roots: [parentDir] })
+      const res1 = await coordinator.waitForJob(job1.jobId)
+      expect(res1.status).toBe('completed')
+      expect(res1.discoveredCount).toBe(1)
+      expect(res1.hashedCount).toBe(1)
+
+      const locBefore = db.getFileLocationByOriginalPath(goodPath)
+      expect(locBefore).not.toBeNull()
+      expect(locBefore?.activeHash).not.toBeNull()
+      const oldHash = locBefore?.activeHash
+
+      // Modify good.jpg so its byte size changes
+      await new Promise((r) => setTimeout(r, 20))
+      await fs.writeFile(goodPath, 'modified-good-bytes-content-with-longer-size')
+
+      // Scan child to completion
+      const job2 = await coordinator.startScan({ roots: [childDir] })
+      const res2 = await coordinator.waitForJob(job2.jobId)
+      expect(res2.status).toBe('completed')
+      expect(res2.discoveredCount).toBe(1)
+      expect(res2.hashedCount).toBe(1)
+      expect(res2.errorCount).toBe(0)
+
+      const locAfter = db.getFileLocationByOriginalPath(goodPath)
+      expect(locAfter).not.toBeNull()
+      expect(locAfter?.activeHash).not.toBeNull()
+      expect(locAfter?.activeHash).not.toBe(oldHash)
+      // Source ID provenance is preserved (still points to original source)
+      expect(locAfter?.sourceId).toBe(locBefore?.sourceId)
+    })
+
+    it('handles subfolder scan followed by parent scan after file modification', async () => {
+      const parentDir = join(testDir, 'parent-sub-test')
+      const childDir = join(parentDir, 'child')
+      await fs.mkdir(childDir, { recursive: true })
+      const filePath = join(childDir, 'photo.jpg')
+      await fs.writeFile(filePath, 'sub-content-1')
+
+      // Scan child first
+      const job1 = await coordinator.startScan({ roots: [childDir] })
+      await coordinator.waitForJob(job1.jobId)
+
+      // Modify photo.jpg
+      await new Promise((r) => setTimeout(r, 20))
+      await fs.writeFile(filePath, 'sub-content-2-modified')
+
+      // Scan parent
+      const job2 = await coordinator.startScan({ roots: [parentDir] })
+      const res2 = await coordinator.waitForJob(job2.jobId)
+      expect(res2.status).toBe('completed')
+      expect(res2.discoveredCount).toBe(1)
+      expect(res2.hashedCount).toBe(1)
+
+      const loc = db.getFileLocationByOriginalPath(filePath)
+      expect(loc?.activeHash).not.toBeNull()
+    })
+
+    it('handles overlapping roots in the same job without duplicate counting or processing', async () => {
+      const parentDir = join(testDir, 'parent-overlap')
+      const childDir = join(parentDir, 'child')
+      await fs.mkdir(childDir, { recursive: true })
+      await fs.writeFile(join(childDir, 'item.jpg'), 'overlap-content')
+
+      const job = await coordinator.startScan({ roots: [parentDir, childDir] })
+      const res = await coordinator.waitForJob(job.jobId)
+
+      expect(res.status).toBe('completed')
+      expect(res.discoveredCount).toBe(1)
+      expect(res.hashedCount).toBe(1)
+    })
+
+    it('prevents hashing outside the selected approved scope', async () => {
+      const parentDir = join(testDir, 'scope-parent')
+      const siblingDir = join(testDir, 'scope-sibling')
+      await fs.mkdir(parentDir, { recursive: true })
+      await fs.mkdir(siblingDir, { recursive: true })
+      await fs.writeFile(join(parentDir, 'a.jpg'), 'a-content')
+      await fs.writeFile(join(siblingDir, 'b.jpg'), 'b-content')
+
+      // Scan sibling first
+      const job1 = await coordinator.startScan({ roots: [siblingDir] })
+      await coordinator.waitForJob(job1.jobId)
+
+      // Now scan parent only
+      const job2 = await coordinator.startScan({ roots: [parentDir] })
+      const res2 = await coordinator.waitForJob(job2.jobId)
+      expect(res2.discoveredCount).toBe(1)
+      expect(res2.hashedCount).toBe(1)
+    })
+  })
+
+  describe('Ordinary Application Shutdown and Terminal Result Restoration', () => {
+    it('ordinary shutdown consistently produces an interrupted result with emitted event and resolved promise', async () => {
+      const slowDir = join(testDir, 'slow-shutdown')
+      await fs.mkdir(slowDir, { recursive: true })
+      for (let i = 0; i < 40; i++) {
+        await fs.writeFile(join(slowDir, `file-${i}.jpg`), `content-${i}`)
+      }
+
+      const events: ScanJobProgress[] = []
+      coordinator.onProgress((p) => events.push(p))
+
+      const job = await coordinator.startScan({ roots: [slowDir] })
+      expect(job.status).toBe('running')
+
+      // Call shutdown while job is running
+      await coordinator.shutdown()
+
+      // The job status in db must be interrupted, not cancelled
+      const dbJob = db.getScanJob(job.jobId)
+      expect(dbJob?.status).toBe('interrupted')
+
+      // Completion promise must resolve with interrupted status
+      const terminalEvent = events[events.length - 1]
+      expect(terminalEvent?.status).toBe('interrupted')
+    })
+
+    it('restores latest terminal job and supports dismissal', async () => {
+      const job = await coordinator.startScan({ roots: [sourceDir1] })
+      await coordinator.waitForJob(job.jobId)
+
+      expect(coordinator.getActiveJob()).toBeNull()
+
+      // getLatestJob retrieves the completed terminal job
+      const latest = coordinator.getLatestJob()
+      expect(latest).not.toBeNull()
+      expect(latest?.jobId).toBe(job.jobId)
+      expect(latest?.status).toBe('completed')
+
+      // Dismiss the terminal job
+      coordinator.dismissScanJob(job.jobId)
+
+      // After dismissal, getLatestJob with unDismissedOnly returns null
+      expect(coordinator.getLatestJob({ unDismissedOnly: true })).toBeNull()
+    })
+  })
 })

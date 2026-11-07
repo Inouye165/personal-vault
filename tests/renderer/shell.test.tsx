@@ -18,6 +18,8 @@ const healthyApi = (): VaultApi => ({
   resumeScan: vi.fn(async () => ({ success: true })),
   cancelScan: vi.fn(async () => ({ success: true })),
   getActiveScanJob: vi.fn(async () => ({ job: null })),
+  getLatestScanJob: vi.fn(async () => ({ job: null })),
+  dismissScanJob: vi.fn(async () => ({ success: true })),
   onScanProgress: vi.fn(() => () => {})
 })
 

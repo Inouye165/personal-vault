@@ -48,7 +48,9 @@ describe('preload bridge', () => {
         'pauseScan',
         'resumeScan',
         'cancelScan',
+        'dismissScanJob',
         'getActiveScanJob',
+        'getLatestScanJob',
         'onScanProgress'
       ].sort()
     )

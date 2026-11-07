@@ -16,16 +16,24 @@ Stage 2D implements resumable background scan jobs, SQLite job state and checkpo
 ### 1.1 Catalog Database Migration & Job Persistence (`src/main/services/catalog/`)
 
 - [`src/main/services/catalog/migrations.ts`](file:///d:/organizer/src/main/services/catalog/migrations.ts):
-  - Incremented `CURRENT_SCHEMA_VERSION = 3`.
+  - Incremented `CURRENT_SCHEMA_VERSION = 4`.
   - **Migration 3 (`scan_jobs_and_errors`)**:
     - Creates `scan_jobs` table tracking `id`, `roots_json`, `status` (`running`, `paused`, `cancelled`, `interrupted`, `failed`, `completed`), `phase` (`idle`, `discovery`, `hashing`, `completed`), `discovered_count`, `hashed_count`, `failed_count`, `created_at_ms`, `updated_at_ms`, `completed_at_ms`, and `last_checkpoint_ms`.
     - Creates `scan_job_errors` table tracking `id`, `job_id` (foreign key with `ON DELETE CASCADE`), `file_path`, `phase` (`discovery` | `hashing`), `error_code`, `error_message`, and `created_at_ms`.
     - Enforces check constraints on `status` and `phase`.
+  - **Migration 4 (`scan_job_files_and_dismissal`)**:
+    - Adds `is_dismissed INTEGER NOT NULL DEFAULT 0` column to `scan_jobs` for tracking user dismissal of terminal job reports.
+    - Creates `scan_job_files` table (`job_id INTEGER NOT NULL`, `file_location_id INTEGER NOT NULL`, `PRIMARY KEY (job_id, file_location_id)`) with foreign keys and cascade deletion. Explicitly maps scan job membership independently of original `file_locations.source_id` registration.
 - [`src/main/services/catalog/database.ts`](file:///d:/organizer/src/main/services/catalog/database.ts):
   - `createScanJob`: creates new scan job record in `running` status.
   - `getScanJob`: retrieves job by ID with parsed roots.
-  - `getLatestScanJob`: retrieves most recent scan job.
+  - `getLatestScanJob(options?: { unDismissedOnly?: boolean })`: retrieves most recent scan job, optionally filtering dismissed records.
   - `getActiveScanJob`: retrieves current active (`running` or `paused`) or `interrupted` scan job.
+  - `dismissScanJob(jobId)`: flags a job record as dismissed (`is_dismissed = 1`).
+  - `clearScanJobFiles(jobId)`: cleans up mapped candidate file records for a job.
+  - `countUnhashedFilesForJob(jobId)`: counts unhashed files explicitly mapped to the job in `scan_job_files`.
+  - `getUnhashedFilesForJob(jobId, options)`: keyset-paginated retrieval (`afterId`) of unhashed files mapped to the job.
+  - `linkUnhashedFilesForRootsToJob(jobId, roots)`: links unhashed candidate files matching approved root paths into `scan_job_files`.
   - `updateScanJobProgress`: persists incremental checkpoints (`discoveredCount`, `hashedCount`, `failedCount`).
   - `updateScanJobStatus`: updates lifecycle state, phase, and completion timestamps.
   - `recordScanJobError`: records typed error in `scan_job_errors`.
@@ -38,13 +46,18 @@ Stage 2D implements resumable background scan jobs, SQLite job state and checkpo
 
 - [`src/main/services/jobs/coordinator.ts`](file:///d:/organizer/src/main/services/jobs/coordinator.ts):
   - Coordinates read-only streaming discovery (`scanSourceRoots`), streaming SHA-256 content hashing (`hashFile`), and bounded SQLite persistence (`CatalogDatabase`).
-  - **Single Active Job Concurrency Lock**: Enforces at most one running/paused job at a time; rejects concurrent scan attempts with `ActiveJobConflictError`.
+  - **Single Active Job Concurrency Lock**: Enforces at most one running/paused job at a time; rejects concurrent scan attempts with `ActiveJobConflictError`. Ownership is reserved synchronously (`isStarting`) before asynchronous validation.
+  - **Effective Roots & Overlapping Root Scoping**:
+    - Discovers files using `getEffectiveRoots(roots)` to eliminate redundant descendant traversals when parent and child roots are supplied simultaneously, while preserving requested roots.
+    - Tracks candidate discovery in `scan_job_files`, decoupling hashing membership from historic `file_locations.source_id` provenance.
+    - Deduplicates candidate paths across roots via `seenCandidatePaths`.
   - **Cooperative Event Loop Yielding**: Yields control periodically to the Node/Electron event loop via `setImmediate`, keeping UI responsive during large directory traversals and hashing loops.
   - **Pause and Resume**:
     - `pauseScan()`: sets pause flag, checkpoints progress, gracefully pauses between files, and transitions job status to `paused`.
     - `resumeScan()`: re-runs discovery across configured roots, revalidating observations, and hashes remaining unhashed files to completion.
-  - **Cancellation**:
-    - `cancelScan()`: triggers `AbortController`, terminates discovery traversal and active file stream immediately, flushes committed state, and transitions status to `cancelled`.
+  - **Cancellation & Graceful Shutdown**:
+    - `cancelScan()`: triggers `AbortController`, terminates discovery traversal and active file stream immediately, flushes committed state, and transitions status to `cancelled`. Awaits loop termination before returning.
+    - `shutdown()`: triggers graceful abort with `state.status = 'interrupted'` before aborting, guaranteeing application quit records an `interrupted` (recoverable) state rather than `cancelled`.
   - **Restart Crash Recovery & Interruption Detection**:
     - `initialize()`: marks any leftover `running` or `paused` jobs as `interrupted`.
     - Resuming an interrupted job re-discovers all files and revalidates file sizes and timestamps.
@@ -57,13 +70,13 @@ Stage 2D implements resumable background scan jobs, SQLite job state and checkpo
 ### 1.3 IPC Contracts & Boundary Validation (`src/shared/`, `src/preload/`, `src/main/ipc/`)
 
 - [`src/shared/contracts/channels.ts`](file:///d:/organizer/src/shared/contracts/channels.ts):
-  - Added channels: `SCAN_SELECT_ROOTS`, `SCAN_START_JOB`, `SCAN_PAUSE_JOB`, `SCAN_RESUME_JOB`, `SCAN_CANCEL_JOB`, `SCAN_GET_ACTIVE_JOB`, `SCAN_PROGRESS_EVENT`.
+  - Added channels: `SCAN_SELECT_ROOTS`, `SCAN_START_JOB`, `SCAN_PAUSE_JOB`, `SCAN_RESUME_JOB`, `SCAN_CANCEL_JOB`, `SCAN_GET_ACTIVE_JOB`, `SCAN_GET_LATEST_JOB`, `SCAN_DISMISS_JOB`, `SCAN_PROGRESS_EVENT`.
 - [`src/shared/validation/ipc-schemas.ts`](file:///d:/organizer/src/shared/validation/ipc-schemas.ts):
   - Zod schemas validating all channel requests, responses, and progress events in both directions:
-    - `SelectRootsResponseSchema`, `StartScanRequestSchema`, `JobIdRequestSchema`, `JobActionResponseSchema`, `GetActiveJobResponseSchema`, `ScanJobProgressSchema`, `ScanJobErrorSchema`.
+    - `SelectRootsResponseSchema`, `StartScanRequestSchema`, `JobIdRequestSchema`, `JobActionResponseSchema`, `GetActiveJobResponseSchema`, `GetLatestJobResponseSchema`, `DismissJobRequestSchema`, `DismissJobResponseSchema`, `ScanJobProgressSchema`, `ScanJobErrorSchema`.
 - [`src/preload/index.ts`](file:///d:/organizer/src/preload/index.ts) & [`src/preload/index.d.ts`](file:///d:/organizer/src/preload/index.d.ts):
   - Exposes typed methods on `window.api`:
-    - `selectRoots()`, `startScan()`, `pauseScan()`, `resumeScan()`, `cancelScan()`, `getActiveScanJob()`, `onScanProgress()`.
+    - `selectRoots()`, `startScan()`, `pauseScan()`, `resumeScan()`, `cancelScan()`, `getActiveScanJob()`, `getLatestScanJob()`, `dismissScanJob()`, `onScanProgress()`.
   - Runtime Zod parsing guarantees that malformed requests from renderer or malformed responses from main throw explicit errors rather than corrupting state.
 - [`src/main/ipc/handlers.ts`](file:///d:/organizer/src/main/ipc/handlers.ts):
   - Registers handlers with strict `validateSender` enforcement on every channel (top-level frame, trusted URL origin).
@@ -75,11 +88,12 @@ Stage 2D implements resumable background scan jobs, SQLite job state and checkpo
 - [`src/renderer/src/components/ScanJobsPanel.tsx`](file:///d:/organizer/src/renderer/src/components/ScanJobsPanel.tsx):
   - Accessible folder selection button ("Choose Folders to Scan").
   - Active scan progress card displaying phase (`discovery` / `hashing`), counts (`discoveredCount`, `hashedCount`, `failedCount`), and accessible progress bar (`role="progressbar"` with `aria-valuenow`).
-  - Action buttons: Pause, Resume, Cancel, and Dismiss (for completed/failed jobs).
+  - Action buttons: Pause, Resume, Cancel, and Dismiss (for terminal completed or completed-with-errors jobs).
   - Recovery banner for `interrupted` jobs with one-click "Resume Scan" button.
   - Visible error section detailing failed files and error messages with `role="alert"`.
 - [`src/renderer/src/hooks/useScanJobs.ts`](file:///d:/organizer/src/renderer/src/hooks/useScanJobs.ts):
-  - Manages active job state, subscribes to `onScanProgress`, and refreshes status on completion.
+  - Manages job state, queries active/interrupted jobs first; if none exist, queries latest un-dismissed terminal job on startup.
+  - Subscribes to `onScanProgress`, exposes `dismissJob`, and refreshes status on completion.
 - [`src/renderer/src/App.tsx`](file:///d:/organizer/src/renderer/src/App.tsx) & [`src/renderer/src/components/EmptyState.tsx`](file:///d:/organizer/src/renderer/src/components/EmptyState.tsx):
   - Embeds `ScanJobsPanel` into the confirmed empty state and main application view.
   - Displays dynamic catalog inventory summary (indexed sources, registered files) updated immediately when a scan completes.
@@ -137,7 +151,30 @@ Following independent review feedback, seven issues were identified and addresse
 7. **Real Electron Scan Verification over IPC**:
    - _Resolution_: Rewrote `scripts/verify-electron-scan.mjs` to launch real Electron, exercise `window.api.startScan`, `pauseScan` (mandatory assertion), `resumeScan`, receive real IPC progress events via `onScanProgress`, simulate SQLite crash state, relaunch, recover active job as `interrupted`, resume and revalidate a modified file, and verify source file invariance. Added `--mode=unpacked` support via `npm run verify:scan:unpacked`.
 
-Ran `npm test`: **All 251 tests passed across 11 test suites (0 skipped)**.
+### 2.5 Independent Review Corrections (Pass 3)
+
+Following the third independent review round, four areas were addressed using failing behavioral regression tests before implementation:
+
+1. **Scan Scope Across Overlapping Source Roots**:
+   - _Failing test_: Added test reproducing the reviewer's finding where scanning a parent root (`D:/parent`), modifying a child file (`D:/parent/child/good.jpg`), and scanning the subfolder (`D:/parent/child`) left `activeHash = null` because historical `file_locations.source_id` pointed to the parent root. Also tested subfolder scan followed by parent scan, overlapping roots in the same job (`['D:/photos', 'D:/photos/vacation']`), and verified no hashing outside approved roots.
+   - _Resolution_: Decoupled job hashing scope from historical `source_id` registration. Created Migration 4 introducing the `scan_job_files` junction table (`job_id`, `file_location_id`). Discovery candidates and unhashed files under the approved roots (`linkUnhashedFilesForRootsToJob`) are mapped directly to `scan_job_files`. Added `getEffectiveRoots(roots)` to eliminate redundant descendant directory scans when both parent and child are specified, and deduplicated candidate file paths. Provenance and original `source_id` remain preserved.
+2. **Terminal Results Restoration & Dismissal After Restart**:
+   - _Failing test_: Added unit, IPC, and renderer tests for restoring persisted completed/failed results across application restarts when no active job is running, prioritizing active/interrupted jobs over terminal jobs, and verifying dismissal behavior.
+   - _Resolution_: Added `is_dismissed` column to `scan_jobs` (Migration 4). Added `getLatestScanJob({ unDismissedOnly: true })` and `dismissScanJob(jobId)` to `CatalogDatabase`, exposed via `SCAN_GET_LATEST_JOB` and `SCAN_DISMISS_JOB` IPC channels with Zod schema validation. Updated `useScanJobs` to check active jobs first, falling back to latest un-dismissed terminal job on mount, and added an accessible "Dismiss" button on the terminal status card.
+3. **Actual Crash & Shutdown Recovery Verification in Real Electron**:
+   - _Resolution_: Overhauled `scripts/verify-electron-scan.mjs` to eliminate synthetic SQL insertions. The suite now tests:
+     - Real in-progress scan termination: spawns a background scan over 300 files and abruptly kills the Electron process tree mid-flight.
+     - Relaunch on the same user data directory asserting that the job is recovered as `interrupted`.
+     - Resumption of the recovered job and revalidation of a modified source file.
+     - Direct SQLite inspection asserting that the modified file's new SHA-256 digest is `is_current = 1` and `is_active = 1`, while the previous hash observation is deactivated (`is_active = 0`).
+     - Real graceful quit/reopen recovery asserting that normal `window.close()` / shutdown drain persists the job as `interrupted`.
+     - Strict source preservation invariance ensuring original timestamps and sizes remain intact.
+     - Supports both `--mode=built` and `--mode=unpacked` (14/14 checks).
+4. **Accurate Verification Reporting & Shutdown Classification**:
+   - _Audit_: Audited shutdown classification in `ScanJobCoordinator.ts`. When `shutdown()` is called on quit, the execution loop checks `isInterrupted()` before checking `abortController.signal.aborted`, ensuring that application exit consistently produces an `interrupted` (recoverable) result, emits `interrupted` events, and settles completion promises.
+   - _Reporting_: Verification diagnostics now log explicit CDP target discovery status. Verification results on the implementation host are reported separately from reviewer environments without speculation.
+
+Ran `npm test`: **All 271 tests passed across 11 test suites (0 skipped)**.
 
 ---
 
@@ -145,20 +182,20 @@ Ran `npm test`: **All 251 tests passed across 11 test suites (0 skipped)**.
 
 Execution results on implementation host (`D:\organizer`):
 
-| Command                          | Result   | Details                                                                                  |
-| -------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
-| `npm test`                       | **PASS** | 11 test files: 251 passed, 0 skipped repository-wide                                     |
-| `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)   |
-| `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                      |
-| `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                         |
-| `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer     |
-| `npm run build:unpack`           | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                   |
-| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                  |
-| `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)        |
-| `npm run verify:scan`            | **PASS** | Real Electron runtime exercises scan workflow, IPC boundary, pause/resume, crash (11/11) |
-| `npm run verify:scan:unpacked`   | **PASS** | Unpacked desktop binary exercises scan workflow, IPC boundary, recovery (11/11)          |
-| `npm run smoke:built`            | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron           |
-| `npm run smoke:unpacked`         | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks  |
+| Command                          | Result   | Details                                                                                        |
+| -------------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `npm test`                       | **PASS** | 11 test files: 271 passed, 0 skipped repository-wide                                           |
+| `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)         |
+| `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                            |
+| `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                               |
+| `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer           |
+| `npm run build:unpack`           | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                         |
+| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                        |
+| `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)              |
+| `npm run verify:scan`            | **PASS** | Real Electron runtime exercises scan workflow, IPC, crash & graceful recovery, digests (14/14) |
+| `npm run verify:scan:unpacked`   | **PASS** | Unpacked desktop binary exercises scan workflow, IPC, crash & graceful recovery (14/14)        |
+| `npm run smoke:built`            | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron                 |
+| `npm run smoke:unpacked`         | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks        |
 
 ---
 

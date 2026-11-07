@@ -8,6 +8,8 @@ export const IPC_CHANNELS = {
   SCAN_RESUME_JOB: 'scan:resume-job',
   SCAN_CANCEL_JOB: 'scan:cancel-job',
   SCAN_GET_ACTIVE_JOB: 'scan:get-active-job',
+  SCAN_GET_LATEST_JOB: 'scan:get-latest-job',
+  SCAN_DISMISS_JOB: 'scan:dismiss-job',
   SCAN_PROGRESS_EVENT: 'scan:progress-event'
 } as const
 

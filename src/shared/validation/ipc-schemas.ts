@@ -101,6 +101,20 @@ export const GetActiveJobResponseSchema = z.object({
 })
 export type GetActiveJobResponse = z.infer<typeof GetActiveJobResponseSchema>
 
+export const GetLatestJobResponseSchema = GetActiveJobResponseSchema
+export type GetLatestJobResponse = GetActiveJobResponse
+
+export const DismissJobRequestSchema = z.object({
+  jobId: z.number().int().positive()
+})
+export type DismissJobRequest = z.infer<typeof DismissJobRequestSchema>
+
+export const DismissJobResponseSchema = z.object({
+  success: z.boolean(),
+  error: z.string().optional()
+})
+export type DismissJobResponse = z.infer<typeof DismissJobResponseSchema>
+
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,
   data: unknown

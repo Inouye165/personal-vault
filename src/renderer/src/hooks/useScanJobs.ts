@@ -11,17 +11,23 @@ export function useScanJobs() {
     const api = window.api
     if (!api) return
 
-    // Query active or interrupted job on startup
+    // Query active or interrupted job on startup; if none, query latest terminal job
     api
       .getActiveScanJob()
       .then((res) => {
         if (active && res.job) {
           setJob(res.job)
+          return
         }
+        return api.getLatestScanJob?.().then((latestRes) => {
+          if (active && latestRes?.job) {
+            setJob(latestRes.job)
+          }
+        })
       })
       .catch((err) => {
         if (active) {
-          console.error('Failed to query active scan job:', err)
+          console.error('Failed to query active/latest scan job:', err)
         }
       })
 
@@ -108,6 +114,19 @@ export function useScanJobs() {
     }
   }, [job])
 
+  const dismissJob = useCallback(async (jobId: number) => {
+    const api = window.api
+    if (!api) return
+    try {
+      if (api.dismissScanJob) {
+        await api.dismissScanJob(jobId)
+      }
+      setJob(null)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
   const clearRoots = useCallback(() => {
     setSelectedRoots([])
     setActionError(null)
@@ -127,6 +146,7 @@ export function useScanJobs() {
     pauseScan,
     resumeScan,
     cancelScan,
+    dismissJob,
     clearRoots,
     clearJob
   }

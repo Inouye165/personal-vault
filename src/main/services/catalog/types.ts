@@ -136,6 +136,7 @@ export interface ScanJobRecord {
   readonly skippedCount: number
   readonly errorCount: number
   readonly errorMessage: string | null
+  readonly isDismissed: boolean
   readonly createdAtMs: number
   readonly updatedAtMs: number
   readonly startedAtMs: number
