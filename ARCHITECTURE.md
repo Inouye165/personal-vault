@@ -170,29 +170,33 @@ src/
      - Never creates files on module import or begins automatic scans.
      - Parent directories are created automatically if missing.
    - **Versioned Transactional Schema Migrations**:
-     - Migrations are tracked in `schema_migrations` (`version`, `name`, `applied_at_ms`).
-     - Reopening an existing database at the current version is idempotent and safe.
-     - Reopening with an unsupported future schema version (`version > CURRENT_SCHEMA_VERSION`) fails immediately with `UnsupportedSchemaVersionError` without executing any SQL modifications.
+     - Pre-checks schema compatibility (`checkSchemaCompatibility`) via `sqlite_master` in both read-only and read-write modes BEFORE changing journal mode or running DDL.
+     - Preserves existing database contents, schema, and journal mode (e.g. `DELETE` mode is never overwritten with `WAL` when encountering a future schema).
+     - Unsupported future schema versions (`version > CURRENT_SCHEMA_VERSION`) fail immediately with `UnsupportedSchemaVersionError` without modifying the database.
+     - Failed open attempts close the connection cleanly without leaking handles.
      - Migrations execute inside an explicit transaction (`BEGIN TRANSACTION` ... `COMMIT`), rolling back changes completely on error.
    - **Normalized Lookup Keys vs. Verbatim Original Paths**:
      - `original_path` and `file_name` are preserved exactly as discovered (verbatim case, whitespace, and Unicode characters like emojis or non-ASCII scripts).
-     - `normalized_path` is kept separate solely as a lookup and uniqueness key (`UNIQUE` constraint).
-     - Platform behavior: on Windows (`win32`), slashes are standardized to `\`, trailing separators stripped, and paths folded to lowercase (`.toLowerCase()`) for case-insensitive matching; on POSIX systems (`linux`, `darwin`), standardizes separators and normalizes while preserving case.
+     - `file_locations` enforces uniqueness on `original_path`, while indexing `normalized_path` separately for search and lookups.
+     - Platform behavior: on Windows (`win32`), slashes are standardized to `\`, trailing separators stripped, and paths folded to lowercase (`.toLowerCase()`) for case-insensitive matching; distinct files that share a case-folded key (e.g. on per-directory case-sensitive NTFS) retain separate records without fact loss. On POSIX systems (`linux`, `darwin`), standardizes separators via `posix.normalize` while preserving case and backslashes (`\`) as valid filename characters without converting them to forward slashes.
    - **Fact vs. Inference Separation & Timestamp Honesty**:
      - Filesystem dates (`filesystem_birthtime_ms`, `filesystem_mtime_ms`) are recorded as immutable discovery facts.
      - `inferred_capture_time_ms` is kept distinct and initialized to `null`. Unknown values remain `null`; filesystem dates are never fabricated as capture dates.
-   - **Changed-File Modeling & Explicit Hash Validity**:
-     - `file_locations` stores the latest recorded discovery facts.
-     - `hash_observations` stores SHA-256 observations with `observed_byte_size`, `observed_mtime_ms`, `hashed_at_ms`, and `is_active` boolean flag.
-     - When a subsequent discovery scan observes that a file's `byte_size` or `filesystem_mtime_ms` has changed, the file's facts are updated and any existing active hash is immediately invalidated (`is_active = 0`). A new scan can never present an old hash as verified for modified file contents.
+   - **Preserved Discovery History & Hash Validity**:
+     - Discovery facts are stored immutably in `discovery_observations`.
+     - When a subsequent discovery scan observes that a file's `byte_size` or `filesystem_mtime_ms` has changed, the prior observation is marked `is_current = 0` (retaining prior sizes and timestamps in history), and a new observation is created with `is_current = 1`.
+     - Database constraint `idx_disc_obs_current` enforces at most one current discovery observation per file location.
+     - Hash observations in `hash_observations` are tied directly to the specific `discovery_observation_id` they verify. A changed observation does not inherit an earlier verified hash.
+     - Database constraint `idx_hash_obs_current` enforces at most one active verified hash per discovery observation.
      - If discovery observes identical size and mtime, `last_seen_at_ms` is updated while active hash validity is preserved without duplicate rows.
-   - **Foreign Keys, Cascades & Parameterized Transactions**:
+   - **Foreign Keys, Cascades & Full Transaction Rollback**:
      - Foreign keys are enforced (`PRAGMA foreign_keys = ON;`).
-     - Deleting a source cascades deletion to associated `file_locations` and `hash_observations` (`ON DELETE CASCADE`).
-     - Batch persistence (`persistDiscoveryBatch`, `recordHashObservationsBatch`) executes in a single transaction with automatic rollback if any candidate or observation fails validation.
-   - **Bounded & Paginated Queries**:
-     - Reads are bounded using `LIMIT` and `OFFSET` (`queryFileLocations`, `getDuplicateGroups`) with configurable limits (default 50, maximum 1000) and accurate total counts.
-     - Prevents unbounded memory consumption on large catalogs.
+     - Deleting a source cascades deletion to associated `file_locations`, `discovery_observations`, and `hash_observations` (`ON DELETE CASCADE`).
+     - Batch persistence (`persistDiscoveryBatch`, `recordHashObservationsBatch`) executes in a single transaction with automatic rollback if any candidate or observation fails validation. Source root registration is included within the transaction so failed batches leave no orphaned source records.
+   - **Enforced Resource Limits & Bounded Queries**:
+     - Enforces finite batch size limits (`MAX_BATCH_SIZE = 1000`) before database mutation; oversized batches are rejected eagerly with `RangeError`.
+     - Validates pagination parameters (`offset`, `limit`, `maxLocationsPerGroup`) as finite safe integers, rejecting `NaN`, negative offsets, fractions, and invalid limits.
+     - Reads are bounded using `LIMIT` and `OFFSET` across all entity queries (`listSources`, `getDiscoveryObservationsForFile`, `getHashObservationsForFile`, `queryFileLocations`, `getDuplicateGroups`), with member locations bounded per duplicate group to prevent unbounded memory allocation.
    - **Source Preservation Invariance**:
      - Database writes affect strictly the app-owned SQLite catalog file.
      - Source files on disk remain strictly read-only and unaltered.

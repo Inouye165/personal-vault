@@ -33,22 +33,18 @@ const MIGRATIONS: readonly Migration[] = [
         );
       `)
 
-      // 2. Discovered file locations and factual recorded metadata
+      // 2. Discovered file locations (verbatim original paths and filenames preserved)
       db.exec(`
         CREATE TABLE IF NOT EXISTS file_locations (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-          original_path TEXT NOT NULL,
-          normalized_path TEXT NOT NULL UNIQUE,
+          original_path TEXT NOT NULL UNIQUE,
+          normalized_path TEXT NOT NULL,
           file_name TEXT NOT NULL,
           extension TEXT NOT NULL,
           category TEXT NOT NULL CHECK (category IN ('photo', 'document')),
-          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
-          filesystem_birthtime_ms INTEGER,
-          filesystem_mtime_ms INTEGER,
-          inferred_capture_time_ms INTEGER,
-          first_discovered_at_ms INTEGER NOT NULL,
-          last_seen_at_ms INTEGER NOT NULL
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_file_locations_source ON file_locations(source_id);
@@ -56,11 +52,30 @@ const MIGRATIONS: readonly Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_file_locations_normalized_path ON file_locations(normalized_path);
       `)
 
-      // 3. SHA-256 hash observations and content validity
+      // 3. Immutable discovery observations (history preserved on content change)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS discovery_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          filesystem_birthtime_ms INTEGER,
+          filesystem_mtime_ms INTEGER,
+          inferred_capture_time_ms INTEGER,
+          observed_at_ms INTEGER NOT NULL,
+          last_seen_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_disc_obs_file ON discovery_observations(file_location_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_disc_obs_current ON discovery_observations(file_location_id) WHERE is_current = 1;
+      `)
+
+      // 4. SHA-256 hash observations tied directly to discovery observations
       db.exec(`
         CREATE TABLE IF NOT EXISTS hash_observations (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
           sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
           observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
           observed_mtime_ms INTEGER,
@@ -68,14 +83,40 @@ const MIGRATIONS: readonly Migration[] = [
           is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
         );
 
-        CREATE INDEX IF NOT EXISTS idx_hash_obs_file_active ON hash_observations(file_location_id, is_active);
+        CREATE INDEX IF NOT EXISTS idx_hash_obs_file ON hash_observations(file_location_id);
+        CREATE INDEX IF NOT EXISTS idx_hash_obs_disc ON hash_observations(discovery_observation_id);
         CREATE INDEX IF NOT EXISTS idx_hash_obs_sha256 ON hash_observations(sha256);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_hash_obs_current ON hash_observations(discovery_observation_id) WHERE is_active = 1;
       `)
     }
   }
 ]
 
+/**
+ * Checks if the database contains a schema version newer than supported,
+ * WITHOUT performing any schema or journal mode mutations.
+ */
+export function checkSchemaCompatibility(db: DatabaseSync): void {
+  const tableCheck = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations';")
+    .get()
+
+  if (tableCheck) {
+    const versionRow = db
+      .prepare('SELECT MAX(version) as max_version FROM schema_migrations;')
+      .get() as { max_version: number | null } | undefined
+
+    const currentVersion = versionRow?.max_version ?? 0
+    if (currentVersion > CURRENT_SCHEMA_VERSION) {
+      throw new UnsupportedSchemaVersionError(currentVersion, CURRENT_SCHEMA_VERSION)
+    }
+  }
+}
+
 export function runMigrations(db: DatabaseSync): void {
+  // Pre-check schema compatibility before any mutation or journal mode pragma
+  checkSchemaCompatibility(db)
+
   // Ensure foreign keys are active
   db.exec('PRAGMA foreign_keys = ON;')
 

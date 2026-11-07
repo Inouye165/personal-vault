@@ -30,9 +30,9 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 ## Stage 2: Read-Only Discovery, Metadata Inventory, and Resumable Scan Jobs
 
-Status: **incomplete — Stage 2A and Stage 2B complete (accepted at `e4488a2`); Stage 2C complete awaiting independent review; Stage 2D not started** (see HANDOFF.md).
+Status: **incomplete — Stage 2A and Stage 2B complete (accepted at `e4488a2`); Stage 2C corrections complete awaiting independent re-review; Stage 2D not started** (see HANDOFF.md).
 
-Verification: implementation host **146 passed, 0 skipped** across all 8 test files, with strict typecheck, lint, formatting, production build, real Electron smoke checks (built, unpacked), and Electron SQLite driver check passed.
+Verification: implementation host **154 passed, 0 skipped** across all 8 test files, with strict typecheck, lint, formatting, production build, real Electron smoke checks (built, unpacked), and Electron SQLite repository verification (`verify:sqlite`) passed.
 
 - [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
 - [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, validated resource limits (`resolveDiscoveryLimits` enforcing positive safe integers for `maxPendingDirectories`, `maxVisitedDirectories`, and collector-only `maxCollectedRecords`), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.
@@ -42,7 +42,7 @@ Verification: implementation host **146 passed, 0 skipped** across all 8 test fi
 - [x] **Stage 2A**: Independent review accepted at `5dd6320`.
 - [x] **Stage 2B**: Read-only streaming SHA-256 content hashing (`hashFile`, bounded chunked reads, mandatory non-empty approved roots, sub-ms timestamp preservation, post-read pathname revalidation, handle close failure reporting, AbortSignal cancellation, and deterministic cleanup).
 - [x] **Stage 2B**: Independent review accepted at `e4488a2`.
-- [x] **Stage 2C**: SQLite catalog schema for recorded file facts and inventory persistence (`CatalogDatabase`, `node:sqlite` driver, explicit caller-supplied paths, versioned migrations, foreign key cascades, normalized lookup keys vs. verbatim original paths, honest nullable timestamps, changed-file hash invalidation, bounded paginated reads, deterministic connection cleanup). Awaiting independent review.
+- [x] **Stage 2C**: SQLite catalog schema for recorded file facts and inventory persistence (`CatalogDatabase`, `node:sqlite` driver, explicit caller-supplied paths, versioned migrations, foreign key cascades, normalized lookup keys vs. verbatim original paths, honest nullable timestamps, immutable discovery observations with changed-file history preservation and hash invalidation, bounded paginated reads, deterministic connection cleanup; corrections pass complete). Awaiting independent re-review.
 - [ ] **Stage 2D (next)**: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.
 
 ---

@@ -46,6 +46,7 @@ export interface CatalogFileRecord {
   readonly fileName: string
   readonly extension: string
   readonly category: 'photo' | 'document'
+  readonly discoveryObservationId: number
   readonly byteSize: number
   readonly filesystemBirthtimeMs: number | null
   readonly filesystemMtimeMs: number | null
@@ -56,9 +57,22 @@ export interface CatalogFileRecord {
   readonly activeHashVerifiedAtMs: number | null
 }
 
+export interface DiscoveryObservationRecord {
+  readonly id: number
+  readonly fileLocationId: number
+  readonly byteSize: number
+  readonly filesystemBirthtimeMs: number | null
+  readonly filesystemMtimeMs: number | null
+  readonly inferredCaptureTimeMs: number | null
+  readonly observedAtMs: number
+  readonly lastSeenAtMs: number
+  readonly isCurrent: boolean
+}
+
 export interface HashObservationRecord {
   readonly id: number
   readonly fileLocationId: number
+  readonly discoveryObservationId: number
   readonly sha256: string
   readonly observedByteSize: number
   readonly observedMtimeMs: number | null
@@ -104,6 +118,10 @@ export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly sha256?: string
 }
 
+export interface DuplicateGroupOptions extends PaginationOptions {
+  readonly maxLocationsPerGroup?: number
+}
+
 export interface PaginatedResult<T> {
   readonly items: readonly T[]
   readonly totalCount: number
@@ -117,6 +135,7 @@ export interface DuplicateGroup {
   readonly byteSize: number
   readonly fileCount: number
   readonly locations: readonly CatalogFileRecord[]
+  readonly truncatedLocations: boolean
 }
 
 export interface CatalogStats {

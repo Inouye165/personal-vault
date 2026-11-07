@@ -98,8 +98,8 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
       // Reopen
       db = CatalogDatabase.open({ catalogPath })
       const sources = db.listSources()
-      expect(sources).toHaveLength(1)
-      expect(sources[0]?.rootPath).toBe('D:\\Photos')
+      expect(sources.items).toHaveLength(1)
+      expect(sources.items[0]?.rootPath).toBe('D:\\Photos')
     })
 
     it('fails safely without modifying the database when encountering an unsupported future schema version', () => {
@@ -144,9 +144,8 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
             .prepare(
               `INSERT INTO file_locations (
                 source_id, original_path, normalized_path, file_name, extension, category,
-                byte_size, filesystem_birthtime_ms, filesystem_mtime_ms, inferred_capture_time_ms,
-                first_discovered_at_ms, last_seen_at_ms
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                created_at_ms, updated_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
             )
             .run(
               99999,
@@ -155,10 +154,6 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
               'missing.jpg',
               'jpg',
               'photo',
-              100,
-              null,
-              null,
-              null,
               Date.now(),
               Date.now()
             )
@@ -169,10 +164,11 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
           rawDb
             .prepare(
               `INSERT INTO hash_observations (
-                file_location_id, sha256, observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
-              ) VALUES (?, ?, ?, ?, ?, ?)`
+                file_location_id, discovery_observation_id, sha256, observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+              ) VALUES (?, ?, ?, ?, ?, ?, ?)`
             )
             .run(
+              99999,
               99999,
               'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
               0,
@@ -418,9 +414,9 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
 
       // History of observations: old observation is marked inactive
       const history = db.getHashObservationsForFile(afterChange!.id)
-      expect(history).toHaveLength(1)
-      expect(history[0]?.sha256).toBe(oldHash)
-      expect(history[0]?.isActive).toBe(false)
+      expect(history.items).toHaveLength(1)
+      expect(history.items[0]?.sha256).toBe(oldHash)
+      expect(history.items[0]?.isActive).toBe(false)
 
       // 5. Subsequent hashing verifies the new content
       const newHash = '2'.repeat(64)
@@ -436,9 +432,9 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
       expect(afterRehash?.activeHash).toBe(newHash)
 
       const historyAfterRehash = db.getHashObservationsForFile(afterChange!.id)
-      expect(historyAfterRehash).toHaveLength(2)
-      expect(historyAfterRehash.find((h) => h.sha256 === oldHash)?.isActive).toBe(false)
-      expect(historyAfterRehash.find((h) => h.sha256 === newHash)?.isActive).toBe(true)
+      expect(historyAfterRehash.items).toHaveLength(2)
+      expect(historyAfterRehash.items.find((h) => h.sha256 === oldHash)?.isActive).toBe(false)
+      expect(historyAfterRehash.items.find((h) => h.sha256 === newHash)?.isActive).toBe(true)
     })
 
     it('rejects recording a hash observation if observed size or mtime does not match current discovery facts', () => {
@@ -869,6 +865,304 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
       expect(postStat.size).toBe(preStat.size)
       expect(postStat.mtimeMs).toBe(preStat.mtimeMs)
       expect(postStat.birthtimeMs).toBe(preStat.birthtimeMs)
+    })
+  })
+
+  describe('Stage 2C Corrections and Regression Suite', () => {
+    it('rolls back previously unregistered source registration when batch persistence fails', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const newSourceRoot = 'D:\\UnregisteredSource'
+
+      expect(db.getSourceByPath(newSourceRoot)).toBeNull()
+
+      const valid: DiscoveryCandidateInput = {
+        originalPath: 'D:\\UnregisteredSource\\valid.jpg',
+        fileName: 'valid.jpg',
+        extension: 'jpg',
+        byteSize: 100,
+        birthtimeMs: null,
+        mtimeMs: 1000,
+        discoveredAtMs: Date.now(),
+        category: 'photo'
+      }
+      const invalid = {
+        originalPath: 'D:\\UnregisteredSource\\bad.jpg',
+        fileName: 'bad.jpg',
+        extension: 'jpg',
+        byteSize: -1, // Constraint violation
+        birthtimeMs: null,
+        mtimeMs: 1000,
+        discoveredAtMs: Date.now(),
+        category: 'photo' as const
+      } as unknown as DiscoveryCandidateInput
+
+      expect(() => {
+        db!.persistDiscoveryBatch(newSourceRoot, [valid, invalid])
+      }).toThrow()
+
+      // Full rollback must include the source root registration!
+      expect(db.getSourceByPath(newSourceRoot)).toBeNull()
+    })
+
+    it('rejects oversized discovery and hash batches before database mutation', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const oversizedDiscovery: DiscoveryCandidateInput[] = Array.from(
+        { length: 1001 },
+        (_, i) => ({
+          originalPath: `D:\\Photos\\f_${i}.jpg`,
+          fileName: `f_${i}.jpg`,
+          extension: 'jpg',
+          byteSize: 10,
+          birthtimeMs: null,
+          mtimeMs: 1000,
+          discoveredAtMs: Date.now(),
+          category: 'photo'
+        })
+      )
+
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', oversizedDiscovery)
+      }).toThrow(RangeError)
+
+      const oversizedHash = Array.from({ length: 1001 }, (_, i) => ({
+        originalPath: `D:\\Photos\\f_${i}.jpg`,
+        sha256: 'a'.repeat(64),
+        observedByteSize: 10,
+        observedMtimeMs: 1000,
+        hashedAtMs: Date.now()
+      }))
+
+      expect(() => {
+        db!.recordHashObservationsBatch(oversizedHash)
+      }).toThrow(RangeError)
+    })
+
+    it('validates pagination parameters as finite safe integers', () => {
+      db = CatalogDatabase.open({ catalogPath })
+
+      expect(() => db!.queryFileLocations({ offset: -1 })).toThrow(RangeError)
+      expect(() => db!.queryFileLocations({ limit: 0 })).toThrow(RangeError)
+      expect(() => db!.queryFileLocations({ limit: 1001 })).toThrow(RangeError)
+      expect(() => db!.queryFileLocations({ offset: 1.5 })).toThrow(RangeError)
+      expect(() => db!.queryFileLocations({ limit: NaN })).toThrow(RangeError)
+
+      expect(() => db!.listSources({ offset: -5 })).toThrow(RangeError)
+      expect(() => db!.listSources({ limit: 0 })).toThrow(RangeError)
+    })
+
+    it('rejects unsupported future schema in read-only mode and preserves DELETE journal mode without mutation', () => {
+      // Create raw DB with journal_mode = DELETE and future schema version 999
+      const rawDb = new DatabaseSync(catalogPath)
+      try {
+        rawDb.exec('PRAGMA journal_mode = DELETE;')
+        rawDb.exec(
+          'CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT, applied_at_ms INTEGER);'
+        )
+        rawDb.exec(
+          "INSERT INTO schema_migrations (version, name, applied_at_ms) VALUES (999, 'future_schema', 123456);"
+        )
+        rawDb.exec('CREATE TABLE custom_future_table (id INTEGER PRIMARY KEY, data TEXT);')
+        rawDb.exec("INSERT INTO custom_future_table (data) VALUES ('sensitive_data');")
+      } finally {
+        rawDb.close()
+      }
+
+      // Read-only open must reject unsupported future schema
+      expect(() => CatalogDatabase.open({ catalogPath, readOnly: true })).toThrow(
+        UnsupportedSchemaVersionError
+      )
+
+      // Read-write open must also reject unsupported future schema
+      expect(() => CatalogDatabase.open({ catalogPath })).toThrow(UnsupportedSchemaVersionError)
+
+      // Verify journal mode and data were NOT mutated (remains DELETE mode, not converted to WAL)
+      const verifyDb = new DatabaseSync(catalogPath)
+      try {
+        const journalMode = verifyDb.prepare('PRAGMA journal_mode;').get() as {
+          journal_mode: string
+        }
+        expect(journalMode.journal_mode.toLowerCase()).toBe('delete')
+        const row = verifyDb
+          .prepare('SELECT data FROM custom_future_table WHERE id = 1;')
+          .get() as { data: string }
+        expect(row.data).toBe('sensitive_data')
+      } finally {
+        verifyDb.close()
+      }
+    })
+
+    it('preserves immutable discovery history when file changes without overwriting prior facts', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\evolving.jpg'
+
+      // Discovery 1: size 1000, mtime 1000
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'evolving.jpg',
+          extension: 'jpg',
+          byteSize: 1000,
+          birthtimeMs: 500,
+          mtimeMs: 1000,
+          discoveredAtMs: 10000,
+          category: 'photo'
+        }
+      ])
+
+      const hash1 = '1'.repeat(64)
+      db.recordHashObservation({
+        originalPath,
+        sha256: hash1,
+        observedByteSize: 1000,
+        observedMtimeMs: 1000,
+        hashedAtMs: 11000
+      })
+
+      const file1 = db.getFileLocationByPath(originalPath)!
+      expect(file1.byteSize).toBe(1000)
+      expect(file1.activeHash).toBe(hash1)
+
+      // Discovery 2: file modified! size 2000, mtime 2000
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'evolving.jpg',
+          extension: 'jpg',
+          byteSize: 2000,
+          birthtimeMs: 500,
+          mtimeMs: 2000,
+          discoveredAtMs: 20000,
+          category: 'photo'
+        }
+      ])
+
+      const file2 = db.getFileLocationByPath(originalPath)!
+      expect(file2.byteSize).toBe(2000)
+      expect(file2.filesystemMtimeMs).toBe(2000)
+      expect(file2.activeHash).toBeNull() // Old hash is NOT inherited!
+
+      // Check discovery history: both observations are preserved!
+      const history = db.getDiscoveryObservationsForFile(file2.id)
+      expect(history.totalCount).toBe(2)
+      expect(history.items[0]?.byteSize).toBe(2000) // current
+      expect(history.items[0]?.isCurrent).toBe(true)
+      expect(history.items[1]?.byteSize).toBe(1000) // prior facts preserved!
+      expect(history.items[1]?.isCurrent).toBe(false)
+      expect(history.items[1]?.filesystemMtimeMs).toBe(1000)
+
+      // Hash history: hash 1 is tied to discovery observation 1
+      const hashHistory = db.getHashObservationsForFile(file2.id)
+      expect(hashHistory.totalCount).toBe(1)
+      expect(hashHistory.items[0]?.sha256).toBe(hash1)
+      expect(hashHistory.items[0]?.isActive).toBe(false)
+    })
+
+    it('enforces strict SHA-256 hex format, conservative null mtime matching, and numeric validation', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\val.jpg'
+
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'val.jpg',
+          extension: 'jpg',
+          byteSize: 500,
+          birthtimeMs: null,
+          mtimeMs: null, // Discovery recorded NULL
+          discoveredAtMs: Date.now(),
+          category: 'photo'
+        }
+      ])
+
+      // Reject non-hex characters in SHA-256
+      expect(() =>
+        db!.recordHashObservation({
+          originalPath,
+          sha256: 'z'.repeat(64),
+          observedByteSize: 500,
+          observedMtimeMs: null,
+          hashedAtMs: Date.now()
+        })
+      ).toThrow(/hex/i)
+
+      // Reject wrong length
+      expect(() =>
+        db!.recordHashObservation({
+          originalPath,
+          sha256: 'a'.repeat(63),
+          observedByteSize: 500,
+          observedMtimeMs: null,
+          hashedAtMs: Date.now()
+        })
+      ).toThrow()
+
+      // Conservative null timestamp matching:
+      // Discovery recorded mtime is null, but observation supplies a number -> REJECT!
+      expect(() =>
+        db!.recordHashObservation({
+          originalPath,
+          sha256: 'a'.repeat(64),
+          observedByteSize: 500,
+          observedMtimeMs: 1000,
+          hashedAtMs: Date.now()
+        })
+      ).toThrow(/mtime mismatch/i)
+
+      // Discovery recorded null, observation supplies null -> ACCEPT!
+      expect(() =>
+        db!.recordHashObservation({
+          originalPath,
+          sha256: 'a'.repeat(64),
+          observedByteSize: 500,
+          observedMtimeMs: null,
+          hashedAtMs: Date.now()
+        })
+      ).not.toThrow()
+    })
+
+    it('preserves backslashes as valid filename characters on POSIX', () => {
+      const posixPath = '/photos/vacation/my\\file.jpg'
+      const normalized = normalizePathForLookup(posixPath, 'linux')
+      expect(normalized).toBe(posixPath)
+    })
+
+    it('does not silently discard differing recorded facts when normalized keys collide on Windows', () => {
+      db = CatalogDatabase.open({ catalogPath })
+
+      const file1: DiscoveryCandidateInput = {
+        originalPath: 'D:\\Folder\\case.jpg',
+        fileName: 'case.jpg',
+        extension: 'jpg',
+        byteSize: 100,
+        birthtimeMs: null,
+        mtimeMs: 1000,
+        discoveredAtMs: 10000,
+        category: 'photo'
+      }
+
+      const file2: DiscoveryCandidateInput = {
+        originalPath: 'D:\\Folder\\CASE.jpg',
+        fileName: 'CASE.jpg',
+        extension: 'jpg',
+        byteSize: 200,
+        birthtimeMs: null,
+        mtimeMs: 2000,
+        discoveredAtMs: 10000,
+        category: 'photo'
+      }
+
+      // Persist both distinct files (such as from a case-sensitive NTFS directory or cross-platform drive)
+      db.persistDiscoveryBatch('D:\\Folder', [file1, file2])
+
+      const rec1 = db.getFileLocationByPath('D:\\Folder\\case.jpg')
+      const rec2 = db.getFileLocationByPath('D:\\Folder\\CASE.jpg')
+
+      expect(rec1).not.toBeNull()
+      expect(rec2).not.toBeNull()
+      expect(rec1?.byteSize).toBe(100)
+      expect(rec2?.byteSize).toBe(200)
+      expect(rec1?.fileName).toBe('case.jpg')
+      expect(rec2?.fileName).toBe('CASE.jpg')
     })
   })
 })
