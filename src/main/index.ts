@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc/handlers'
 import { createSenderValidator } from './ipc/sender'
@@ -6,6 +7,23 @@ import { resolveAppLocation, secureWebContents } from './navigation'
 import { setupSecurityPolicies } from './security'
 import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
+
+function logStartup(message: string): void {
+  try {
+    const logPath = join(app.getPath('userData'), 'startup.log')
+    appendFileSync(
+      logPath,
+      `[${new Date().toISOString()}] [PID:${process.pid}] ${message}\n`,
+      'utf8'
+    )
+  } catch {
+    // Ignore logging failure
+  }
+}
+
+logStartup(
+  `Process start: isPackaged=${app.isPackaged}, execPath=${process.execPath}, argv=${JSON.stringify(process.argv)}`
+)
 
 const documentPath = join(__dirname, '../renderer/index.html')
 
@@ -16,11 +34,14 @@ const location = resolveAppLocation({
   documentPath
 })
 
+logStartup(`Location resolved: kind=${location.kind}, details=${JSON.stringify(location)}`)
+
 let mainWindow: BrowserWindow | null = null
 let catalog: CatalogDatabase | null = null
 let coordinator: ScanJobCoordinator | null = null
 
 function createWindow(): BrowserWindow {
+  logStartup('createWindow: initializing BrowserWindow')
   const window = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -40,7 +61,20 @@ function createWindow(): BrowserWindow {
 
   secureWebContents(window.webContents, location)
 
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    logStartup(
+      `webContents did-fail-load: code=${errorCode} desc=${errorDescription} url=${validatedURL}`
+    )
+  })
+
+  window.webContents.on('render-process-gone', (_event, details) => {
+    logStartup(
+      `webContents render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`
+    )
+  })
+
   window.on('ready-to-show', () => {
+    logStartup('window ready-to-show fired -> calling show() and focus()')
     window.show()
     window.focus()
   })
@@ -48,18 +82,28 @@ function createWindow(): BrowserWindow {
   // Fallback to ensure the desktop window is visibly displayed and focused
   setTimeout(() => {
     if (!window.isDestroyed() && !window.isVisible()) {
+      logStartup('window fallback timeout: window not visible, calling show() and focus()')
       window.show()
       window.focus()
     }
   }, 1000)
 
+  window.on('show', () => {
+    logStartup(
+      `window show event: isVisible=${window.isVisible()} isMinimized=${window.isMinimized()}`
+    )
+  })
+
   window.on('closed', () => {
+    logStartup('window closed event fired')
     if (mainWindow === window) mainWindow = null
   })
 
   if (location.kind === 'dev') {
+    logStartup(`Loading dev URL: ${location.origin}`)
     void window.loadURL(location.origin)
   } else {
+    logStartup(`Loading file: ${location.documentPath}`)
     void window.loadFile(location.documentPath)
   }
 
@@ -69,9 +113,12 @@ function createWindow(): BrowserWindow {
 
 // Ensure a single instance of Personal Vault per user-data directory.
 if (!app.requestSingleInstanceLock()) {
+  logStartup('Failed to acquire single instance lock -> calling app.quit()')
   app.quit()
 } else {
+  logStartup('Acquired single instance lock successfully')
   app.on('second-instance', () => {
+    logStartup('second-instance event received -> focusing existing window')
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
@@ -81,12 +128,18 @@ if (!app.requestSingleInstanceLock()) {
   void app
     .whenReady()
     .then(async () => {
+      logStartup('app.whenReady resolved')
       setupSecurityPolicies(location)
+      logStartup('setupSecurityPolicies completed')
 
       const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
+      logStartup(`Opening catalog at ${catalogPath}`)
       catalog = CatalogDatabase.open({ catalogPath })
+      logStartup('CatalogDatabase.open completed')
+
       coordinator = new ScanJobCoordinator({ catalog })
       await coordinator.initialize()
+      logStartup('coordinator.initialize completed')
 
       registerIpcHandlers({
         validateSender: createSenderValidator({
@@ -97,30 +150,42 @@ if (!app.requestSingleInstanceLock()) {
         coordinator,
         getMainWindow: () => mainWindow
       })
+      logStartup('registerIpcHandlers completed')
+
       createWindow()
 
       app.on('activate', () => {
+        logStartup('app activate event')
         if (BrowserWindow.getAllWindows().length === 0) createWindow()
       })
     })
     .catch((err) => {
+      logStartup(
+        `Fatal error during application startup: ${err instanceof Error ? err.stack : String(err)}`
+      )
       console.error('Fatal error during application startup:', err)
     })
 
   let isQuitting = false
   app.on('before-quit', (event) => {
+    logStartup(`before-quit event: isQuitting=${isQuitting}`)
     if (!isQuitting) {
       isQuitting = true
       event.preventDefault()
       const doShutdown = async (): Promise<void> => {
         try {
           if (coordinator) {
+            logStartup('shutting down coordinator')
             await coordinator.shutdown()
+            logStartup('coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {
+            logStartup('closing catalog')
             catalog.close()
+            logStartup('catalog closed')
           }
+          logStartup('calling final app.quit()')
           app.quit()
         }
       }
@@ -129,6 +194,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('window-all-closed', () => {
+    logStartup('window-all-closed event')
     if (process.platform !== 'darwin') app.quit()
   })
 }
