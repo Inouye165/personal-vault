@@ -53,11 +53,25 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
   const [actionError, setActionError] = useState<string | null>(null)
   const [isSavingReview, setIsSavingReview] = useState(false)
 
-  // Token refs to prevent race conditions on rapid asynchronous requests
+  // Tracking refs synchronized outside React state updater callbacks to maintain purity
   const isMountedRef = useRef(true)
   const groupsTokenRef = useRef(0)
   const selectionTokenRef = useRef(0)
   const selectedGroupRef = useRef<DuplicateGroupSummary | null>(null)
+  const groupsFilterRef = useRef<DuplicateReviewFilter>(groupsFilter)
+  const groupsOffsetRef = useRef<number>(groupsOffset)
+
+  useEffect(() => {
+    selectedGroupRef.current = selectedGroup
+  }, [selectedGroup])
+
+  useEffect(() => {
+    groupsFilterRef.current = groupsFilter
+  }, [groupsFilter])
+
+  useEffect(() => {
+    groupsOffsetRef.current = groupsOffset
+  }, [groupsOffset])
 
   const fetchMembers = useCallback(
     async (group: DuplicateGroupSummary, offset: number) => {
@@ -84,7 +98,7 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
 
         setSelectedGroup((prev) => {
           if (prev && prev.sha256 === group.sha256 && prev.byteSize === group.byteSize) {
-            const updated: DuplicateGroupSummary = {
+            return {
               ...prev,
               groupSignature: response.groupSignature,
               reviewStatus: response.reviewStatus,
@@ -92,8 +106,6 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
               hasStaleDecision: response.hasStaleDecision,
               reviewedAtMs: response.reviewedAtMs ?? null
             }
-            selectedGroupRef.current = updated
-            return updated
           }
           return prev
         })
@@ -160,12 +172,15 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
           nextSelected = response.items[0]!
         }
 
-        selectedGroupRef.current = nextSelected
         setSelectedGroup(nextSelected)
 
         if (nextSelected) {
           void fetchMembers(nextSelected, 0)
         } else {
+          // Invalidate any in-flight member requests and cleanly reset member state
+          selectionTokenRef.current++
+          setIsLoadingMembers(false)
+          setMembersError(null)
           setMembers([])
           setTotalMembers(0)
         }
@@ -184,6 +199,15 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
 
   useEffect(() => {
     isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+      // Invalidate request generations on unmount
+      groupsTokenRef.current += 1
+      selectionTokenRef.current += 1
+    }
+  }, [])
+
+  useEffect(() => {
     let active = true
 
     const loadInitial = async () => {
@@ -196,13 +220,11 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
 
     return () => {
       active = false
-      isMountedRef.current = false
     }
   }, [fetchGroups, groupsFilter])
 
   const selectGroup = useCallback(
     (group: DuplicateGroupSummary) => {
-      selectedGroupRef.current = group
       setSelectedGroup(group)
       setMembersOffset(0)
       setActionError(null)
@@ -215,6 +237,7 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
   )
 
   const setFilter = useCallback((filter: DuplicateReviewFilter) => {
+    selectionTokenRef.current++
     setGroupsFilter(filter)
     setGroupsOffset(0)
     setActionError(null)
@@ -259,38 +282,56 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
 
         if (!isMountedRef.current) return
 
-        // Update groups list item
-        setGroups((prev) =>
-          prev.map((g) =>
-            g.sha256 === response.sha256 && g.byteSize === response.byteSize
+        const activeFilter = groupsFilterRef.current
+        const statusMatchesFilter =
+          activeFilter === 'all' ||
+          (activeFilter === 'unreviewed' && response.status === 'unreviewed') ||
+          (activeFilter === 'reviewed' && response.status === 'reviewed')
+
+        if (!statusMatchesFilter) {
+          // Item no longer belongs in active filtered view: reload groups and update totals
+          void fetchGroups(groupsOffsetRef.current, activeFilter)
+        } else {
+          // Update groups list item in place
+          setGroups((prev) =>
+            prev.map((g) =>
+              g.sha256 === response.sha256 && g.byteSize === response.byteSize
+                ? {
+                    ...g,
+                    reviewStatus: response.status,
+                    preferredLocationId: response.preferredLocationId,
+                    groupSignature: response.groupSignature,
+                    hasStaleDecision: false,
+                    reviewedAtMs: response.reviewedAtMs
+                  }
+                : g
+            )
+          )
+        }
+
+        // Protect against stale async completion: only update selectedGroup if user is still on this group
+        // and its signature was not refreshed to a newer state while saving
+        if (
+          selectedGroupRef.current &&
+          selectedGroupRef.current.sha256 === response.sha256 &&
+          selectedGroupRef.current.byteSize === response.byteSize &&
+          selectedGroupRef.current.groupSignature === targetSig
+        ) {
+          setSelectedGroup((prev) =>
+            prev &&
+            prev.sha256 === response.sha256 &&
+            prev.byteSize === response.byteSize &&
+            prev.groupSignature === targetSig
               ? {
-                  ...g,
+                  ...prev,
                   reviewStatus: response.status,
                   preferredLocationId: response.preferredLocationId,
                   groupSignature: response.groupSignature,
                   hasStaleDecision: false,
                   reviewedAtMs: response.reviewedAtMs
                 }
-              : g
+              : prev
           )
-        )
-
-        // Protect against stale async completion: only update selectedGroup if user is still on this group!
-        if (
-          selectedGroupRef.current &&
-          selectedGroupRef.current.sha256 === response.sha256 &&
-          selectedGroupRef.current.byteSize === response.byteSize
-        ) {
-          const updatedSelected: DuplicateGroupSummary = {
-            ...selectedGroupRef.current,
-            reviewStatus: response.status,
-            preferredLocationId: response.preferredLocationId,
-            groupSignature: response.groupSignature,
-            hasStaleDecision: false,
-            reviewedAtMs: response.reviewedAtMs
-          }
-          selectedGroupRef.current = updatedSelected
-          setSelectedGroup(updatedSelected)
 
           setMembers((prev) =>
             prev.map((m) => ({
@@ -306,7 +347,8 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
           isMountedRef.current &&
           selectedGroupRef.current &&
           selectedGroupRef.current.sha256 === targetSha256 &&
-          selectedGroupRef.current.byteSize === targetByteSize
+          selectedGroupRef.current.byteSize === targetByteSize &&
+          selectedGroupRef.current.groupSignature === targetSig
         ) {
           setActionError(err instanceof Error ? err.message : String(err))
         }
@@ -316,7 +358,7 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
         }
       }
     },
-    []
+    [fetchGroups]
   )
 
   const refresh = useCallback(async () => {

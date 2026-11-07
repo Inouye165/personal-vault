@@ -232,12 +232,15 @@ async function main() {
         'dismissScanJob',
         'getActiveScanJob',
         'getAppInfo',
+        'getDuplicateGroupMembers',
+        'getDuplicateGroups',
         'getLatestScanJob',
         'getVaultStatus',
         'onScanProgress',
         'pauseScan',
         'resumeScan',
         'selectRoots',
+        'setDuplicateReview',
         'setTab',
         'startScan'
       ]

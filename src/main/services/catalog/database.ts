@@ -961,13 +961,14 @@ export class CatalogDatabase {
   }
 
   /**
-   * Computes the deterministic group signature and gathers member location IDs
-   * using bounded streaming iteration.
+   * Computes the deterministic group signature and checks member count / preferred location
+   * using bounded streaming iteration with constant O(1) auxiliary memory.
    */
   private computeGroupSignature(
     sha256: string,
-    byteSize: number
-  ): { signature: string; memberIds: Set<number> } {
+    byteSize: number,
+    preferredLocationId?: number | null
+  ): { signature: string; memberCount: number; containsPreferred: boolean } {
     const stmt = this.db.prepare(`
       SELECT f.id, d.id as disc_id, h.id as hash_id
       FROM file_locations f
@@ -976,19 +977,29 @@ export class CatalogDatabase {
       ORDER BY f.id ASC;
     `)
     const hasher = createHash('sha256')
-    const memberIds = new Set<number>()
+    let memberCount = 0
+    let containsPreferred = false
     let first = true
+
     for (const row of stmt.iterate(byteSize, sha256, byteSize) as Iterable<{
       id: number
       disc_id: number
       hash_id: number
     }>) {
-      memberIds.add(row.id)
+      memberCount++
+      if (
+        preferredLocationId !== null &&
+        preferredLocationId !== undefined &&
+        row.id === preferredLocationId
+      ) {
+        containsPreferred = true
+      }
       if (!first) hasher.update(';')
       first = false
       hasher.update(`${row.id}:${row.disc_id}:${row.hash_id}`)
     }
-    return { signature: hasher.digest('hex'), memberIds }
+
+    return { signature: hasher.digest('hex'), memberCount, containsPreferred }
   }
 
   /**
@@ -1037,11 +1048,15 @@ export class CatalogDatabase {
       group_signature: string
       preferred_location_id: number | null
     }>) {
-      const { signature, memberIds } = this.computeGroupSignature(r.sha256, r.byte_size)
+      const { signature, memberCount, containsPreferred } = this.computeGroupSignature(
+        r.sha256,
+        r.byte_size,
+        r.preferred_location_id
+      )
       if (
-        memberIds.size > 1 &&
+        memberCount > 1 &&
         signature === r.group_signature &&
-        (r.preferred_location_id === null || memberIds.has(r.preferred_location_id))
+        (r.preferred_location_id === null || containsPreferred)
       ) {
         insertValidStmt.run(r.sha256, r.byte_size)
       }
@@ -1161,7 +1176,6 @@ export class CatalogDatabase {
     `)
 
     const items: DuplicateGroup[] = pagedRows.map((g) => {
-      const { signature, memberIds } = this.computeGroupSignature(g.sha256, g.byte_size)
       const review = reviewStmt.get(g.sha256, g.byte_size) as unknown as
         | {
             status: 'unreviewed' | 'reviewed'
@@ -1171,6 +1185,13 @@ export class CatalogDatabase {
           }
         | undefined
 
+      const preferredId = review?.preferred_location_id ?? null
+      const { signature, containsPreferred } = this.computeGroupSignature(
+        g.sha256,
+        g.byte_size,
+        preferredId
+      )
+
       let reviewStatus: 'unreviewed' | 'reviewed' = 'unreviewed'
       let preferredLocationId: number | null = null
       let hasStaleDecision = false
@@ -1178,8 +1199,7 @@ export class CatalogDatabase {
 
       if (review) {
         const isSignatureMatch = review.group_signature === signature
-        const isPreferredValid =
-          review.preferred_location_id === null || memberIds.has(review.preferred_location_id)
+        const isPreferredValid = preferredId === null || containsPreferred
 
         if (isSignatureMatch && isPreferredValid) {
           reviewStatus = review.status
@@ -1253,13 +1273,7 @@ export class CatalogDatabase {
       .get(byteSize, options.sha256, byteSize) as unknown as { total: number } | undefined
     const totalCount = countRow?.total ?? 0
 
-    // 2. Incremental streaming to compute deterministic signature and member IDs
-    const { signature: groupSignature, memberIds } = this.computeGroupSignature(
-      options.sha256,
-      byteSize
-    )
-
-    // 3. Review state lookup
+    // 2. Review state lookup
     const reviewSql = `
       SELECT status, preferred_location_id, group_signature, reviewed_at_ms
       FROM duplicate_reviews
@@ -1274,6 +1288,15 @@ export class CatalogDatabase {
         }
       | undefined
 
+    const preferredId = review?.preferred_location_id ?? null
+
+    // 3. Incremental streaming to compute deterministic signature with O(1) auxiliary memory
+    const { signature: groupSignature, containsPreferred } = this.computeGroupSignature(
+      options.sha256,
+      byteSize,
+      preferredId
+    )
+
     let reviewStatus: 'unreviewed' | 'reviewed' = 'unreviewed'
     let preferredLocationId: number | null = null
     let hasStaleDecision = false
@@ -1281,8 +1304,7 @@ export class CatalogDatabase {
 
     if (review) {
       const isSignatureMatch = review.group_signature === groupSignature
-      const isPreferredValid =
-        review.preferred_location_id === null || memberIds.has(review.preferred_location_id)
+      const isPreferredValid = preferredId === null || containsPreferred
 
       if (isSignatureMatch && isPreferredValid) {
         reviewStatus = review.status
@@ -1403,43 +1425,23 @@ export class CatalogDatabase {
       throw new TypeError('expectedGroupSignature must be a non-empty string')
     }
 
-    const membersSql = `
-      SELECT
-        f.id as file_location_id,
-        d.id as discovery_observation_id,
-        h.id as hash_observation_id
-      FROM file_locations f
-      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = ?
-      JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1 AND h.sha256 = ? AND h.observed_byte_size = ?
-      ORDER BY f.id ASC;
-    `
-    const members = this.db
-      .prepare(membersSql)
-      .all(byteSize, input.sha256, byteSize) as unknown as Array<{
-      file_location_id: number
-      discovery_observation_id: number
-      hash_observation_id: number
-    }>
+    const preferredId = input.preferredLocationId ?? null
+    const {
+      signature: currentSignature,
+      memberCount,
+      containsPreferred
+    } = this.computeGroupSignature(input.sha256, byteSize, preferredId)
 
-    if (members.length < 2) {
+    if (memberCount < 2) {
       throw new DuplicateGroupNotFoundError(input.sha256, byteSize)
     }
-
-    const token = members
-      .map((m) => `${m.file_location_id}:${m.discovery_observation_id}:${m.hash_observation_id}`)
-      .join(';')
-    const currentSignature = createHash('sha256').update(token).digest('hex')
 
     if (input.expectedGroupSignature !== currentSignature) {
       throw new StaleReviewError()
     }
 
-    const preferredId = input.preferredLocationId ?? null
-    if (preferredId !== null) {
-      const isMember = members.some((m) => m.file_location_id === preferredId)
-      if (!isMember) {
-        throw new InvalidPreferredLocationError(preferredId)
-      }
+    if (preferredId !== null && !containsPreferred) {
+      throw new InvalidPreferredLocationError(preferredId)
     }
 
     const now = Date.now()

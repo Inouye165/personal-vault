@@ -561,4 +561,272 @@ describe('Stage 3 — Duplicate Review UI Integration', () => {
       )
     })
   })
+
+  it('removes group from unreviewed view and updates counts after marking as reviewed', async () => {
+    const group1 = {
+      ...sampleGroup,
+      sha256: '1'.repeat(64),
+      groupSignature: 'sig1',
+      reviewStatus: 'unreviewed' as const
+    }
+    const group2 = {
+      ...sampleGroup,
+      sha256: '2'.repeat(64),
+      groupSignature: 'sig2',
+      reviewStatus: 'unreviewed' as const
+    }
+
+    let unreviewedItems = [group1, group2]
+
+    ;(api.getDuplicateGroups as ReturnType<typeof vi.fn>).mockImplementation(
+      async (req: { filter?: string }) => {
+        if (req.filter === 'unreviewed') {
+          return {
+            items: unreviewedItems,
+            totalCount: unreviewedItems.length,
+            offset: 0,
+            limit: 20,
+            hasMore: false
+          }
+        }
+        return {
+          items: [group1, group2],
+          totalCount: 2,
+          offset: 0,
+          limit: 20,
+          hasMore: false
+        }
+      }
+    )
+
+    ;(api.setDuplicateReview as ReturnType<typeof vi.fn>).mockImplementation(
+      async (req: { sha256: string; status: 'unreviewed' | 'reviewed' }) => {
+        if (req.status === 'reviewed') {
+          unreviewedItems = unreviewedItems.filter((g) => g.sha256 !== req.sha256)
+        }
+        return {
+          sha256: req.sha256,
+          byteSize: 1048576,
+          status: req.status,
+          preferredLocationId: null,
+          groupSignature: 'sig1',
+          reviewedAtMs: Date.now()
+        }
+      }
+    )
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /duplicates/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /duplicates/i }))
+
+    // Switch to Unreviewed filter
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Unreviewed' })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: 'Unreviewed' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 duplicate groups/i)).toBeDefined()
+    })
+
+    // Mark group 1 as reviewed
+    const reviewBtn = screen.getByRole('button', { name: /mark as reviewed/i })
+    fireEvent.click(reviewBtn)
+
+    // Under c5da2f1, submitReview updated group 1 in place without removing it from the unreviewed view or updating totalGroups
+    // In corrected implementation, group 1 must be removed from unreviewed view, totalGroups becomes 1, and group 2 is shown
+    await waitFor(() => {
+      expect(screen.getByText(/1 duplicate group/i)).toBeDefined()
+      expect(
+        screen.queryByText(new RegExp(`SHA-256: ${group1.sha256.substring(0, 12)}`, 'i'))
+      ).toBeNull()
+    })
+  })
+
+  it('clears preferred location through UI and calls setDuplicateReview with null', async () => {
+    const groupWithPref = {
+      ...sampleGroup,
+      preferredLocationId: 101
+    }
+    const membersWithPref = [
+      { ...sampleMembers[0]!, isPreferred: true },
+      { ...sampleMembers[1]!, isPreferred: false }
+    ]
+
+    ;(api.getDuplicateGroups as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [groupWithPref],
+      totalCount: 1,
+      offset: 0,
+      limit: 20,
+      hasMore: false
+    })
+
+    ;(api.getDuplicateGroupMembers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      sha256: groupWithPref.sha256,
+      byteSize: groupWithPref.byteSize,
+      groupSignature: 'sig111',
+      reviewStatus: 'unreviewed',
+      preferredLocationId: 101,
+      hasStaleDecision: false,
+      items: membersWithPref,
+      totalCount: 2,
+      offset: 0,
+      limit: 50,
+      hasMore: false
+    })
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /duplicates/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /duplicates/i }))
+
+    await waitFor(() => expect(screen.getByText(/preferred location/i)).toBeDefined())
+
+    // Click "Clear" on preferred location
+    const clearBtn = screen.getByRole('button', { name: /clear preferred location/i })
+    fireEvent.click(clearBtn)
+
+    await waitFor(() => {
+      expect(api.setDuplicateReview).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sha256: groupWithPref.sha256,
+          byteSize: groupWithPref.byteSize,
+          status: 'unreviewed',
+          preferredLocationId: null,
+          expectedGroupSignature: 'sig111'
+        })
+      )
+    })
+  })
+
+  it('invalidates in-flight member requests when selection is cleared so deferred responses do not repopulate', async () => {
+    let resolveMembers!: (value: unknown) => void
+    const membersPromise = new Promise((resolve) => {
+      resolveMembers = resolve
+    })
+
+    ;(api.getDuplicateGroupMembers as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await membersPromise
+      return {
+        sha256: sampleGroup.sha256,
+        byteSize: sampleGroup.byteSize,
+        groupSignature: 'sig111',
+        reviewStatus: 'unreviewed',
+        preferredLocationId: null,
+        hasStaleDecision: false,
+        items: sampleMembers,
+        totalCount: 2,
+        offset: 0,
+        limit: 50,
+        hasMore: false
+      }
+    })
+
+    let groupsResponse: { items: (typeof sampleGroup)[]; totalCount: number } = {
+      items: [sampleGroup],
+      totalCount: 1
+    }
+
+    ;(api.getDuplicateGroups as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+      items: groupsResponse.items,
+      totalCount: groupsResponse.totalCount,
+      offset: 0,
+      limit: 20,
+      hasMore: false
+    }))
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /duplicates/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /duplicates/i }))
+
+    // Loading file members notice is initially displayed
+    await waitFor(() => {
+      expect(screen.getByText(/loading file members/i)).toBeDefined()
+    })
+
+    // Now clear selection by returning 0 groups (e.g. user changes to empty filter)
+    groupsResponse = { items: [], totalCount: 0 }
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/no duplicate groups match/i)).toBeDefined()
+    })
+
+    // Now deferred member promise resolves for the obsolete selection
+    await act(async () => {
+      resolveMembers(true)
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    // Members from obsolete request must NOT appear in the cleared view
+    expect(screen.queryByText('IMG_001.JPG')).toBeNull()
+    expect(screen.queryByText(/loading file members/i)).toBeNull()
+  })
+
+  it('ignores out-of-order group-list responses when switching filters rapidly', async () => {
+    let resolveSlowUnreviewed!: (value: unknown) => void
+    const slowPromise = new Promise((resolve) => {
+      resolveSlowUnreviewed = resolve
+    })
+
+    const unreviewedGroup = {
+      ...sampleGroup,
+      sha256: 'u'.repeat(64)
+    }
+    const allGroup = {
+      ...sampleGroup,
+      sha256: 'a'.repeat(64)
+    }
+
+    ;(api.getDuplicateGroups as ReturnType<typeof vi.fn>).mockImplementation(
+      async (req: { filter?: string }) => {
+        if (req.filter === 'unreviewed') {
+          await slowPromise
+          return {
+            items: [unreviewedGroup],
+            totalCount: 1,
+            offset: 0,
+            limit: 20,
+            hasMore: false
+          }
+        }
+        return {
+          items: [allGroup],
+          totalCount: 1,
+          offset: 0,
+          limit: 20,
+          hasMore: false
+        }
+      }
+    )
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /duplicates/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /duplicates/i }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Unreviewed' })).toBeDefined())
+
+    // Click Unreviewed (starts slow request)
+    fireEvent.click(screen.getByRole('button', { name: 'Unreviewed' }))
+
+    // Rapidly switch back to All (fast request)
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(new RegExp(`SHA-256: ${allGroup.sha256.substring(0, 12)}`, 'i'))
+      ).toBeDefined()
+    })
+
+    // Now resolve slow Unreviewed response
+    await act(async () => {
+      resolveSlowUnreviewed(true)
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    // All group must still be shown; slow Unreviewed response must NOT replace current view
+    expect(
+      screen.getByText(new RegExp(`SHA-256: ${allGroup.sha256.substring(0, 12)}`, 'i'))
+    ).toBeDefined()
+    expect(
+      screen.queryByText(new RegExp(`SHA-256: ${unreviewedGroup.sha256.substring(0, 12)}`, 'i'))
+    ).toBeNull()
+  })
 })

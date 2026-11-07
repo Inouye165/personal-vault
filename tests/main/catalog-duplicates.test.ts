@@ -750,4 +750,75 @@ describe('Stage 3 — Catalog Duplicate Grouping & Review Decisions', () => {
     expect(check3.reviewStatus).toBe('reviewed')
     expect(check3.preferredLocationId).toBeNull()
   })
+
+  it('computes group signatures and saves review decisions without materializing all member rows in memory', () => {
+    const hash = 'e'.repeat(64)
+    const byteSize = 600
+
+    // Create 10 duplicate members
+    const files = Array.from({ length: 10 }, (_, i) => ({
+      originalPath: `C:\\MemoryBound\\file_${i + 1}.dat`,
+      fileName: `file_${i + 1}.dat`,
+      extension: 'dat',
+      byteSize,
+      birthtimeMs: null,
+      mtimeMs: 1000 + i,
+      discoveredAtMs: 2000,
+      category: 'document' as const
+    }))
+    db.persistDiscoveryBatch('C:\\MemoryBound', files)
+    for (let i = 0; i < 10; i++) {
+      db.recordHashObservation({
+        originalPath: `C:\\MemoryBound\\file_${i + 1}.dat`,
+        sha256: hash,
+        observedByteSize: byteSize,
+        observedMtimeMs: 1000 + i,
+        hashedAtMs: 3000
+      })
+    }
+
+    const group = db.getDuplicateGroups().items[0]!
+    const targetMember = db.getFileLocationByOriginalPath('C:\\MemoryBound\\file_2.dat')!
+
+    // Spy on rawDb.prepare to inspect statements executed during setDuplicateReview
+    const origPrepare = rawDb.prepare.bind(rawDb)
+    const preparedAllCalls: string[] = []
+
+    rawDb.prepare = ((sql: string) => {
+      const stmt = origPrepare(sql)
+      const origAll = stmt.all.bind(stmt)
+      stmt.all = ((...args: Parameters<typeof origAll>) => {
+        preparedAllCalls.push(sql)
+        return origAll(...args)
+      }) as typeof stmt.all
+      return stmt
+    }) as typeof rawDb.prepare
+
+    try {
+      const reviewRes = db.setDuplicateReview({
+        sha256: hash,
+        byteSize,
+        status: 'reviewed',
+        preferredLocationId: targetMember.id,
+        expectedGroupSignature: group.groupSignature
+      })
+
+      expect(reviewRes.status).toBe('reviewed')
+      expect(reviewRes.preferredLocationId).toBe(targetMember.id)
+
+      // In c5da2f1, setDuplicateReview executed a SELECT on file_locations / discovery_observations / hash_observations with .all()
+      // A truly bounded streaming implementation must NOT execute .all() to materialize member rows
+      const unBoundedMemberAllCalls = preparedAllCalls.filter(
+        (sql) =>
+          sql.includes('FROM file_locations') &&
+          sql.includes('discovery_observations') &&
+          sql.includes('hash_observations') &&
+          !sql.includes('LIMIT ? OFFSET ?') &&
+          !sql.includes('LIMIT ?;')
+      )
+      expect(unBoundedMemberAllCalls).toHaveLength(0)
+    } finally {
+      rawDb.prepare = origPrepare
+    }
+  })
 })

@@ -282,37 +282,68 @@ Following the third independent review round, four areas were addressed using fa
    - _Red evidence_: Initial run failed: `setDuplicateReview` not called immediately upon clicking preferred button.
    - _Implementation_: Removed unpersisted local state; "Set as Preferred" and "Clear" immediately persist to database with current review status; verified persistence across database close and real Electron application restart.
 
----
-
-## 3. Verification Results
-
-### 3.1 Test Suite & Skipped Test Analysis
-
-- **Implementation host**: **320 passed, 0 skipped** across all 16 test files.
-- **Reviewer host on 52d3b15**: **311 passed, 1 skipped** across 16 test files.
-- **Identified skipped test**: `tests/main/discovery.test.ts: it.runIf(canCreateRealJunction)('skips real directory junctions both as source roots and as nested entries without traversing outside the root')`.
-- **Reason**: The test helper `probeRealJunctionSupport()` tests whether Windows junction creation (`symlinkSync(target, link, 'junction')`) is supported in the environment without elevated privileges or Developer Mode. On environments where junction creation fails, `canCreateRealJunction` evaluates to `false`, causing Vitest to skip this platform-conditional test. On developer machines with junction creation permissions, the test runs and passes.
-
-### 3.2 Automated Quality Gates & Real-Process Verification
-
-Execution results on implementation host (`D:\organizer`):
-
-| Command                              | Result   | Details                                                                                        |
-| ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `npm test`                           | **PASS** | 16 test files: 320 passed, 0 skipped repository-wide                                           |
-| `npm run typecheck`                  | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)         |
-| `npm run lint`                       | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                            |
-| `npm run format:check`               | **PASS** | Prettier 100% compliant across entire repository                                               |
-| `npm run build`                      | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer           |
-| `npm run build:unpack`               | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                         |
-| `npm run verify:sqlite`              | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                        |
-| `npm run verify:sqlite:unpacked`     | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)              |
-| `npm run verify:scan`                | **PASS** | Real Electron runtime exercises scan workflow, IPC, crash & graceful recovery, digests (14/14) |
-| `npm run verify:scan:unpacked`       | **PASS** | Unpacked desktop binary exercises scan workflow, IPC, crash & graceful recovery (14/14)        |
-| `npm run verify:duplicates`          | **PASS** | Real Electron runtime exercises duplicate grouping, review, restart, & invalidation (18/18)    |
-| `npm run verify:duplicates:unpacked` | **PASS** | Unpacked desktop binary exercises duplicate grouping, review, restart, & invalidation (18/18)  |
-| `npm run smoke:built`                | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron                 |
-| `npm run smoke:unpacked`             | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks        |
+284:
+285: ### 2.9 Stage 3: Independent Review Corrections (Pass 2: Constant Memory, Filter Refill, Request Invalidation)
+286:
+287: Following the second round of independent review on commit `c5da2f1`, four areas were addressed using failing behavioral regression tests before implementation:
+288:
+289: 1. **Truly Bounded Constant Memory Signature Computation & Decision Saving**:
+290: - _Findings_: `computeGroupSignature` previously iterated rows but accumulated every member ID in a JavaScript `Set<number>`, which is $O(\text{group size})$ memory overhead. In `setDuplicateReview`, `membersSql.all()` and `.map().join()` were used across the entire group.
+291: - _Regression test_: Added test in [`tests/main/catalog-duplicates.test.ts`](file:///d:/organizer/tests/main/catalog-duplicates.test.ts) spying on `rawDb.prepare` during `setDuplicateReview` and asserting that no `.all()` call is executed on member rows.
+292: - _Red evidence_: Initial run failed: `expected [ Array(1) ] to have a length of +0 but got 1`.
+293: - _Implementation_:
+294: - Refactored `computeGroupSignature(sha256, byteSize, preferredLocationId?)` in [`src/main/services/catalog/database.ts`](file:///d:/organizer/src/main/services/catalog/database.ts) to stream member rows via `stmt.iterate` chunk-by-chunk into the SHA-256 hasher, tracking `memberCount` and a `containsPreferred` boolean in strictly $O(1)$ auxiliary JavaScript memory.
+295: - Refactored `setDuplicateReview` to reuse `computeGroupSignature` to verify signature, group existence (memberCount >= 2), and preferred location membership with zero array/set materialization.
+296: 2. **Filter & Count Consistency with Automatic Refilling**:
+297: - _Findings_: `submitReview` updated list items locally without reapplying the active filter or updating `totalGroups`. Under a filtered view (e.g. `unreviewed`), marking a group `reviewed` left it in the view with stale counts.
+298: - _Regression test_: Added test `removes group from unreviewed view and updates counts after marking as reviewed` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
+299: - _Red evidence_: Initial run failed: group remained visible in the unreviewed list and counts were not updated.
+300: - _Implementation_:
+301: - In [`src/renderer/src/hooks/useDuplicateReview.ts`](file:///d:/organizer/src/renderer/src/hooks/useDuplicateReview.ts), when a review status update results in `statusMatchesFilter === false`, triggers `fetchGroups` to purge the item, update `totalGroups`, and refill the page up to `groupsLimit`.
+302: - Automatically recovers to previous page if the last item on a page is removed.
+303: - Guards save completions against refreshed signatures (`groupSignature === targetSig`) and preserves user active navigation if the user moved to another group or filter while save was pending.
+304: 3. **Request Generation Invalidation on Selection Clear, Filter Transitions, and Unmount**:
+305: - _Findings_: Old member request responses could repopulate cleared selection state or trigger loading errors after selection was cleared; React state updaters contained side effects / ref mutations.
+306: - _Regression test_: Added test `invalidates in-flight member requests when selection is cleared so deferred responses do not repopulate` and `ignores out-of-order group-list responses when switching filters rapidly` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
+307: - _Red evidence_: Initial run failed: deferred member resolution repopulated member list after selection was cleared.
+308: - _Implementation_:
+309: - Pure state updaters: synchronizer `useEffect` hooks maintain refs (`selectedGroupRef`, `groupsFilterRef`, `groupsOffsetRef`) cleanly outside setter callbacks.
+310: - Invalidation tokens: `selectionTokenRef.current++` is synchronously incremented when selection is cleared (`nextSelected === null`), on filter transitions (`setFilter`), and on component unmount.
+311: 4. **UI Preferred Location Clearing**:
+312: - _Regression test_: Added test `clears preferred location through UI and calls setDuplicateReview with null` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
+313: - _Implementation_: Verified and exercised through UI tests and bridge tests; updated smoke check in [`scripts/smoke.mjs`](file:///d:/organizer/scripts/smoke.mjs) to include duplicate review bridge methods (`getDuplicateGroups`, `getDuplicateGroupMembers`, `setDuplicateReview`).
+314:
+315: ---
+316:
+317: ## 3. Verification Results
+318:
+319: ### 3.1 Test Suite & Skipped Test Analysis
+320:
+321: - **Implementation host**: **325 passed, 0 skipped** across all 16 test files.
+322: - **Reviewer host on c5da2f1**: **319 passed, 1 skipped** across 16 test files.
+323: - **Identified conditional test**: `tests/main/discovery.test.ts: it.runIf(canCreateRealJunction)('skips real directory junctions both as source roots and as nested entries without traversing outside the root')`.
+324: - **Reason**: `probeRealJunctionSupport()` executes `symlinkSync(target, link, 'junction')` inside a `try / catch` block and returns `false` on any exception without inspecting the specific error. On environments where junction creation throws an exception, `canCreateRealJunction` evaluates to `false`, causing Vitest to skip this conditional test (producing 1 skipped). On environments where junction creation succeeds, all 21 tests in `discovery.test.ts` execute and pass.
+325:
+326: ### 3.2 Automated Quality Gates & Real-Process Verification
+327:
+328: Execution results on implementation host (`D:\organizer`):
+329:
+330: | Command | Result | Details |
+331: | ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------- |
+332: | `npm test` | **PASS** | 16 test files: 325 passed, 0 skipped repository-wide |
+333: | `npm run typecheck` | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors) |
+334: | `npm run lint` | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings) |
+335: | `npm run format:check` | **PASS** | Prettier 100% compliant across entire repository |
+336: | `npm run build` | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer |
+337: | `npm run build:unpack` | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity |
+338: | `npm run verify:sqlite` | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks) |
+339: | `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`) |
+340: | `npm run verify:scan` | **PASS** | Real Electron runtime exercises scan workflow, IPC, crash & graceful recovery, digests (14/14) |
+341: | `npm run verify:scan:unpacked` | **PASS** | Unpacked desktop binary exercises scan workflow, IPC, crash & graceful recovery (14/14) |
+342: | `npm run verify:duplicates` | **PASS** | Real Electron runtime exercises duplicate grouping, review, restart, & invalidation (18/18) |
+343: | `npm run verify:duplicates:unpacked` | **PASS** | Unpacked desktop binary exercises duplicate grouping, review, restart, & invalidation (18/18) |
+344: | `npm run smoke:built` | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron |
+345: | `npm run smoke:unpacked` | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks |
 
 ---
 
