@@ -536,4 +536,218 @@ describe('Stage 3 — Catalog Duplicate Grouping & Review Decisions', () => {
       })
     }).toThrow(/preferred/i)
   })
+
+  it('paginates duplicate groups deterministically beyond one page with SQL-level bounds', () => {
+    // Create 5 distinct duplicate groups with different sizes and counts
+    for (let i = 1; i <= 5; i++) {
+      const hash = String(i).repeat(64)
+      const size = i * 100
+      db.persistDiscoveryBatch('C:\\Batch', [
+        {
+          originalPath: `C:\\Batch\\g${i}_file1.txt`,
+          fileName: `g${i}_file1.txt`,
+          extension: 'txt',
+          byteSize: size,
+          birthtimeMs: null,
+          mtimeMs: 1000,
+          discoveredAtMs: 2000,
+          category: 'document'
+        },
+        {
+          originalPath: `C:\\Batch\\g${i}_file2.txt`,
+          fileName: `g${i}_file2.txt`,
+          extension: 'txt',
+          byteSize: size,
+          birthtimeMs: null,
+          mtimeMs: 1000,
+          discoveredAtMs: 2000,
+          category: 'document'
+        }
+      ])
+      db.recordHashObservation({
+        originalPath: `C:\\Batch\\g${i}_file1.txt`,
+        sha256: hash,
+        observedByteSize: size,
+        observedMtimeMs: 1000,
+        hashedAtMs: 3000
+      })
+      db.recordHashObservation({
+        originalPath: `C:\\Batch\\g${i}_file2.txt`,
+        sha256: hash,
+        observedByteSize: size,
+        observedMtimeMs: 1000,
+        hashedAtMs: 3000
+      })
+    }
+
+    const page1 = db.getDuplicateGroups({ offset: 0, limit: 2 })
+    expect(page1.totalCount).toBe(5)
+    expect(page1.items).toHaveLength(2)
+    expect(page1.offset).toBe(0)
+    expect(page1.limit).toBe(2)
+    expect(page1.hasMore).toBe(true)
+
+    const page2 = db.getDuplicateGroups({ offset: 2, limit: 2 })
+    expect(page2.totalCount).toBe(5)
+    expect(page2.items).toHaveLength(2)
+    expect(page2.offset).toBe(2)
+    expect(page2.hasMore).toBe(true)
+
+    const page3 = db.getDuplicateGroups({ offset: 4, limit: 2 })
+    expect(page3.totalCount).toBe(5)
+    expect(page3.items).toHaveLength(1)
+    expect(page3.offset).toBe(4)
+    expect(page3.hasMore).toBe(false)
+
+    // Complete traversal covers all 5 unique groups with no duplicates
+    const allHashes = [
+      ...page1.items.map((g) => g.sha256),
+      ...page2.items.map((g) => g.sha256),
+      ...page3.items.map((g) => g.sha256)
+    ]
+    expect(new Set(allHashes).size).toBe(5)
+  })
+
+  it('paginates duplicate group members deterministically beyond one page with SQL-level bounds', () => {
+    const hash = 'c'.repeat(64)
+    const byteSize = 500
+    const files = Array.from({ length: 5 }, (_, idx) => ({
+      originalPath: `C:\\Members\\m_${idx + 1}.bin`,
+      fileName: `m_${idx + 1}.bin`,
+      extension: 'bin',
+      byteSize,
+      birthtimeMs: null,
+      mtimeMs: 1000 + idx,
+      discoveredAtMs: 2000,
+      category: 'document' as const
+    }))
+
+    db.persistDiscoveryBatch('C:\\Members', files)
+    for (let idx = 0; idx < 5; idx++) {
+      db.recordHashObservation({
+        originalPath: `C:\\Members\\m_${idx + 1}.bin`,
+        sha256: hash,
+        observedByteSize: byteSize,
+        observedMtimeMs: 1000 + idx,
+        hashedAtMs: 3000
+      })
+    }
+
+    const page1 = db.getDuplicateGroupMembers({ sha256: hash, byteSize, offset: 0, limit: 2 })
+    expect(page1.totalCount).toBe(5)
+    expect(page1.items).toHaveLength(2)
+    expect(page1.offset).toBe(0)
+    expect(page1.limit).toBe(2)
+    expect(page1.hasMore).toBe(true)
+
+    const page2 = db.getDuplicateGroupMembers({ sha256: hash, byteSize, offset: 2, limit: 2 })
+    expect(page2.totalCount).toBe(5)
+    expect(page2.items).toHaveLength(2)
+    expect(page2.offset).toBe(2)
+    expect(page2.hasMore).toBe(true)
+
+    const page3 = db.getDuplicateGroupMembers({ sha256: hash, byteSize, offset: 4, limit: 2 })
+    expect(page3.totalCount).toBe(5)
+    expect(page3.items).toHaveLength(1)
+    expect(page3.offset).toBe(4)
+    expect(page3.hasMore).toBe(false)
+
+    // Complete traversal covers all 5 unique locations in deterministic file_location_id order
+    const allLocationIds = [
+      ...page1.items.map((m) => m.fileLocationId),
+      ...page2.items.map((m) => m.fileLocationId),
+      ...page3.items.map((m) => m.fileLocationId)
+    ]
+    expect(new Set(allLocationIds).size).toBe(5)
+    for (let i = 0; i < allLocationIds.length - 1; i++) {
+      expect(allLocationIds[i]!).toBeLessThan(allLocationIds[i + 1]!)
+    }
+  })
+
+  it('persists preferred location independently without toggling review status, and allows clearing it', () => {
+    const hash = 'd'.repeat(64)
+    const byteSize = 700
+
+    db.persistDiscoveryBatch('C:\\Pref', [
+      {
+        originalPath: 'C:\\Pref\\pref1.txt',
+        fileName: 'pref1.txt',
+        extension: 'txt',
+        byteSize,
+        birthtimeMs: null,
+        mtimeMs: 1000,
+        discoveredAtMs: 2000,
+        category: 'document'
+      },
+      {
+        originalPath: 'C:\\Pref\\pref2.txt',
+        fileName: 'pref2.txt',
+        extension: 'txt',
+        byteSize,
+        birthtimeMs: null,
+        mtimeMs: 1000,
+        discoveredAtMs: 2000,
+        category: 'document'
+      }
+    ])
+    db.recordHashObservation({
+      originalPath: 'C:\\Pref\\pref1.txt',
+      sha256: hash,
+      observedByteSize: byteSize,
+      observedMtimeMs: 1000,
+      hashedAtMs: 3000
+    })
+    db.recordHashObservation({
+      originalPath: 'C:\\Pref\\pref2.txt',
+      sha256: hash,
+      observedByteSize: byteSize,
+      observedMtimeMs: 1000,
+      hashedAtMs: 3000
+    })
+
+    const group = db.getDuplicateGroups().items[0]!
+    const fl1 = db.getFileLocationByOriginalPath('C:\\Pref\\pref1.txt')!
+    const fl2 = db.getFileLocationByOriginalPath('C:\\Pref\\pref2.txt')!
+
+    // 1. Set preferred location while status remains 'unreviewed'
+    const res1 = db.setDuplicateReview({
+      sha256: hash,
+      byteSize,
+      status: 'unreviewed',
+      preferredLocationId: fl1.id,
+      expectedGroupSignature: group.groupSignature
+    })
+    expect(res1.status).toBe('unreviewed')
+    expect(res1.preferredLocationId).toBe(fl1.id)
+
+    const check1 = db.getDuplicateGroups().items[0]!
+    expect(check1.reviewStatus).toBe('unreviewed')
+    expect(check1.preferredLocationId).toBe(fl1.id)
+
+    // 2. Change preferred location to fl2 while toggling status to 'reviewed'
+    const res2 = db.setDuplicateReview({
+      sha256: hash,
+      byteSize,
+      status: 'reviewed',
+      preferredLocationId: fl2.id,
+      expectedGroupSignature: group.groupSignature
+    })
+    expect(res2.status).toBe('reviewed')
+    expect(res2.preferredLocationId).toBe(fl2.id)
+
+    // 3. Clear preferred location (null) while status remains 'reviewed'
+    const res3 = db.setDuplicateReview({
+      sha256: hash,
+      byteSize,
+      status: 'reviewed',
+      preferredLocationId: null,
+      expectedGroupSignature: group.groupSignature
+    })
+    expect(res3.status).toBe('reviewed')
+    expect(res3.preferredLocationId).toBeNull()
+
+    const check3 = db.getDuplicateGroups().items[0]!
+    expect(check3.reviewStatus).toBe('reviewed')
+    expect(check3.preferredLocationId).toBeNull()
+  })
 })

@@ -51,16 +51,20 @@ Verification: implementation host **276 passed, 0 skipped** across all 11 test f
 
 Status: **complete — awaiting independent review** (see HANDOFF.md).
 
-Verification: implementation host **312 passed, 0 skipped** across all 16 test files, with strict typecheck, lint, formatting, production build, unpacked build, real Electron SQLite repository checks (`verify:sqlite`, `verify:sqlite:unpacked`), scan workflow checks (`verify:scan`, `verify:scan:unpacked`), and isolated-fixture real Electron duplicate review checks (`verify:duplicates`, `verify:duplicates:unpacked`) passed.
+Verification: implementation host **320 passed, 0 skipped** across all 16 test files (reviewer host 311 passed, 1 skipped on 52d3b15 due to environment platform junction probe in `discovery.test.ts`), with strict typecheck, lint, formatting, production build, unpacked build, real Electron SQLite repository checks (`verify:sqlite`, `verify:sqlite:unpacked`), scan workflow checks (`verify:scan`, `verify:scan:unpacked`), and isolated-fixture real Electron duplicate review checks (`verify:duplicates`, `verify:duplicates:unpacked` — 18/18 checks passed) passed.
 
 - [x] Exact duplicate grouping by current verified SHA-256 AND byte size across distinct original paths, preserving all differing metadata.
 - [x] Schema Migration 5: `duplicate_reviews` table for persistent review annotations (`reviewed`/`unreviewed`, optional `preferred_location_id`, `group_signature`).
 - [x] Invalidation policy & stale write detection: deterministic `groupSignature` based on active member IDs, discovery IDs, and hash IDs; automatic invalidation when membership, content, or observations change; stale write rejection via `StaleReviewError`.
-- [x] Independently bounded, deterministically ordered paginated queries for duplicate groups and duplicate group members. Truncated member list never implies group is fully shown.
+- [x] Truly bounded SQL queries: SQL-level pagination (`LIMIT ? OFFSET ?`) for duplicate groups and member records; incremental streaming traversal (`stmt.iterate`) for deterministic group signature computation; `_valid_reviewed_groups` temp table for SQL-level filtering without materializing the catalog or all groups in JavaScript.
 - [x] Side-by-side inspection view in Duplicates tab displaying filenames, absolute paths, byte sizes, filesystem creation/modification dates, and hash observation provenance with verification timestamp and observation ID. Recorded facts strictly separated from inferred metadata; explicit unknown values.
+- [x] Asynchronous response safety: selection-bound review submissions preventing group B mutations from group A completions; pure React state updater functions; out-of-order filter/page/refresh protection with monotonic tokens and unmount guards.
+- [x] Accessible member error reporting with retry, obsolete member clearance on selection/failure, and changed/unavailable handling when a group falls below two verified members with review actions safely disabled.
+- [x] Truthful empty filter states with permanent filter controls (`All`, `Unreviewed`, `Reviewed`) and auto-recovery from out-of-range pagination when results shrink.
+- [x] Explicit immediate preferred-location persistence and clearing without status toggles, surviving restart and avoiding local state leaks.
 - [x] Explicit presentation distinguishing catalog removal, vault copy deletion, and source deletion as separate operations (none implemented).
 - [x] Narrow typed IPC channels (`DUPLICATES_GET_GROUPS`, `DUPLICATES_GET_MEMBERS`, `DUPLICATES_SET_REVIEW`) with bidirectional Zod validation and top-level sender authorization.
-- [x] Isolated-fixture verification script (`scripts/verify-electron-duplicate-review.mjs`) exercising scan-generated groups, member inspection, review decisions, persistence across restart, invalidation on modified-file rescan, stale write rejection, and source preservation invariance in real Electron and unpacked binary.
+- [x] Isolated-fixture verification script (`scripts/verify-electron-duplicate-review.mjs`) exercising scan-generated groups, member inspection, review decisions, preferred location without status toggle, persistence across restart, invalidation on modified-file rescan, stale write rejection, and source preservation invariance in real Electron and unpacked binary.
 
 ---
 

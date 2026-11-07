@@ -234,7 +234,7 @@ Following the third independent review round, four areas were addressed using fa
    - _Failing test_: Added tests for duplicate roots and candidate paths crossing batch boundaries with `batchSize: 1`, pause/resume, and verified that counts reflect unique observed files without inflating.
    - _Resolution_: Removed unbounded in-memory `seenCandidatePaths` Set entirely from `ScanJobCoordinator`. In-flight discovery candidate memory in Node is strictly bounded by `batchSize` (1 <= batchSize <= 1000). Candidates are persisted via `persistDiscoveryBatch`, which inserts into `scan_job_files` (`PRIMARY KEY (job_id, file_location_id)`). Added `CatalogDatabase.countDiscoveredFilesForJob(jobId)` to compute exact unique counts and bytes from SQLite upon every batch commit.
 
-### 2.7 Stage 3: Exact Duplicate Grouping and Review (Red / Green / Refactor Evidence)
+### 2.7 Stage 3: Exact Duplicate Grouping and Review (Initial Implementation Evidence)
 
 1. **Schema Migration 5 & Duplicate Queries/Reviews Repository**:
    - _Failing test_: [`tests/main/catalog-duplicates.test.ts`](file:///d:/organizer/tests/main/catalog-duplicates.test.ts) specified migration 5, grouping by exact SHA-256 + byte size, exclusion of inactive/superseded observations, independently bounded pagination for groups and members, persistent review decisions across reopen, invalidation upon changed membership, and rejection of invalid preferred locations and stale writes.
@@ -252,21 +252,54 @@ Following the third independent review round, four areas were addressed using fa
    - _Failing test_: [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx) specified confirmed empty state, operation distinctions notice, member inspection cards with observation provenance, setting preferred location and marking as reviewed, stale error banners, and rapid selection race-condition prevention.
    - _Initial run_: Failed with `Unable to find element with text /no duplicate files found/i`.
 
-**Green Implementation**:
+### 2.8 Stage 3: Independent Review Findings Corrections (Red / Green / Refactor Evidence)
 
-- Implemented Migration 5 (`duplicate_reviews` table) and catalog methods with deterministic `groupSignature` generation.
-- Implemented IPC schemas, preload bridge, sender-validated main handlers, `useDuplicateReview` hook, and `DuplicateReviewPanel` UI component.
-- All 16 test files passed repository-wide (312 passed, 0 skipped).
+1. **Truly Bounded Database Queries**:
+   - _Findings_: `getDuplicateGroups` and `getDuplicateGroupMembers` loaded all records into memory before applying `Array.slice`.
+   - _Regression tests_: Added tests in [`tests/main/catalog-duplicates.test.ts`](file:///d:/organizer/tests/main/catalog-duplicates.test.ts) exercising complete deterministic pagination beyond page 1 for groups and members.
+   - _Implementation_:
+     - Implemented SQL-level pagination (`LIMIT ? OFFSET ?`) for `getDuplicateGroups` and `getDuplicateGroupMembers`.
+     - Computed deterministic group signatures using bounded incremental streaming (`stmt.iterate`) with $O(1)$ memory.
+     - Managed `_valid_reviewed_groups` SQLite temporary table for SQL-level filtering (`filter === 'all' | 'unreviewed' | 'reviewed'`) without materializing the catalog or all groups in JavaScript.
+2. **Asynchronous Response Safety**:
+   - _Findings_: `submitReview` applied response to whichever group was selected when resolving; requests inside React state updater functions; out-of-order filter/page/refresh responses.
+   - _Regression tests_: Added test `keeps group B intact when saving group A resolves after selecting group B` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
+   - _Red evidence_: Initial run failed: group B had its status mutated to group A's reviewed status.
+   - _Implementation_: Pure state updaters outside setter callbacks; selection token refs and `selectedGroupRef` guarding completions; group B retains its signature, review status, preferred location, and members.
+3. **Member Errors and Changed/Unavailable Groups**:
+   - _Findings_: `membersError` recorded by hook but never displayed; obsolete members displayed after failure/switching; groups falling below 2 members not treated as changed/unavailable.
+   - _Regression tests_: Added tests for member error rendering with retry, obsolete member clearance, and single-member group unavailability in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
+   - _Red evidence_: Initial run failed: error notice not rendered; review actions remained enabled for single-member group.
+   - _Implementation_: Rendered accessible error with retry; immediate clearance of member list on selection change and failure; warning banner when group falls below 2 members; review action controls disabled when invalid or loading.
+4. **Empty Filters and Truthful Messaging**:
+   - _Findings_: Filter controls disappeared when filter returned 0 results, trapping users; claimed all files had unique content; out-of-range page after results shrink.
+   - _Regression tests_: Added test `preserves filter controls and truthful messaging when filter returns zero results, allowing return to All`.
+   - _Red evidence_: Initial run failed: filter buttons disappeared when switching to empty "Reviewed" filter.
+   - _Implementation_: Filter controls remain visible and accessible in empty states; truthful messaging distinguishes "no groups match this filter" from "no currently verified duplicate groups"; auto-recovery from out-of-range pagination when results shrink.
+5. **Preferred-Location Persistence**:
+   - _Findings_: "Set as Preferred" only changed local state and required status toggle to save; local preference leaked across groups and refreshes.
+   - _Regression tests_: Added unit and UI tests verifying immediate persistence on "Set as Preferred" and "Clear Preferred" without toggling status.
+   - _Red evidence_: Initial run failed: `setDuplicateReview` not called immediately upon clicking preferred button.
+   - _Implementation_: Removed unpersisted local state; "Set as Preferred" and "Clear" immediately persist to database with current review status; verified persistence across database close and real Electron application restart.
 
 ---
 
 ## 3. Verification Results
 
+### 3.1 Test Suite & Skipped Test Analysis
+
+- **Implementation host**: **320 passed, 0 skipped** across all 16 test files.
+- **Reviewer host on 52d3b15**: **311 passed, 1 skipped** across 16 test files.
+- **Identified skipped test**: `tests/main/discovery.test.ts: it.runIf(canCreateRealJunction)('skips real directory junctions both as source roots and as nested entries without traversing outside the root')`.
+- **Reason**: The test helper `probeRealJunctionSupport()` tests whether Windows junction creation (`symlinkSync(target, link, 'junction')`) is supported in the environment without elevated privileges or Developer Mode. On environments where junction creation fails, `canCreateRealJunction` evaluates to `false`, causing Vitest to skip this platform-conditional test. On developer machines with junction creation permissions, the test runs and passes.
+
+### 3.2 Automated Quality Gates & Real-Process Verification
+
 Execution results on implementation host (`D:\organizer`):
 
 | Command                              | Result   | Details                                                                                        |
 | ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `npm test`                           | **PASS** | 16 test files: 312 passed, 0 skipped repository-wide                                           |
+| `npm test`                           | **PASS** | 16 test files: 320 passed, 0 skipped repository-wide                                           |
 | `npm run typecheck`                  | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)         |
 | `npm run lint`                       | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                            |
 | `npm run format:check`               | **PASS** | Prettier 100% compliant across entire repository                                               |
@@ -276,8 +309,8 @@ Execution results on implementation host (`D:\organizer`):
 | `npm run verify:sqlite:unpacked`     | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)              |
 | `npm run verify:scan`                | **PASS** | Real Electron runtime exercises scan workflow, IPC, crash & graceful recovery, digests (14/14) |
 | `npm run verify:scan:unpacked`       | **PASS** | Unpacked desktop binary exercises scan workflow, IPC, crash & graceful recovery (14/14)        |
-| `npm run verify:duplicates`          | **PASS** | Real Electron runtime exercises duplicate grouping, review, restart, & invalidation (16/16)    |
-| `npm run verify:duplicates:unpacked` | **PASS** | Unpacked desktop binary exercises duplicate grouping, review, restart, & invalidation (16/16)  |
+| `npm run verify:duplicates`          | **PASS** | Real Electron runtime exercises duplicate grouping, review, restart, & invalidation (18/18)    |
+| `npm run verify:duplicates:unpacked` | **PASS** | Unpacked desktop binary exercises duplicate grouping, review, restart, & invalidation (18/18)  |
 | `npm run smoke:built`                | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron                 |
 | `npm run smoke:unpacked`             | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks        |
 

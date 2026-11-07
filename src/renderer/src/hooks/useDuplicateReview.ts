@@ -53,14 +53,21 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
   const [actionError, setActionError] = useState<string | null>(null)
   const [isSavingReview, setIsSavingReview] = useState(false)
 
-  // Token to prevent race conditions on rapid asynchronous selections
+  // Token refs to prevent race conditions on rapid asynchronous requests
+  const isMountedRef = useRef(true)
+  const groupsTokenRef = useRef(0)
   const selectionTokenRef = useRef(0)
+  const selectedGroupRef = useRef<DuplicateGroupSummary | null>(null)
 
   const fetchMembers = useCallback(
     async (group: DuplicateGroupSummary, offset: number) => {
       const token = ++selectionTokenRef.current
+      // Clear obsolete members immediately on new request
+      setMembers([])
+      setTotalMembers(0)
       setIsLoadingMembers(true)
       setMembersError(null)
+
       try {
         const response = await window.api.getDuplicateGroupMembers({
           sha256: group.sha256,
@@ -68,29 +75,36 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
           offset,
           limit: membersLimit
         })
-        if (token === selectionTokenRef.current) {
-          setMembers(response.items)
-          setTotalMembers(response.totalCount)
-          setMembersOffset(response.offset)
-          setSelectedGroup((prev) =>
-            prev && prev.sha256 === group.sha256 && prev.byteSize === group.byteSize
-              ? {
-                  ...prev,
-                  groupSignature: response.groupSignature,
-                  reviewStatus: response.reviewStatus,
-                  preferredLocationId: response.preferredLocationId,
-                  hasStaleDecision: response.hasStaleDecision,
-                  reviewedAtMs: response.reviewedAtMs ?? null
-                }
-              : prev
-          )
-        }
+
+        if (!isMountedRef.current || token !== selectionTokenRef.current) return
+
+        setMembers(response.items)
+        setTotalMembers(response.totalCount)
+        setMembersOffset(response.offset)
+
+        setSelectedGroup((prev) => {
+          if (prev && prev.sha256 === group.sha256 && prev.byteSize === group.byteSize) {
+            const updated: DuplicateGroupSummary = {
+              ...prev,
+              groupSignature: response.groupSignature,
+              reviewStatus: response.reviewStatus,
+              preferredLocationId: response.preferredLocationId,
+              hasStaleDecision: response.hasStaleDecision,
+              reviewedAtMs: response.reviewedAtMs ?? null
+            }
+            selectedGroupRef.current = updated
+            return updated
+          }
+          return prev
+        })
       } catch (err) {
-        if (token === selectionTokenRef.current) {
+        if (isMountedRef.current && token === selectionTokenRef.current) {
+          setMembers([])
+          setTotalMembers(0)
           setMembersError(err instanceof Error ? err.message : String(err))
         }
       } finally {
-        if (token === selectionTokenRef.current) {
+        if (isMountedRef.current && token === selectionTokenRef.current) {
           setIsLoadingMembers(false)
         }
       }
@@ -99,55 +113,79 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
   )
 
   const fetchGroups = useCallback(
-    async (offset: number, filter: DuplicateReviewFilter) => {
+    async (initialOffset: number, filter: DuplicateReviewFilter) => {
+      const token = ++groupsTokenRef.current
       setIsLoadingGroups(true)
       setGroupsError(null)
+
       try {
-        const response = await window.api.getDuplicateGroups({
+        let offset = initialOffset
+        let response = await window.api.getDuplicateGroups({
           offset,
           limit: groupsLimit,
           filter
         })
+
+        if (!isMountedRef.current || token !== groupsTokenRef.current) return
+
+        // Auto-recover from out-of-range page if results shrank
+        if (response.totalCount > 0 && response.items.length === 0 && offset > 0) {
+          offset = Math.floor((response.totalCount - 1) / groupsLimit) * groupsLimit
+          response = await window.api.getDuplicateGroups({
+            offset,
+            limit: groupsLimit,
+            filter
+          })
+          if (!isMountedRef.current || token !== groupsTokenRef.current) return
+        }
+
         setGroups(response.items)
         setTotalGroups(response.totalCount)
         setGroupsOffset(response.offset)
 
-        // If previously selected group is still in items, update it; otherwise select first or null
-        setSelectedGroup((current) => {
-          if (!current && response.items.length > 0) {
-            const first = response.items[0]!
-            void fetchMembers(first, 0)
-            return first
+        // Purely compute next selection outside state updater callbacks
+        const current = selectedGroupRef.current
+        let nextSelected: DuplicateGroupSummary | null = null
+
+        if (current) {
+          const match = response.items.find(
+            (g) => g.sha256 === current.sha256 && g.byteSize === current.byteSize
+          )
+          if (match) {
+            nextSelected = match
+          } else if (response.items.length > 0) {
+            nextSelected = response.items[0]!
           }
-          if (current) {
-            const match = response.items.find(
-              (g) => g.sha256 === current.sha256 && g.byteSize === current.byteSize
-            )
-            if (match) {
-              void fetchMembers(match, 0)
-              return match
-            }
-            if (response.items.length > 0) {
-              const first = response.items[0]!
-              void fetchMembers(first, 0)
-              return first
-            }
-          }
+        } else if (response.items.length > 0) {
+          nextSelected = response.items[0]!
+        }
+
+        selectedGroupRef.current = nextSelected
+        setSelectedGroup(nextSelected)
+
+        if (nextSelected) {
+          void fetchMembers(nextSelected, 0)
+        } else {
           setMembers([])
           setTotalMembers(0)
-          return null
-        })
+        }
       } catch (err) {
-        setGroupsError(err instanceof Error ? err.message : String(err))
+        if (isMountedRef.current && token === groupsTokenRef.current) {
+          setGroupsError(err instanceof Error ? err.message : String(err))
+        }
       } finally {
-        setIsLoadingGroups(false)
+        if (isMountedRef.current && token === groupsTokenRef.current) {
+          setIsLoadingGroups(false)
+        }
       }
     },
     [fetchMembers, groupsLimit]
   )
 
   useEffect(() => {
+    isMountedRef.current = true
     let active = true
+
     const loadInitial = async () => {
       await Promise.resolve()
       if (active) {
@@ -155,16 +193,22 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
       }
     }
     void loadInitial()
+
     return () => {
       active = false
+      isMountedRef.current = false
     }
   }, [fetchGroups, groupsFilter])
 
   const selectGroup = useCallback(
     (group: DuplicateGroupSummary) => {
+      selectedGroupRef.current = group
       setSelectedGroup(group)
       setMembersOffset(0)
       setActionError(null)
+      setMembers([])
+      setTotalMembers(0)
+      setMembersError(null)
       void fetchMembers(group, 0)
     },
     [fetchMembers]
@@ -185,41 +229,37 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
 
   const changeMembersPage = useCallback(
     (newOffset: number) => {
-      if (selectedGroup) {
-        void fetchMembers(selectedGroup, newOffset)
+      const current = selectedGroupRef.current
+      if (current) {
+        void fetchMembers(current, newOffset)
       }
     },
-    [fetchMembers, selectedGroup]
+    [fetchMembers]
   )
 
   const submitReview = useCallback(
     async (status: 'unreviewed' | 'reviewed', preferredLocationId?: number | null) => {
-      if (!selectedGroup) return
+      const current = selectedGroupRef.current
+      if (!current) return
+      const targetSha256 = current.sha256
+      const targetByteSize = current.byteSize
+      const targetSig = current.groupSignature
+
       setIsSavingReview(true)
       setActionError(null)
+
       try {
         const response = await window.api.setDuplicateReview({
-          sha256: selectedGroup.sha256,
-          byteSize: selectedGroup.byteSize,
+          sha256: targetSha256,
+          byteSize: targetByteSize,
           status,
           preferredLocationId: preferredLocationId ?? null,
-          expectedGroupSignature: selectedGroup.groupSignature
+          expectedGroupSignature: targetSig
         })
 
-        // Update selectedGroup and members state locally
-        setSelectedGroup((prev) =>
-          prev
-            ? {
-                ...prev,
-                reviewStatus: response.status,
-                preferredLocationId: response.preferredLocationId,
-                groupSignature: response.groupSignature,
-                hasStaleDecision: false,
-                reviewedAtMs: response.reviewedAtMs
-              }
-            : null
-        )
+        if (!isMountedRef.current) return
 
+        // Update groups list item
         setGroups((prev) =>
           prev.map((g) =>
             g.sha256 === response.sha256 && g.byteSize === response.byteSize
@@ -235,25 +275,51 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
           )
         )
 
-        setMembers((prev) =>
-          prev.map((m) => ({
-            ...m,
-            isPreferred:
-              response.preferredLocationId !== null &&
-              m.fileLocationId === response.preferredLocationId
-          }))
-        )
+        // Protect against stale async completion: only update selectedGroup if user is still on this group!
+        if (
+          selectedGroupRef.current &&
+          selectedGroupRef.current.sha256 === response.sha256 &&
+          selectedGroupRef.current.byteSize === response.byteSize
+        ) {
+          const updatedSelected: DuplicateGroupSummary = {
+            ...selectedGroupRef.current,
+            reviewStatus: response.status,
+            preferredLocationId: response.preferredLocationId,
+            groupSignature: response.groupSignature,
+            hasStaleDecision: false,
+            reviewedAtMs: response.reviewedAtMs
+          }
+          selectedGroupRef.current = updatedSelected
+          setSelectedGroup(updatedSelected)
+
+          setMembers((prev) =>
+            prev.map((m) => ({
+              ...m,
+              isPreferred:
+                response.preferredLocationId !== null &&
+                m.fileLocationId === response.preferredLocationId
+            }))
+          )
+        }
       } catch (err) {
-        setActionError(err instanceof Error ? err.message : String(err))
+        if (
+          isMountedRef.current &&
+          selectedGroupRef.current &&
+          selectedGroupRef.current.sha256 === targetSha256 &&
+          selectedGroupRef.current.byteSize === targetByteSize
+        ) {
+          setActionError(err instanceof Error ? err.message : String(err))
+        }
       } finally {
-        setIsSavingReview(false)
+        if (isMountedRef.current) {
+          setIsSavingReview(false)
+        }
       }
     },
-    [selectedGroup]
+    []
   )
 
   const refresh = useCallback(async () => {
-    setActionError(null)
     await fetchGroups(groupsOffset, groupsFilter)
   }, [fetchGroups, groupsOffset, groupsFilter])
 

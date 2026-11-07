@@ -252,12 +252,14 @@ async function main() {
     writeFileSync(fileUnique, contentUnique)
 
     // Snapshot initial metadata for source preservation invariance check
+    // Including content hashes, byte sizes, creation times where available, and full-precision modification timestamps
     const initialSnapshots = new Map()
     for (const f of [file1, file2, file3, file4, file5, fileUnique]) {
       const st = statSync(f)
       initialSnapshots.set(f, {
         size: st.size,
-        mtimeMs: Math.floor(st.mtimeMs),
+        birthtimeMs: typeof st.birthtimeMs === 'number' ? st.birthtimeMs : null,
+        mtimeMs: st.mtimeMs,
         sha256: sha256OfFile(f)
       })
     }
@@ -355,6 +357,29 @@ async function main() {
         reviewResult.preferredLocationId === preferredMember.fileLocationId
     )
 
+    // 5b. Preferred-location change without status toggle on Group 2
+    // Group 2 is unreviewed; set docA as preferred location while keeping status as unreviewed
+    const membersGroup2 = await evaluate(
+      cdp,
+      `window.api.getDuplicateGroupMembers({ sha256: ${JSON.stringify(group2.sha256)}, byteSize: ${group2.byteSize}, offset: 0, limit: 10 })`
+    )
+    const prefGroup2Member = membersGroup2.items.find((m) => m.originalPath.endsWith('docA.txt'))
+    const group2ReviewResult = await evaluate(
+      cdp,
+      `window.api.setDuplicateReview({
+        sha256: ${JSON.stringify(group2.sha256)},
+        byteSize: ${group2.byteSize},
+        status: 'unreviewed',
+        preferredLocationId: ${prefGroup2Member.fileLocationId},
+        expectedGroupSignature: ${JSON.stringify(group2.groupSignature)}
+      })`
+    )
+    recordCheck(
+      'Preferred location set without status toggle persists unreviewed status',
+      group2ReviewResult.status === 'unreviewed' &&
+        group2ReviewResult.preferredLocationId === prefGroup2Member.fileLocationId
+    )
+
     // Close application cleanly to test persistence across restart
     cdp.close()
     cdp = null
@@ -374,6 +399,7 @@ async function main() {
     // Query duplicate groups after restart
     const groupsAfterRestart = await evaluate(cdp, `window.api.getDuplicateGroups()`)
     const group1Restart = groupsAfterRestart.items.find((g) => g.byteSize === 1024)
+    const group2Restart = groupsAfterRestart.items.find((g) => g.byteSize === 512)
     recordCheck(
       'Review decision persists across application restart',
       group1Restart &&
@@ -381,11 +407,26 @@ async function main() {
         group1Restart.preferredLocationId === preferredMember.fileLocationId &&
         group1Restart.hasStaleDecision === false
     )
+    recordCheck(
+      'Preferred location without status toggle persists across application restart',
+      group2Restart &&
+        group2Restart.reviewStatus === 'unreviewed' &&
+        group2Restart.preferredLocationId === prefGroup2Member.fileLocationId &&
+        group2Restart.hasStaleDecision === false
+    )
 
     // 7. Test Invalidation: Modify 1 member of Group 1 out of band
     // Append bytes to file3 ('copy_photo.jpg'), changing its byteSize and hash
     writeFileSync(file3, Buffer.concat([contentGroup1, Buffer.from('modified-extra-data')]))
-    recordCheck('Modified member file3 out of band', true)
+    // Establish a new baseline for file3 immediately after modification, before application rescan
+    const stMod = statSync(file3)
+    const modifiedFile3Baseline = {
+      size: stMod.size,
+      birthtimeMs: typeof stMod.birthtimeMs === 'number' ? stMod.birthtimeMs : null,
+      mtimeMs: stMod.mtimeMs,
+      sha256: sha256OfFile(file3)
+    }
+    recordCheck('Modified member file3 out of band and established new baseline', true)
 
     // Trigger rescan
     await evaluate(cdp, `window.api.startScan({ roots: [${JSON.stringify(testSources)}] })`)
@@ -435,25 +476,30 @@ async function main() {
     await sleep(1000)
 
     // 9. Source Preservation Invariance Check
+    // Verify using content hashes, byte sizes, creation times, and full-precision modification timestamps
     let preservationIntact = true
     for (const [filePath, initial] of initialSnapshots) {
-      if (filePath === file3) {
-        // file3 was modified by our test out of band
-        continue
-      }
+      const baseline = filePath === file3 ? modifiedFile3Baseline : initial
       const st = statSync(filePath)
       const currentSha = sha256OfFile(filePath)
+      const birthMatch =
+        baseline.birthtimeMs === null ||
+        typeof st.birthtimeMs !== 'number' ||
+        st.birthtimeMs === baseline.birthtimeMs
       if (
-        st.size !== initial.size ||
-        Math.floor(st.mtimeMs) !== initial.mtimeMs ||
-        currentSha !== initial.sha256
+        st.size !== baseline.size ||
+        st.mtimeMs !== baseline.mtimeMs ||
+        !birthMatch ||
+        currentSha !== baseline.sha256
       ) {
         preservationIntact = false
-        console.error(`File modified unexpectedly: ${filePath}`)
+        console.error(
+          `File modified unexpectedly: ${filePath} (size: ${st.size} vs ${baseline.size}, mtime: ${st.mtimeMs} vs ${baseline.mtimeMs}, sha: ${currentSha} vs ${baseline.sha256})`
+        )
       }
     }
     recordCheck(
-      'Source preservation invariance: unmodified source files are 100% unaltered',
+      'Source preservation invariance: content hashes, sizes, birthtimes, and full-precision mtimes are 100% unaltered',
       preservationIntact
     )
 

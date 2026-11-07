@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import {
   CheckCircle,
   Copy,
@@ -26,28 +25,38 @@ function formatDate(ms: number | null): string {
 
 export function DuplicateReviewPanel() {
   const review = useDuplicateReview()
-  const [selectedPreferredId, setSelectedPreferredId] = useState<number | null>(null)
-
-  // Synchronize local preferred selection when selected group changes
-  const effectivePreferredId =
-    selectedPreferredId !== null
-      ? selectedPreferredId
-      : (review.selectedGroup?.preferredLocationId ?? null)
 
   const handleSelectGroup = (group: (typeof review.groups)[0]) => {
-    setSelectedPreferredId(null)
     review.selectGroup(group)
   }
 
   const handleToggleReviewed = async () => {
     if (!review.selectedGroup) return
     const newStatus = review.selectedGroup.reviewStatus === 'reviewed' ? 'unreviewed' : 'reviewed'
-    await review.submitReview(newStatus, effectivePreferredId)
+    await review.submitReview(newStatus, review.selectedGroup.preferredLocationId)
   }
 
-  const handleSetPreferred = (fileLocationId: number) => {
-    setSelectedPreferredId(fileLocationId)
+  const handleSetPreferred = async (fileLocationId: number) => {
+    if (!review.selectedGroup) return
+    await review.submitReview(review.selectedGroup.reviewStatus, fileLocationId)
   }
+
+  const handleClearPreferred = async () => {
+    if (!review.selectedGroup) return
+    await review.submitReview(review.selectedGroup.reviewStatus, null)
+  }
+
+  const isGroupUnavailable =
+    !review.isLoadingMembers &&
+    !review.membersError &&
+    review.selectedGroup !== null &&
+    review.totalMembers < 2
+
+  const isReviewActionDisabled =
+    review.isSavingReview ||
+    review.isLoadingMembers ||
+    Boolean(review.membersError) ||
+    isGroupUnavailable
 
   return (
     <div className="duplicate-review-container">
@@ -105,24 +114,10 @@ export function DuplicateReviewPanel() {
         </div>
       )}
 
-      {/* Confirmed Empty State */}
-      {!review.isLoadingGroups && !review.groupsError && review.totalGroups === 0 && (
-        <div className="empty-state-card duplicates-empty" role="status">
-          <div className="empty-icon-wrap" aria-hidden="true">
-            <CheckCircle size={28} />
-          </div>
-          <h2 className="empty-title">No duplicate files found</h2>
-          <p className="empty-description">
-            All cataloged files have unique content. As you scan more folders, identical files with
-            matching SHA-256 and byte sizes will appear here for review.
-          </p>
-        </div>
-      )}
-
-      {/* Populated Duplicate Groups Review View */}
-      {!review.isLoadingGroups && review.totalGroups > 0 && (
+      {/* Populated / Interactive Duplicate Review View */}
+      {!review.isLoadingGroups && !review.groupsError && (
         <div className="duplicate-review-workspace">
-          {/* Left Column: Duplicate Groups Master List */}
+          {/* Left Column: Duplicate Groups Master List with permanent filter controls */}
           <aside className="duplicate-groups-sidebar" aria-label="Duplicate Groups List">
             <div className="groups-sidebar-header">
               <div className="groups-count-title">
@@ -146,55 +141,64 @@ export function DuplicateReviewPanel() {
             </div>
 
             <div className="groups-list" role="list">
-              {review.groups.map((group) => {
-                const isSelected =
-                  review.selectedGroup?.sha256 === group.sha256 &&
-                  review.selectedGroup?.byteSize === group.byteSize
+              {review.groups.length === 0 ? (
+                <div className="groups-empty-hint">
+                  <p>No groups in this view.</p>
+                </div>
+              ) : (
+                review.groups.map((group) => {
+                  const isSelected =
+                    review.selectedGroup?.sha256 === group.sha256 &&
+                    review.selectedGroup?.byteSize === group.byteSize
 
-                return (
-                  <div
-                    key={`${group.sha256}:${group.byteSize}`}
-                    role="listitem"
-                    className={`group-list-item ${isSelected ? 'selected' : ''}`}
-                    onClick={() => handleSelectGroup(group)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        handleSelectGroup(group)
-                      }
-                    }}
-                    tabIndex={0}
-                    aria-current={isSelected ? 'true' : undefined}
-                  >
-                    <div className="group-item-top">
-                      <span className="group-item-size">{formatBytes(group.byteSize)}</span>
-                      <span className="group-item-count">{group.fileCount} copies</span>
+                  return (
+                    <div
+                      key={`${group.sha256}:${group.byteSize}`}
+                      role="listitem"
+                      className={`group-list-item ${isSelected ? 'selected' : ''}`}
+                      onClick={() => handleSelectGroup(group)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          handleSelectGroup(group)
+                        }
+                      }}
+                      tabIndex={0}
+                      aria-current={isSelected ? 'true' : undefined}
+                    >
+                      <div className="group-item-top">
+                        <span className="group-item-size">{formatBytes(group.byteSize)}</span>
+                        <span className="group-item-count">{group.fileCount} copies</span>
+                      </div>
+                      <div className="group-item-hash" title={group.sha256}>
+                        SHA-256: {group.sha256.substring(0, 12)}…
+                      </div>
+                      <div className="group-item-bottom">
+                        {group.hasStaleDecision ? (
+                          <span
+                            className="badge badge-warning"
+                            title="Group membership or content has changed"
+                          >
+                            Review outdated
+                          </span>
+                        ) : group.reviewStatus === 'reviewed' ? (
+                          <span className="badge badge-success">Reviewed</span>
+                        ) : (
+                          <span className="badge badge-neutral">Unreviewed</span>
+                        )}
+                        {group.preferredLocationId && (
+                          <span
+                            className="badge badge-preferred"
+                            title="Preferred location selected"
+                          >
+                            <Star size={10} aria-hidden="true" /> Preferred set
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="group-item-hash" title={group.sha256}>
-                      SHA-256: {group.sha256.substring(0, 12)}…
-                    </div>
-                    <div className="group-item-bottom">
-                      {group.hasStaleDecision ? (
-                        <span
-                          className="badge badge-warning"
-                          title="Group membership or content has changed"
-                        >
-                          Review outdated
-                        </span>
-                      ) : group.reviewStatus === 'reviewed' ? (
-                        <span className="badge badge-success">Reviewed</span>
-                      ) : (
-                        <span className="badge badge-neutral">Unreviewed</span>
-                      )}
-                      {group.preferredLocationId && (
-                        <span className="badge badge-preferred" title="Preferred location selected">
-                          <Star size={10} aria-hidden="true" /> Preferred set
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
+                  )
+                })
+              )}
             </div>
 
             {/* Groups Pagination */}
@@ -228,9 +232,55 @@ export function DuplicateReviewPanel() {
             )}
           </aside>
 
-          {/* Right Column: Group Details & Member Side-by-Side Review */}
+          {/* Right Column: Group Details & Member Side-by-Side Review or Truthful Empty State */}
           <main className="duplicate-detail-panel" aria-label="Duplicate Group Details">
-            {review.selectedGroup ? (
+            {review.totalGroups === 0 ? (
+              <div className="empty-state-card duplicates-empty" role="status">
+                <div className="empty-icon-wrap" aria-hidden="true">
+                  <CheckCircle size={28} />
+                </div>
+                {review.groupsFilter === 'reviewed' ? (
+                  <>
+                    <h2 className="empty-title">No duplicate groups match the 'Reviewed' filter</h2>
+                    <p className="empty-description">
+                      No duplicate groups have been marked as reviewed yet.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => review.setFilter('all')}
+                    >
+                      Show All Groups
+                    </button>
+                  </>
+                ) : review.groupsFilter === 'unreviewed' ? (
+                  <>
+                    <h2 className="empty-title">
+                      No duplicate groups match the 'Unreviewed' filter
+                    </h2>
+                    <p className="empty-description">
+                      All currently verified duplicate groups have been reviewed.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => review.setFilter('all')}
+                    >
+                      Show All Groups
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <h2 className="empty-title">No duplicate files found</h2>
+                    <p className="empty-description">
+                      No files in the catalog currently share matching byte sizes and verified
+                      SHA-256 hashes. If files were recently discovered, run a scan job to compute
+                      hashes.
+                    </p>
+                  </>
+                )}
+              </div>
+            ) : review.selectedGroup ? (
               <>
                 <div className="group-detail-header">
                   <div className="group-header-info">
@@ -254,7 +304,7 @@ export function DuplicateReviewPanel() {
                       type="button"
                       className={`btn ${review.selectedGroup.reviewStatus === 'reviewed' ? 'btn-secondary' : 'btn-primary'}`}
                       onClick={() => void handleToggleReviewed()}
-                      disabled={review.isSavingReview}
+                      disabled={isReviewActionDisabled}
                     >
                       <CheckCircle size={16} aria-hidden="true" />
                       <span>
@@ -266,7 +316,29 @@ export function DuplicateReviewPanel() {
                   </div>
                 </div>
 
-                {review.selectedGroup.hasStaleDecision && (
+                {isGroupUnavailable && (
+                  <div className="notice notice-warning" role="alert">
+                    <AlertTriangle size={18} aria-hidden="true" />
+                    <div>
+                      <strong>Duplicate group no longer available</strong>
+                      <p>
+                        This group no longer contains two or more verified identical files. The
+                        underlying files may have changed or been removed. Please refresh the
+                        duplicate list.
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => void review.refresh()}
+                      >
+                        <RotateCcw size={14} aria-hidden="true" />
+                        <span>Refresh Groups</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {review.selectedGroup.hasStaleDecision && !isGroupUnavailable && (
                   <div className="notice notice-warning" role="alert">
                     <AlertTriangle size={18} aria-hidden="true" />
                     <div>
@@ -314,10 +386,28 @@ export function DuplicateReviewPanel() {
                     </div>
                   )}
 
-                  {!review.isLoadingMembers && (
+                  {review.membersError && (
+                    <div className="notice notice-error" role="alert">
+                      <strong>Failed to load duplicate group members</strong>
+                      <p>{review.membersError}</p>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() =>
+                          review.selectedGroup && void review.selectGroup(review.selectedGroup)
+                        }
+                      >
+                        <RotateCcw size={14} aria-hidden="true" />
+                        <span>Retry</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {!review.isLoadingMembers && !review.membersError && !isGroupUnavailable && (
                     <div className="members-grid">
                       {review.members.map((member) => {
-                        const isMemberPreferred = effectivePreferredId === member.fileLocationId
+                        const isMemberPreferred =
+                          review.selectedGroup?.preferredLocationId === member.fileLocationId
                         return (
                           <div
                             key={member.fileLocationId}
@@ -329,17 +419,28 @@ export function DuplicateReviewPanel() {
                               </div>
                               <div className="member-actions">
                                 {isMemberPreferred ? (
-                                  <span className="preferred-badge">
-                                    <Star size={14} fill="currentColor" aria-hidden="true" />{' '}
-                                    Preferred Location
-                                  </span>
+                                  <div className="preferred-badge-group">
+                                    <span className="preferred-badge">
+                                      <Star size={14} fill="currentColor" aria-hidden="true" />{' '}
+                                      Preferred Location
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary btn-sm"
+                                      onClick={() => void handleClearPreferred()}
+                                      disabled={isReviewActionDisabled}
+                                      aria-label={`Clear preferred location: ${member.fileName}`}
+                                    >
+                                      <span>Clear</span>
+                                    </button>
+                                  </div>
                                 ) : (
                                   <button
                                     type="button"
                                     className="btn btn-secondary btn-sm"
-                                    onClick={() => handleSetPreferred(member.fileLocationId)}
-                                    disabled={review.isSavingReview}
-                                    aria-label={`Set ${member.fileName} as preferred location`}
+                                    onClick={() => void handleSetPreferred(member.fileLocationId)}
+                                    disabled={isReviewActionDisabled}
+                                    aria-label={`Set as preferred: ${member.fileName}`}
                                   >
                                     <Star size={14} aria-hidden="true" />
                                     <span>Set as Preferred</span>
@@ -404,7 +505,7 @@ export function DuplicateReviewPanel() {
                   )}
 
                   {/* Members Pagination if > limit */}
-                  {review.totalMembers > review.membersLimit && (
+                  {review.totalMembers > review.membersLimit && !isGroupUnavailable && (
                     <div className="pagination-bar members-pagination">
                       <button
                         type="button"

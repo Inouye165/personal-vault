@@ -961,8 +961,39 @@ export class CatalogDatabase {
   }
 
   /**
+   * Computes the deterministic group signature and gathers member location IDs
+   * using bounded streaming iteration.
+   */
+  private computeGroupSignature(
+    sha256: string,
+    byteSize: number
+  ): { signature: string; memberIds: Set<number> } {
+    const stmt = this.db.prepare(`
+      SELECT f.id, d.id as disc_id, h.id as hash_id
+      FROM file_locations f
+      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = ?
+      JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1 AND h.sha256 = ? AND h.observed_byte_size = ?
+      ORDER BY f.id ASC;
+    `)
+    const hasher = createHash('sha256')
+    const memberIds = new Set<number>()
+    let first = true
+    for (const row of stmt.iterate(byteSize, sha256, byteSize) as Iterable<{
+      id: number
+      disc_id: number
+      hash_id: number
+    }>) {
+      memberIds.add(row.id)
+      if (!first) hasher.update(';')
+      first = false
+      hasher.update(`${row.id}:${row.disc_id}:${row.hash_id}`)
+    }
+    return { signature: hasher.digest('hex'), memberIds }
+  }
+
+  /**
    * Retrieves paginated duplicate content clusters (active SHA-256 hashes with file count > 1).
-   * Member locations per cluster are bounded to prevent unbounded memory loading.
+   * Group pagination and preview locations per cluster are bounded in SQL to prevent unbounded memory loading.
    */
   public getDuplicateGroups(options: DuplicateGroupOptions = {}): PaginatedResult<DuplicateGroup> {
     this.assertOpen()
@@ -979,110 +1010,140 @@ export class CatalogDatabase {
           )
         : DEFAULT_MAX_LOCATIONS_PER_GROUP
 
-    // Exact duplicate grouping by current verified SHA-256 AND byte size.
-    // Exclude hashes that are inactive, invalidated, or attached to superseded discovery observations.
-    const groupsSql = `
-      SELECT
-        sub.sha256,
-        sub.byte_size,
-        COUNT(*) as file_count,
-        GROUP_CONCAT(sub.token, ';') as members_token,
-        GROUP_CONCAT(sub.id, ',') as member_ids
-      FROM (
+    // Maintain a temporary table to hold validly reviewed groups for bounded SQL filtering
+    this.db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS _valid_reviewed_groups (
+        sha256 TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        PRIMARY KEY (sha256, byte_size)
+      );
+      DELETE FROM _valid_reviewed_groups;
+    `)
+
+    // Identify active valid reviews using streaming iteration without materializing large arrays
+    const candidateReviewsStmt = this.db.prepare(`
+      SELECT sha256, byte_size, group_signature, preferred_location_id
+      FROM duplicate_reviews
+      WHERE status = 'reviewed';
+    `)
+
+    const insertValidStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO _valid_reviewed_groups (sha256, byte_size) VALUES (?, ?);
+    `)
+
+    for (const r of candidateReviewsStmt.iterate() as Iterable<{
+      sha256: string
+      byte_size: number
+      group_signature: string
+      preferred_location_id: number | null
+    }>) {
+      const { signature, memberIds } = this.computeGroupSignature(r.sha256, r.byte_size)
+      if (
+        memberIds.size > 1 &&
+        signature === r.group_signature &&
+        (r.preferred_location_id === null || memberIds.has(r.preferred_location_id))
+      ) {
+        insertValidStmt.run(r.sha256, r.byte_size)
+      }
+    }
+
+    let countSql: string
+    let pageSql: string
+
+    if (filter === 'reviewed') {
+      countSql = `
+        SELECT COUNT(*) as total FROM (
+          SELECT 1
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = h.observed_byte_size
+          JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+          JOIN _valid_reviewed_groups vr ON vr.sha256 = h.sha256 AND vr.byte_size = h.observed_byte_size
+          GROUP BY h.sha256, h.observed_byte_size
+          HAVING COUNT(DISTINCT f.id) > 1
+        );
+      `
+      pageSql = `
         SELECT
           h.sha256,
           h.observed_byte_size as byte_size,
-          f.id,
-          (f.id || ':' || d.id || ':' || h.id) as token
+          COUNT(DISTINCT f.id) as file_count
         FROM file_locations f
         JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = h.observed_byte_size
         JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
-        ORDER BY h.sha256 ASC, byte_size ASC, f.id ASC
-      ) sub
-      GROUP BY sub.sha256, sub.byte_size
-      HAVING COUNT(*) > 1
-      ORDER BY file_count DESC, byte_size DESC, sub.sha256 ASC;
-    `
+        JOIN _valid_reviewed_groups vr ON vr.sha256 = h.sha256 AND vr.byte_size = h.observed_byte_size
+        GROUP BY h.sha256, h.observed_byte_size
+        HAVING COUNT(DISTINCT f.id) > 1
+        ORDER BY file_count DESC, byte_size DESC, h.sha256 ASC
+        LIMIT ? OFFSET ?;
+      `
+    } else if (filter === 'unreviewed') {
+      countSql = `
+        SELECT COUNT(*) as total FROM (
+          SELECT 1
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = h.observed_byte_size
+          JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+          LEFT JOIN _valid_reviewed_groups vr ON vr.sha256 = h.sha256 AND vr.byte_size = h.observed_byte_size
+          WHERE vr.sha256 IS NULL
+          GROUP BY h.sha256, h.observed_byte_size
+          HAVING COUNT(DISTINCT f.id) > 1
+        );
+      `
+      pageSql = `
+        SELECT
+          h.sha256,
+          h.observed_byte_size as byte_size,
+          COUNT(DISTINCT f.id) as file_count
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = h.observed_byte_size
+        JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        LEFT JOIN _valid_reviewed_groups vr ON vr.sha256 = h.sha256 AND vr.byte_size = h.observed_byte_size
+        WHERE vr.sha256 IS NULL
+        GROUP BY h.sha256, h.observed_byte_size
+        HAVING COUNT(DISTINCT f.id) > 1
+        ORDER BY file_count DESC, byte_size DESC, h.sha256 ASC
+        LIMIT ? OFFSET ?;
+      `
+    } else {
+      countSql = `
+        SELECT COUNT(*) as total FROM (
+          SELECT 1
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = h.observed_byte_size
+          JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+          GROUP BY h.sha256, h.observed_byte_size
+          HAVING COUNT(DISTINCT f.id) > 1
+        );
+      `
+      pageSql = `
+        SELECT
+          h.sha256,
+          h.observed_byte_size as byte_size,
+          COUNT(DISTINCT f.id) as file_count
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = h.observed_byte_size
+        JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        GROUP BY h.sha256, h.observed_byte_size
+        HAVING COUNT(DISTINCT f.id) > 1
+        ORDER BY file_count DESC, byte_size DESC, h.sha256 ASC
+        LIMIT ? OFFSET ?;
+      `
+    }
 
-    const allGroups = this.db.prepare(groupsSql).all() as unknown as Array<{
+    const countRow = this.db.prepare(countSql).get() as unknown as { total: number }
+    const totalCount = countRow?.total ?? 0
+
+    const pagedRows = this.db.prepare(pageSql).all(limit, offset) as unknown as Array<{
       sha256: string
       byte_size: number
       file_count: number
-      members_token: string
-      member_ids: string
     }>
 
-    const reviewsSql = `SELECT sha256, byte_size, status, preferred_location_id, group_signature, reviewed_at_ms FROM duplicate_reviews;`
-    const reviewRows = this.db.prepare(reviewsSql).all() as unknown as Array<{
-      sha256: string
-      byte_size: number
-      status: 'unreviewed' | 'reviewed'
-      preferred_location_id: number | null
-      group_signature: string
-      reviewed_at_ms: number
-    }>
-    const reviewMap = new Map<string, (typeof reviewRows)[0]>()
-    for (const r of reviewRows) {
-      reviewMap.set(`${r.sha256}:${r.byte_size}`, r)
-    }
-
-    const processedGroups: Array<{
-      sha256: string
-      byteSize: number
-      fileCount: number
-      groupSignature: string
-      reviewStatus: 'unreviewed' | 'reviewed'
-      preferredLocationId: number | null
-      hasStaleDecision: boolean
-      reviewedAtMs: number | null
-    }> = []
-
-    for (const g of allGroups) {
-      const groupSignature = createHash('sha256').update(g.members_token).digest('hex')
-      const memberIdSet = new Set(g.member_ids.split(',').map((id) => Number(id)))
-      const review = reviewMap.get(`${g.sha256}:${g.byte_size}`)
-
-      let reviewStatus: 'unreviewed' | 'reviewed' = 'unreviewed'
-      let preferredLocationId: number | null = null
-      let hasStaleDecision = false
-      let reviewedAtMs: number | null = null
-
-      if (review) {
-        const isSignatureMatch = review.group_signature === groupSignature
-        const isPreferredValid =
-          review.preferred_location_id === null || memberIdSet.has(review.preferred_location_id)
-
-        if (isSignatureMatch && isPreferredValid) {
-          reviewStatus = review.status
-          preferredLocationId = review.preferred_location_id
-          hasStaleDecision = false
-          reviewedAtMs = review.reviewed_at_ms
-        } else {
-          // Stale decision invalidation: membership, content, or observations changed
-          reviewStatus = 'unreviewed'
-          preferredLocationId = null
-          hasStaleDecision = true
-          reviewedAtMs = null
-        }
-      }
-
-      if (filter === 'reviewed' && reviewStatus !== 'reviewed') continue
-      if (filter === 'unreviewed' && reviewStatus !== 'unreviewed') continue
-
-      processedGroups.push({
-        sha256: g.sha256,
-        byteSize: g.byte_size,
-        fileCount: g.file_count,
-        groupSignature,
-        reviewStatus,
-        preferredLocationId,
-        hasStaleDecision,
-        reviewedAtMs
-      })
-    }
-
-    const totalCount = processedGroups.length
-    const pagedGroups = processedGroups.slice(offset, offset + limit)
+    const reviewStmt = this.db.prepare(`
+      SELECT status, preferred_location_id, group_signature, reviewed_at_ms
+      FROM duplicate_reviews
+      WHERE sha256 = ? AND byte_size = ?;
+    `)
 
     const filesStmt = this.db.prepare(`
       SELECT
@@ -1099,27 +1160,61 @@ export class CatalogDatabase {
       LIMIT ?;
     `)
 
-    const items: DuplicateGroup[] = pagedGroups.map((g) => {
+    const items: DuplicateGroup[] = pagedRows.map((g) => {
+      const { signature, memberIds } = this.computeGroupSignature(g.sha256, g.byte_size)
+      const review = reviewStmt.get(g.sha256, g.byte_size) as unknown as
+        | {
+            status: 'unreviewed' | 'reviewed'
+            preferred_location_id: number | null
+            group_signature: string
+            reviewed_at_ms: number
+          }
+        | undefined
+
+      let reviewStatus: 'unreviewed' | 'reviewed' = 'unreviewed'
+      let preferredLocationId: number | null = null
+      let hasStaleDecision = false
+      let reviewedAtMs: number | null = null
+
+      if (review) {
+        const isSignatureMatch = review.group_signature === signature
+        const isPreferredValid =
+          review.preferred_location_id === null || memberIds.has(review.preferred_location_id)
+
+        if (isSignatureMatch && isPreferredValid) {
+          reviewStatus = review.status
+          preferredLocationId = review.preferred_location_id
+          hasStaleDecision = false
+          reviewedAtMs = review.reviewed_at_ms
+        } else {
+          // Stale decision invalidation: membership, content, or observations changed
+          reviewStatus = 'unreviewed'
+          preferredLocationId = null
+          hasStaleDecision = true
+          reviewedAtMs = null
+        }
+      }
+
       const files = (
         filesStmt.all(
-          g.byteSize,
+          g.byte_size,
           g.sha256,
-          g.byteSize,
+          g.byte_size,
           maxLocationsPerGroup
         ) as unknown as RawFileRow[]
       ).map((r) => this.mapFileRow(r))
 
       return {
         sha256: g.sha256,
-        byteSize: g.byteSize,
-        fileCount: g.fileCount,
-        groupSignature: g.groupSignature,
-        reviewStatus: g.reviewStatus,
-        preferredLocationId: g.preferredLocationId,
-        hasStaleDecision: g.hasStaleDecision,
-        reviewedAtMs: g.reviewedAtMs,
+        byteSize: g.byte_size,
+        fileCount: g.file_count,
+        groupSignature: signature,
+        reviewStatus,
+        preferredLocationId,
+        hasStaleDecision,
+        reviewedAtMs,
         locations: files,
-        truncatedLocations: g.fileCount > files.length
+        truncatedLocations: g.file_count > files.length
       }
     })
 
@@ -1134,7 +1229,7 @@ export class CatalogDatabase {
 
   /**
    * Retrieves paginated members for a specific exact duplicate group.
-   * Deterministically ordered by file_location_id ASC.
+   * Deterministically ordered by file_location_id ASC with SQL-level pagination and bounded iteration.
    */
   public getDuplicateGroupMembers(
     options: DuplicateGroupMembersOptions
@@ -1146,59 +1241,25 @@ export class CatalogDatabase {
     const byteSize = validateSafeInteger(options.byteSize, 'byteSize', 0)
     const { offset, limit } = validatePagination(options)
 
-    const membersSql = `
-      SELECT
-        f.id as file_location_id,
-        f.source_id,
-        f.original_path,
-        f.normalized_path,
-        f.file_name,
-        f.extension,
-        f.category,
-        d.id as discovery_observation_id,
-        d.byte_size,
-        d.filesystem_birthtime_ms,
-        d.filesystem_mtime_ms,
-        d.inferred_capture_time_ms,
-        d.observed_at_ms as first_discovered_at_ms,
-        d.last_seen_at_ms,
-        h.id as hash_observation_id,
-        h.sha256 as active_hash,
-        h.hashed_at_ms as active_hash_verified_at_ms
+    // 1. Total count query
+    const countSql = `
+      SELECT COUNT(DISTINCT f.id) as total
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = ?
-      JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1 AND h.sha256 = ? AND h.observed_byte_size = ?
-      ORDER BY f.id ASC;
+      JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1 AND h.sha256 = ? AND h.observed_byte_size = ?;
     `
+    const countRow = this.db
+      .prepare(countSql)
+      .get(byteSize, options.sha256, byteSize) as unknown as { total: number } | undefined
+    const totalCount = countRow?.total ?? 0
 
-    const allMembers = this.db
-      .prepare(membersSql)
-      .all(byteSize, options.sha256, byteSize) as unknown as Array<{
-      file_location_id: number
-      source_id: number
-      original_path: string
-      normalized_path: string
-      file_name: string
-      extension: string
-      category: 'photo' | 'document'
-      discovery_observation_id: number
-      byte_size: number
-      filesystem_birthtime_ms: number | null
-      filesystem_mtime_ms: number | null
-      inferred_capture_time_ms: number | null
-      first_discovered_at_ms: number
-      last_seen_at_ms: number
-      hash_observation_id: number
-      active_hash: string
-      active_hash_verified_at_ms: number
-    }>
+    // 2. Incremental streaming to compute deterministic signature and member IDs
+    const { signature: groupSignature, memberIds } = this.computeGroupSignature(
+      options.sha256,
+      byteSize
+    )
 
-    const token = allMembers
-      .map((m) => `${m.file_location_id}:${m.discovery_observation_id}:${m.hash_observation_id}`)
-      .join(';')
-    const groupSignature = createHash('sha256').update(token).digest('hex')
-    const memberIdSet = new Set(allMembers.map((m) => m.file_location_id))
-
+    // 3. Review state lookup
     const reviewSql = `
       SELECT status, preferred_location_id, group_signature, reviewed_at_ms
       FROM duplicate_reviews
@@ -1221,7 +1282,7 @@ export class CatalogDatabase {
     if (review) {
       const isSignatureMatch = review.group_signature === groupSignature
       const isPreferredValid =
-        review.preferred_location_id === null || memberIdSet.has(review.preferred_location_id)
+        review.preferred_location_id === null || memberIds.has(review.preferred_location_id)
 
       if (isSignatureMatch && isPreferredValid) {
         reviewStatus = review.status
@@ -1236,10 +1297,56 @@ export class CatalogDatabase {
       }
     }
 
-    const totalCount = allMembers.length
-    const pagedMembers = allMembers.slice(offset, offset + limit)
+    // 4. Paginated members query using SQL LIMIT and OFFSET
+    const pagedMembersSql = `
+      SELECT
+        f.id as file_location_id,
+        f.source_id,
+        f.original_path,
+        f.normalized_path,
+        f.file_name,
+        f.extension,
+        f.category,
+        d.id as discovery_observation_id,
+        d.byte_size,
+        d.filesystem_birthtime_ms,
+        d.filesystem_mtime_ms,
+        d.inferred_capture_time_ms,
+        d.observed_at_ms as first_discovered_at_ms,
+        d.last_seen_at_ms,
+        h.id as hash_observation_id,
+        h.sha256 as active_hash,
+        h.hashed_at_ms as active_hash_verified_at_ms
+      FROM file_locations f
+      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 AND d.byte_size = ?
+      JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1 AND h.sha256 = ? AND h.observed_byte_size = ?
+      ORDER BY f.id ASC
+      LIMIT ? OFFSET ?;
+    `
 
-    const items: DuplicateMemberRecord[] = pagedMembers.map((m) => ({
+    const pagedRows = this.db
+      .prepare(pagedMembersSql)
+      .all(byteSize, options.sha256, byteSize, limit, offset) as unknown as Array<{
+      file_location_id: number
+      source_id: number
+      original_path: string
+      normalized_path: string
+      file_name: string
+      extension: string
+      category: 'photo' | 'document'
+      discovery_observation_id: number
+      byte_size: number
+      filesystem_birthtime_ms: number | null
+      filesystem_mtime_ms: number | null
+      inferred_capture_time_ms: number | null
+      first_discovered_at_ms: number
+      last_seen_at_ms: number
+      hash_observation_id: number
+      active_hash: string
+      active_hash_verified_at_ms: number
+    }>
+
+    const items: DuplicateMemberRecord[] = pagedRows.map((m) => ({
       fileLocationId: m.file_location_id,
       sourceId: m.source_id,
       originalPath: m.original_path,
