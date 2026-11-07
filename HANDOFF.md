@@ -5,7 +5,7 @@
 - **Workspace**: `D:\organizer`
 - **Branch**: `feat/stage-2a-read-only-discovery` (branched from verified Stage 1 closeout commit `db43f2c`)
 - **Stage 1 status**: complete (`db43f2c`).
-- **Stage 2 status**: **incomplete** — **Stage 2A (read-only discovery service, safe traversal, bounded streaming/backpressure, validated resource limits, source-root exclusions, pre-open directory revalidation, and filesystem metadata inventory) is awaiting independent review**; Stage 2B (hashing + SQLite catalog persistence) and Stage 2C (resumable scan jobs + IPC/UI integration) have not started.
+- **Stage 2 status**: **incomplete** - **Stage 2A is complete; independent review accepted at `5dd6320`**. Stage 2B (read-only streaming SHA-256 hashing), Stage 2C (SQLite catalog persistence), and Stage 2D (resumable scan jobs + IPC/UI integration) have not started.
 
 ---
 
@@ -43,6 +43,8 @@ Isolated from React components and Electron IPC, and never invoked automatically
 
 ## 3. Verification Results
 
+The implementation host verified **89 tests passed, 0 skipped**. The independent reviewer verified **88 tests passed, 1 real-junction test skipped** because sandbox permissions deny junction creation, and separately passed type checking, linting, formatting, and build. These are separate execution results for accepted implementation `5dd6320`; application checks were not rerun for this documentation-only closeout.
+
 | Command                | Result   | Details                                                                                                      |
 | ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | `npm test`             | **PASS** | 6 test files: 89 passed, 0 skipped on host (88 passed, 1 skipped when sandbox blocks real junction creation) |
@@ -59,3 +61,9 @@ Isolated from React components and Electron IPC, and never invoked automatically
 - **Windows File Symlink & Sandbox Junction Privilege (`EPERM`)**: `tests/main/discovery.test.ts` probes real junction creation once in `os.tmpdir()` (`probeRealJunctionSupport()`) and uses `it.runIf(canCreateRealJunction)` so restricted sandboxes report the real-junction test as explicitly skipped in Vitest while deterministic `ReadOnlyFsAdapter` symlink/junction tests run in every environment.
 - **Metadata-Only Discovery (Stage 2A Scope)**: Stage 2A records filesystem metadata and extension-based candidate kinds only. It does not compute SHA-256 content hashes, parse EXIF/document contents, write to SQLite, or expose IPC/UI controls.
 - **OS Access Time (`atime`)**: While discovery uses strictly read-only system calls (`lstat`, `realpath`, `opendir`), the host OS/filesystem may update access timestamps (`atime`) during directory reads depending on mount settings. File contents, creation times (`birthtime`), and modification times (`mtime`) remain untouched.
+
+---
+
+## 5. Immediate Recommended Next Task
+
+**Stage 2B: Read-only streaming SHA-256 hashing**, beginning with failing behavioral tests for content identity, bounded reads, cancellation, and source preservation. SQLite catalog persistence is a separate Stage 2C task; resumable scan jobs and IPC/UI integration follow in Stage 2D.

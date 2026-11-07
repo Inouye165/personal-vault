@@ -30,15 +30,19 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 ## Stage 2: Read-Only Discovery, Metadata Inventory, and Resumable Scan Jobs
 
-Status: **incomplete — Stage 2A implemented and awaiting independent review; Stage 2B and Stage 2C not started** (see HANDOFF.md).
+Status: **incomplete - Stage 2A complete; independent review accepted at `5dd6320`; Stages 2B, 2C, and 2D not started** (see HANDOFF.md).
+
+Verification: implementation host **89 passed, 0 skipped**; independent reviewer **88 passed, 1 real-junction test skipped due to sandbox permissions**, with typecheck, lint, formatting, and build passed. Filesystem-race and OS-managed access-time limitations remain documented in HANDOFF.md.
 
 - [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
 - [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, validated resource limits (`resolveDiscoveryLimits` enforcing positive safe integers for `maxPendingDirectories`, `maxVisitedDirectories`, and collector-only `maxCollectedRecords`), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.
 - [x] **Stage 2A**: Shared root, child, and pre-`opendir` queued directory validation (`inspectDirectoryTarget`) and file-candidate inspection (`inspectFileEntry`), plus symlink/junction skipping (with sandbox-aware real junction probing and deterministic adapter tests).
 - [x] **Stage 2A**: Configurable candidate photo/document extension policy (including `.md` and `.txt`) with documented source-root and subdirectory exclusion precedence (`excludedPaths` including ancestor exclusions > `excludedDirectoryNames` > `softwareClutterDirectoryNames` > `hiddenAndSystemNames` / dot-entries).
 - [x] **Stage 2A**: Factual filesystem metadata inventory (original path, filename, extension, byte size, honest nullable creation and modification times) and verified source preservation.
-- [ ] **Stage 2B**: Streaming SHA-256 content hashing and SQLite catalog schema for recorded file facts and inventory persistence.
-- [ ] **Stage 2C**: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.
+- [x] **Stage 2A**: Independent review accepted at `5dd6320`.
+- [ ] **Stage 2B (next)**: Read-only streaming SHA-256 content hashing.
+- [ ] **Stage 2C**: SQLite catalog schema for recorded file facts and inventory persistence.
+- [ ] **Stage 2D**: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.
 
 ---
 
