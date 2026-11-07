@@ -191,6 +191,9 @@ src/
      - Hash observations in `hash_observations` are tied directly to the specific `discovery_observation_id` they verify. A changed observation does not inherit an earlier verified hash.
      - Database constraint `idx_hash_obs_current` enforces at most one active verified hash per discovery observation.
      - If discovery observes identical size, birthtime, and mtime, `last_seen_at_ms` is updated while active hash validity is preserved without duplicate rows.
+   - **Immutable Recorded File Metadata & Conflict Policy**:
+     - `file_name`, `extension`, and `category` are immutable recorded facts for an exact `original_path`.
+     - Conflicting metadata supplied for an already recorded exact path is rejected eagerly with `FileMetadataConflictError`, rolling back the batch and preserving original facts without silent overwriting. A renamed file at a different exact path remains a separate location.
    - **Foreign Keys, Cascades & Full Transaction Rollback**:
      - Foreign keys are enforced (`PRAGMA foreign_keys = ON;`).
      - Deleting a source cascades deletion to associated `file_locations`, `discovery_observations`, and `hash_observations` (`ON DELETE CASCADE`).

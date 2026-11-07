@@ -20,7 +20,8 @@ export {
   UnsupportedSchemaVersionError,
   SourceNotFoundError,
   FileLocationNotFoundError,
-  MigrationError
+  MigrationError,
+  FileMetadataConflictError
 } from './errors'
 export { CURRENT_SCHEMA_VERSION, checkSchemaCompatibility, runMigrations } from './migrations'
 export { normalizePathForLookup } from './path-normalization'

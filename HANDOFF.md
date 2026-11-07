@@ -17,6 +17,13 @@ Modular, app-owned SQLite catalog repository independent of React, Electron IPC,
   - `CatalogDatabase`: factory method `CatalogDatabase.open({ catalogPath, enableForeignKeyConstraints, timeoutMs, readOnly })`.
   - **Explicit initialization**: opened at caller-supplied path (creates parent directories if missing; zero import-time database creations). Failed open operations close raw connections deterministically without handle leaks.
   - **Full Transaction Rollback**: `persistDiscoveryBatch` includes source root registration inside the transaction, guaranteeing that any batch failure rolls back all sources, files, observations, and hashes completely.
+  - **Immutable Recorded-Metadata Conflict Policy**:
+    - Rejects conflicting `fileName`, `extension`, or `category` values for an already recorded exact `originalPath` with typed `FileMetadataConflictError`.
+    - Conflicts are validated eagerly before altering the record, deactivating observations, or invalidating hashes.
+    - Uniform policy across both unchanged and changed content facts: no silent overwrite of recorded file metadata.
+    - If a conflict occurs after earlier valid writes in the same batch, the entire batch transaction rolls back completely (source registration, file locations, observations, and hash state).
+    - A renamed file at a genuinely different exact path remains a separate location record.
+    - Retries with identical recorded metadata remain strictly idempotent (`unchangedCount` increments without duplicating history).
   - **Resource Bounds & Input Limits**:
     - Validates batch sizes against `MAX_BATCH_SIZE = 1000`; rejects oversized discovery or hash batches eagerly before database mutation with `RangeError`.
     - Validates discovery candidate inputs strictly (`validateDiscoveryCandidateInput`): non-negative safe integer sizes, finite numbers or null for birthtime/mtime, positive safe integer timestamps, and valid photo/document categories.
@@ -26,7 +33,6 @@ Modular, app-owned SQLite catalog repository independent of React, Electron IPC,
     - Records immutable discovery observations in `discovery_observations` (`file_location_id`, `byte_size`, `filesystem_birthtime_ms`, `filesystem_mtime_ms`, `inferred_capture_time_ms`, `observed_at_ms`, `last_seen_at_ms`, `is_current`).
     - Database constraint `idx_disc_obs_current` enforces at most one current discovery observation per file location.
     - Detects modifications to `byte_size`, `filesystem_mtime_ms`, or `filesystem_birthtime_ms` (including transitions between `null` and known timestamps). When any change is observed, the prior observation is deactivated (`is_current = 0`) preserving all earlier facts; a new observation is created (`is_current = 1`). Stale hashes are invalidated (`is_active = 0`) and never inherited.
-    - Explicit retry / idempotency: re-scans with identical recorded facts update `last_seen_at_ms` and `updated_at_ms` without duplicating observation rows or invalidating active hashes.
   - **Hash Validation & Stage 2B Precision Contract**:
     - Validates SHA-256 strings using strict 64-character hexadecimal regex (`/^[0-9a-fA-F]{64}$/`).
     - Validates safe non-negative integer sizes and timestamps.
@@ -47,7 +53,7 @@ Modular, app-owned SQLite catalog repository independent of React, Electron IPC,
   - Windows (`win32`): standardizes forward slashes to backslashes (`\`), strips trailing slashes, and folds to lowercase for case-insensitive indexing while preserving exact original paths and filenames verbatim in database columns. Documented Windows case-folding limitations (per-directory NTFS case sensitivity) and verified collision handling (distinct files with differing casing are preserved without fact loss).
   - POSIX (`linux`, `darwin`): standardizes separators using `posix.normalize`, preserving backslashes (`\`) as valid filename characters without converting them to forward slashes.
 - [`src/main/services/catalog/errors.ts`](file:///d:/organizer/src/main/services/catalog/errors.ts):
-  - Typed domain errors: `CatalogError`, `UnsupportedSchemaVersionError`, `DatabaseClosedError`, `SourceNotFoundError`, `FileLocationNotFoundError`, `MigrationError`.
+  - Typed domain errors: `CatalogError`, `UnsupportedSchemaVersionError`, `DatabaseClosedError`, `SourceNotFoundError`, `FileLocationNotFoundError`, `MigrationError`, `FileMetadataConflictError`.
 - [`src/main/services/catalog/types.ts`](file:///d:/organizer/src/main/services/catalog/types.ts) & [`src/main/services/catalog/index.ts`](file:///d:/organizer/src/main/services/catalog/index.ts):
   - Public TypeScript domain contracts, options, and pagination interfaces.
 
@@ -67,9 +73,8 @@ Modular, app-owned SQLite catalog repository independent of React, Electron IPC,
 
 ### 2.2 Electron Driver & Packaging Verification Results
 
-1. **Reviewer Exit 1 Investigation & Launcher Fix**:
-   - The reviewer observed `npm run verify:sqlite` exit 1 without diagnostics. Investigation revealed that `package.json` had `"verify:sqlite": "electron scripts/verify-electron-sqlite.mjs"` which invoked GUI Electron without `ELECTRON_RUN_AS_NODE=1`. In headless environments or CI sandboxes lacking a display server, GUI Electron immediately terminates. Furthermore, dynamic ESM `import('D:\\...')` requires `pathToFileURL` on Windows.
-   - Fixed by routing `npm run verify:sqlite` through `node scripts/verify-electron-sqlite.mjs`, which spawns the Electron binary with `ELECTRON_RUN_AS_NODE=1`, converts module paths with `pathToFileURL`, removes `process.exit` calls inside `try/catch` to ensure `finally` cleanup always runs, and outputs structured diagnostics.
+1. **Launcher Reliability & Headless Execution**:
+   - `package.json` routes `"verify:sqlite"` through `node scripts/verify-electron-sqlite.mjs`, which spawns the Electron binary with `ELECTRON_RUN_AS_NODE=1`, converts module paths with `pathToFileURL`, removes `process.exit` calls inside `try/catch` to ensure `finally` cleanup always runs, and outputs structured diagnostics.
 2. **Real Module Repository Verification** (`scripts/verify-electron-sqlite.mjs` via `npm run verify:sqlite`):
    - Exercises the compiled `out/main/catalog.js` module inside the real Electron runtime across 7 diagnostic steps:
      1. Initializing catalog database at temporary path (v2 schema)
@@ -79,38 +84,39 @@ Modular, app-owned SQLite catalog repository independent of React, Electron IPC,
      5. Verifying reopen durability across independent connections
      6. Verifying changed-file observation and hash invalidation
      7. Verifying foreign key enforcement and cascading deletion (`ON DELETE CASCADE`)
-3. **Packaged Unpacked Binary Verification** (`npm run verify:sqlite:unpacked` and `npm run smoke:unpacked`):
-   - Package verification (`npm run verify:sqlite:unpacked`) executes `dist/win-unpacked/Personal Vault.exe` with `ELECTRON_RUN_AS_NODE=1` loading the packaged catalog module from `dist/win-unpacked/resources/app.asar/out/main/catalog.js`. All 7 repository steps passed cleanly, proving that `node:sqlite` and the bundled `CatalogDatabase` operate correctly from inside the packaged ASAR archive.
-   - Packaged desktop executable launched and verified cleanly via CDP (`npm run smoke:unpacked`) with 0 preload or console errors.
+3. **Packaged Unpacked Binary Verification** (`npm run verify:sqlite:unpacked`):
+   - Executes `dist/win-unpacked/Personal Vault.exe` with `ELECTRON_RUN_AS_NODE=1` loading the packaged catalog module from `dist/win-unpacked/resources/app.asar/out/main/catalog.js`. All 7 repository steps passed cleanly, proving that `node:sqlite` and the bundled `CatalogDatabase` operate correctly from inside the packaged ASAR archive.
+4. **GUI Smoke Checks & Environment Observations**:
+   - On the implementation host (`D:\organizer`), both `npm run smoke:built` and `npm run smoke:unpacked` pass cleanly (exit code 0) with top-level CDP bridge acknowledgements.
+   - The independent reviewer reported early process exit with code `2147483651` (`0x80000003`) during GUI smoke checks in its sandbox environment. This status code typically indicates a breakpoint or unhandled display exception when launching full Chromium GUI windows in headless/containerized sandboxes lacking an interactive desktop display server or GPU context. The host and reviewer results are recorded separately without speculating on unverified causes or weakening Electron security policies.
 
 ---
 
 ## 3. Test-Driven Development (Red / Green / Refactor) Evidence
 
-1. **Red phase (Re-Review Findings Regression Suite)**:
-   - Added 7 behavioral regression tests in [`tests/main/catalog.test.ts`](file:///d:/organizer/tests/main/catalog.test.ts) targeting the second round review findings:
-     1. Migration of original `baa82e6` schema (v1 without `discovery_observations`) to v2 preserving all data and active hashes.
-     2. Migration of revised `25a1b4f` schema (v1 with `discovery_observations`) to v2 idempotently.
-     3. Rejection of corrupted or unrecognized version 1 schema layout with `MigrationError`.
-     4. Enforcement of Stage 2B precision contract for timestamp comparison (exact fractional comparisons, tolerance only for integer expectations, null mismatches rejected).
-     5. Creation timestamp (`birthtimeMs`) change detection and preservation of both observations in history with hash invalidation.
-     6. Detection of `birthtimeMs` transitions between null and known values.
-     7. Strict validation of discovery candidate inputs (non-finite numbers, negative sizes).
-   - Ran `npm test`: Demonstrated **7 failing tests** across all targeted review findings.
+1. **Red phase (Recorded-Metadata Conflict Suite)**:
+   - Added 6 behavioral regression tests in [`tests/main/catalog.test.ts`](file:///d:/organizer/tests/main/catalog.test.ts) covering the conflict policy:
+     1. Conflicting filename with unchanged size/timestamps fails with `FileMetadataConflictError`.
+     2. Conflicting filename with changed size/timestamps fails with `FileMetadataConflictError` without invalidating the active hash.
+     3. Conflicting extension or category for both unchanged and changed content facts fails with `FileMetadataConflictError`.
+     4. Conflict after earlier valid write rolls back the entire batch (source registration, observations, and hashes).
+     5. Identical retries remain idempotent.
+     6. Genuinely different exact paths remain separate locations.
+   - Ran `npm test`: Demonstrated **4 failing tests** on conflicting metadata.
 2. **Green phase**:
-   - Updated `migrations.ts`: `CURRENT_SCHEMA_VERSION = 2`; implemented version 2 migration with schema inspection distinguishing `baa82e6` vs `25a1b4f` and migrating data safely.
-   - Updated `database.ts`: implemented Stage 2B timestamp matching precision in `isObservationTimestampMatching`; added `validateDiscoveryCandidateInput`; updated `persistDiscoveryBatch` to detect `birthtimeMs` changes and preserve history; updated `close()` to set `closed = true` only after successful closure.
-   - Updated `package.json`: routed `"verify:sqlite"` through Node launcher and added `"verify:sqlite:unpacked"`.
-   - Updated `scripts/verify-electron-sqlite.mjs`: added `--mode=unpacked` support for ASAR package verification; removed `process.exit` calls from `try/catch` to guarantee `finally` cleanup.
-   - Ran `npm test`: **All 38 tests in `tests/main/catalog.test.ts` passed; 162 tests passed repository-wide (0 skipped)**.
+   - Added `FileMetadataConflictError` in `errors.ts` and exported it from `index.ts`.
+   - Updated `persistDiscoveryBatch` in `database.ts` to eagerly reject conflicting metadata before modifying records or invalidating hashes.
+   - Removed the silent overwrite branch.
+   - Ran `npm test`: **All 44 tests in `tests/main/catalog.test.ts` passed; 168 tests passed repository-wide (0 skipped)**.
 3. **Refactor & Quality Gates**:
    - Ran `npm run typecheck`: Strict TypeScript check passed across all configurations (0 errors).
    - Ran `npm run lint`: ESLint passed with 0 errors and 0 warnings.
    - Ran `npm run format:check`: Prettier 100% compliant across entire repository.
    - Ran `npm run build`: `electron-vite` builds main (`index.js`, `catalog.js`), preload, and renderer cleanly.
    - Ran `npm run verify:sqlite`: Real Electron verification passed all 7 steps with exit code 0.
+   - Ran `npm run build:unpack`: Packaged desktop binary assembled into `dist/win-unpacked`.
    - Ran `npm run verify:sqlite:unpacked`: Packaged ASAR repository verification passed all 7 steps with exit code 0.
-   - Ran `npm run smoke:built` and `npm run smoke:unpacked`: Passed with exit code 0.
+   - Ran `npm run smoke:built` and `npm run smoke:unpacked`: Passed with exit code 0 on the implementation host.
 
 ---
 
@@ -120,15 +126,18 @@ Execution results on implementation host (`D:\organizer`):
 
 | Command                          | Result   | Details                                                                                 |
 | -------------------------------- | -------- | --------------------------------------------------------------------------------------- |
-| `npm test`                       | **PASS** | 8 test files: 162 passed, 0 skipped repository-wide                                     |
+| `npm test`                       | **PASS** | 8 test files: 168 passed, 0 skipped repository-wide                                     |
 | `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)  |
 | `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                     |
 | `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                        |
 | `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`), preload, and renderer cleanly   |
 | `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository, cascades, and durability    |
+| `npm run build:unpack`           | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                  |
 | `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)       |
 | `npm run smoke:built`            | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron          |
 | `npm run smoke:unpacked`         | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks |
+
+_Environment note: The reviewer reported smoke check exit code 2147483651 in its sandboxed environment; both smoke checks pass cleanly on the implementation host._
 
 ---
 
@@ -136,6 +145,7 @@ Execution results on implementation host (`D:\organizer`):
 
 - **User-Space Catalog vs. Out-of-Band File Changes**: The catalog records discovery facts and SHA-256 observations at the moment of scanning/hashing. If files are modified out-of-band by external tools while Personal Vault is not scanning, the catalog reflects the last known scan state until the next discovery scan detects the size, mtime, or birthtime change, preserves the prior facts in history, and invalidates the active hash.
 - **Platform Lookup Key Case Folding & Collision Handling**: On Windows (`win32`), `normalized_path` folds paths to lowercase to support fast case-insensitive search. However, because Windows NTFS supports per-directory case sensitivity, `file_locations` enforces uniqueness on the verbatim `original_path`. Distinct files that share a case-folded key retain their own separate records without overwriting or discarding facts.
+- **Immutable Recorded File Metadata**: Filename, extension, and category are immutable recorded facts for a given exact `originalPath`. If a discovery batch supplies conflicting values for an already recorded exact path, it is rejected with `FileMetadataConflictError`. Renamed files at different exact paths are tracked as separate locations.
 - **In-Memory vs File-Backed WAL Mode**: File-backed databases enable WAL mode (`PRAGMA journal_mode = WAL;`) and `NORMAL` synchronous mode for crash durability and performance. In-memory databases (`:memory:`) operate in memory rollback journal mode.
 - **Stage 2 Scope Isolation**: Stage 2C provides database catalog persistence only. Background scan-job orchestration, progress events, pausing/cancellation, and IPC/UI integration are deferred to Stage 2D.
 

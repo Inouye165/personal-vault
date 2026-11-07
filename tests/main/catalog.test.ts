@@ -11,6 +11,7 @@ import {
   UnsupportedSchemaVersionError,
   DatabaseClosedError,
   MigrationError,
+  FileMetadataConflictError,
   CURRENT_SCHEMA_VERSION,
   isObservationTimestampMatching,
   normalizePathForLookup
@@ -1658,6 +1659,342 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
       expect(rec2?.byteSize).toBe(200)
       expect(rec1?.fileName).toBe('case.jpg')
       expect(rec2?.fileName).toBe('CASE.jpg')
+    })
+  })
+
+  describe('Immutable Recorded Metadata & Conflict Policy', () => {
+    it('rejects conflicting fileName when size and timestamps are unchanged', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\lake.jpg'
+
+      // Initial discovery
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'lake.jpg',
+          extension: 'jpg',
+          byteSize: 1000,
+          birthtimeMs: 500,
+          mtimeMs: 1000,
+          discoveredAtMs: 10000,
+          category: 'photo'
+        }
+      ])
+
+      // Candidate with conflicting fileName, but unchanged size/timestamps
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath,
+            fileName: 'pond.jpg', // Conflicting fileName
+            extension: 'jpg',
+            byteSize: 1000,
+            birthtimeMs: 500,
+            mtimeMs: 1000,
+            discoveredAtMs: 20000,
+            category: 'photo'
+          }
+        ])
+      }).toThrow(FileMetadataConflictError)
+
+      // Verify original facts are preserved in database
+      const file = db.getFileLocationByPath(originalPath)!
+      expect(file.fileName).toBe('lake.jpg')
+    })
+
+    it('rejects conflicting fileName when combined with changed size or timestamps without invalidating active hash', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\lake.jpg'
+      const hash = 'a'.repeat(64)
+
+      // Initial discovery & hash
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath,
+          fileName: 'lake.jpg',
+          extension: 'jpg',
+          byteSize: 1000,
+          birthtimeMs: 500,
+          mtimeMs: 1000,
+          discoveredAtMs: 10000,
+          category: 'photo'
+        }
+      ])
+
+      db.recordHashObservation({
+        originalPath,
+        sha256: hash,
+        observedByteSize: 1000,
+        observedMtimeMs: 1000,
+        hashedAtMs: 11000
+      })
+
+      expect(db.getFileLocationByPath(originalPath)?.activeHash).toBe(hash)
+
+      // Candidate with conflicting fileName AND changed content (size 2000, mtime 2000)
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath,
+            fileName: 'different.jpg', // Conflicting fileName
+            extension: 'jpg',
+            byteSize: 2000, // Changed size
+            birthtimeMs: 500,
+            mtimeMs: 2000, // Changed mtime
+            discoveredAtMs: 20000,
+            category: 'photo'
+          }
+        ])
+      }).toThrow(FileMetadataConflictError)
+
+      // Verify database state is untouched: active hash is NOT invalidated, observations are not added
+      const file = db.getFileLocationByPath(originalPath)!
+      expect(file.fileName).toBe('lake.jpg')
+      expect(file.byteSize).toBe(1000)
+      expect(file.activeHash).toBe(hash)
+
+      const history = db.getDiscoveryObservationsForFile(file.id)
+      expect(history.totalCount).toBe(1)
+    })
+
+    it('rejects conflicting extension or category for both unchanged and changed content facts', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const docPath = 'D:\\Docs\\notes.txt'
+      const photoPath = 'D:\\Photos\\sunset.png'
+
+      db.persistDiscoveryBatch('D:\\Docs', [
+        {
+          originalPath: docPath,
+          fileName: 'notes.txt',
+          extension: 'txt',
+          byteSize: 300,
+          birthtimeMs: null,
+          mtimeMs: 1000,
+          discoveredAtMs: 10000,
+          category: 'document'
+        }
+      ])
+
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath: photoPath,
+          fileName: 'sunset.png',
+          extension: 'png',
+          byteSize: 500,
+          birthtimeMs: null,
+          mtimeMs: 1000,
+          discoveredAtMs: 10000,
+          category: 'photo'
+        }
+      ])
+
+      // 1. Conflicting extension with unchanged content facts
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Docs', [
+          {
+            originalPath: docPath,
+            fileName: 'notes.txt',
+            extension: 'md', // Conflicting extension
+            byteSize: 300,
+            birthtimeMs: null,
+            mtimeMs: 1000,
+            discoveredAtMs: 20000,
+            category: 'document'
+          }
+        ])
+      }).toThrow(FileMetadataConflictError)
+
+      // 2. Conflicting category with unchanged content facts
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath: photoPath,
+            fileName: 'sunset.png',
+            extension: 'png',
+            byteSize: 500,
+            birthtimeMs: null,
+            mtimeMs: 1000,
+            discoveredAtMs: 20000,
+            category: 'document' // Conflicting category
+          }
+        ])
+      }).toThrow(FileMetadataConflictError)
+
+      // 3. Conflicting extension with changed content facts
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Docs', [
+          {
+            originalPath: docPath,
+            fileName: 'notes.txt',
+            extension: 'pdf', // Conflicting extension
+            byteSize: 999, // Changed size
+            birthtimeMs: null,
+            mtimeMs: 2000, // Changed mtime
+            discoveredAtMs: 30000,
+            category: 'document'
+          }
+        ])
+      }).toThrow(FileMetadataConflictError)
+
+      // 4. Conflicting category with changed content facts
+      expect(() => {
+        db!.persistDiscoveryBatch('D:\\Photos', [
+          {
+            originalPath: photoPath,
+            fileName: 'sunset.png',
+            extension: 'png',
+            byteSize: 999, // Changed size
+            birthtimeMs: null,
+            mtimeMs: 2000, // Changed mtime
+            discoveredAtMs: 30000,
+            category: 'document' // Conflicting category
+          }
+        ])
+      }).toThrow(FileMetadataConflictError)
+
+      // Verify facts remain untouched
+      expect(db.getFileLocationByPath(docPath)?.extension).toBe('txt')
+      expect(db.getFileLocationByPath(photoPath)?.category).toBe('photo')
+    })
+
+    it('rolls back the entire batch including source registration, observations, and hash invalidation on conflict', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const existingPath = 'D:\\Existing\\item.jpg'
+      const existingHash = 'b'.repeat(64)
+
+      // Seed an existing file and active hash
+      db.persistDiscoveryBatch('D:\\Existing', [
+        {
+          originalPath: existingPath,
+          fileName: 'item.jpg',
+          extension: 'jpg',
+          byteSize: 500,
+          birthtimeMs: 100,
+          mtimeMs: 200,
+          discoveredAtMs: 5000,
+          category: 'photo'
+        }
+      ])
+      db.recordHashObservation({
+        originalPath: existingPath,
+        sha256: existingHash,
+        observedByteSize: 500,
+        observedMtimeMs: 200,
+        hashedAtMs: 6000
+      })
+
+      const newSourceRoot = 'D:\\BrandNewSource'
+      const validNewFile: DiscoveryCandidateInput = {
+        originalPath: 'D:\\BrandNewSource\\valid.jpg',
+        fileName: 'valid.jpg',
+        extension: 'jpg',
+        byteSize: 800,
+        birthtimeMs: 100,
+        mtimeMs: 200,
+        discoveredAtMs: 10000,
+        category: 'photo'
+      }
+
+      // Candidate that conflicts with existingPath's recorded fileName
+      const conflictingCandidate: DiscoveryCandidateInput = {
+        originalPath: existingPath,
+        fileName: 'conflicting-name.jpg', // Conflict!
+        extension: 'jpg',
+        byteSize: 1200, // Changed content (would have invalidated hash if not rolled back)
+        birthtimeMs: 100,
+        mtimeMs: 800,
+        discoveredAtMs: 10000,
+        category: 'photo'
+      }
+
+      // Batch persistence with earlier valid write and later conflict
+      expect(() => {
+        db!.persistDiscoveryBatch(newSourceRoot, [validNewFile, conflictingCandidate])
+      }).toThrow(FileMetadataConflictError)
+
+      // Complete rollback verification:
+      // 1. Source was NOT registered
+      expect(db.getSourceByPath(newSourceRoot)).toBeNull()
+      // 2. Valid new file was NOT inserted
+      expect(db.getFileLocationByPath('D:\\BrandNewSource\\valid.jpg')).toBeNull()
+      // 3. Existing file's active hash was NOT invalidated
+      const existingFile = db.getFileLocationByPath(existingPath)!
+      expect(existingFile.activeHash).toBe(existingHash)
+      expect(existingFile.fileName).toBe('item.jpg')
+      expect(existingFile.byteSize).toBe(500)
+      // 4. Discovery observations were NOT added
+      expect(db.getDiscoveryObservationsForFile(existingFile.id).totalCount).toBe(1)
+    })
+
+    it('remains idempotent on identical retries with identical metadata', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const originalPath = 'D:\\Photos\\same.jpg'
+
+      const candidate: DiscoveryCandidateInput = {
+        originalPath,
+        fileName: 'same.jpg',
+        extension: 'jpg',
+        byteSize: 600,
+        birthtimeMs: 100,
+        mtimeMs: 200,
+        discoveredAtMs: 5000,
+        category: 'photo'
+      }
+
+      const res1 = db.persistDiscoveryBatch('D:\\Photos', [candidate])
+      expect(res1.insertedCount).toBe(1)
+
+      const res2 = db.persistDiscoveryBatch('D:\\Photos', [candidate])
+      expect(res2.insertedCount).toBe(0)
+      expect(res2.updatedCount).toBe(0)
+      expect(res2.unchangedCount).toBe(1)
+      expect(res2.invalidatedHashCount).toBe(0)
+
+      expect(db.getFileLocationByPath(originalPath)?.fileName).toBe('same.jpg')
+    })
+
+    it('treats a genuinely different exact path as a separate location', () => {
+      db = CatalogDatabase.open({ catalogPath })
+      const path1 = 'D:\\Photos\\lake.jpg'
+      const path2 = 'D:\\Photos\\lake-renamed.jpg'
+
+      db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath: path1,
+          fileName: 'lake.jpg',
+          extension: 'jpg',
+          byteSize: 1000,
+          birthtimeMs: 100,
+          mtimeMs: 200,
+          discoveredAtMs: 5000,
+          category: 'photo'
+        }
+      ])
+
+      // Different exact path: should succeed as a distinct location
+      const res = db.persistDiscoveryBatch('D:\\Photos', [
+        {
+          originalPath: path2,
+          fileName: 'lake-renamed.jpg',
+          extension: 'jpg',
+          byteSize: 1000,
+          birthtimeMs: 100,
+          mtimeMs: 200,
+          discoveredAtMs: 6000,
+          category: 'photo'
+        }
+      ])
+
+      expect(res.insertedCount).toBe(1)
+
+      const loc1 = db.getFileLocationByPath(path1)
+      const loc2 = db.getFileLocationByPath(path2)
+
+      expect(loc1).not.toBeNull()
+      expect(loc2).not.toBeNull()
+      expect(loc1!.id).not.toBe(loc2!.id)
+      expect(loc1!.fileName).toBe('lake.jpg')
+      expect(loc2!.fileName).toBe('lake-renamed.jpg')
     })
   })
 })

@@ -14,7 +14,7 @@ import { dirname } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { checkSchemaCompatibility, runMigrations } from './migrations'
 import { normalizePathForLookup } from './path-normalization'
-import { DatabaseClosedError, FileLocationNotFoundError } from './errors'
+import { DatabaseClosedError, FileLocationNotFoundError, FileMetadataConflictError } from './errors'
 import type {
   CatalogDatabaseOptions,
   CatalogFileRecord,
@@ -343,12 +343,13 @@ export class CatalogDatabase {
    * Persists a batch of discovered file candidates transactionally.
    * Includes source root registration in the transaction so failures roll back cleanly.
    *
-   * Idempotent & History-Preserving:
+   * Idempotent, Conflict-Rejecting & History-Preserving:
    * - New files insert a file_location and an initial current discovery_observation.
+   * - Existing files with conflicting fileName, extension, or category reject immediately with FileMetadataConflictError (preserving recorded facts and rolling back the transaction).
    * - Existing files with unchanged facts update last_seen_at_ms on the current observation.
-   * - Existing files with changed byte_size or mtime:
+   * - Existing files with changed byte_size, mtime, or birthtime:
    *   1. Mark previous discovery_observation as is_current = 0 (preserving prior facts in history).
-   *   2. Invalidate previous active hash observations (is_active = 0, is_current = 0).
+   *   2. Invalidate previous active hash observations (is_active = 0).
    *   3. Insert a NEW discovery_observation with is_current = 1, which starts with activeHash = null.
    */
   public persistDiscoveryBatch(
@@ -472,6 +473,32 @@ export class CatalogDatabase {
           )
           insertedCount++
         } else {
+          // Reject conflicting recorded metadata before modifying records or invalidating hashes
+          if (candidate.fileName !== existingFile.file_name) {
+            throw new FileMetadataConflictError(
+              candidate.originalPath,
+              'fileName',
+              existingFile.file_name,
+              candidate.fileName
+            )
+          }
+          if (candidate.extension !== existingFile.extension) {
+            throw new FileMetadataConflictError(
+              candidate.originalPath,
+              'extension',
+              existingFile.extension,
+              candidate.extension
+            )
+          }
+          if (candidate.category !== existingFile.category) {
+            throw new FileMetadataConflictError(
+              candidate.originalPath,
+              'category',
+              existingFile.category,
+              candidate.category
+            )
+          }
+
           const currentObs = selectCurrentObsStmt.get(existingFile.id) as unknown as
             | {
                 id: number
@@ -506,23 +533,6 @@ export class CatalogDatabase {
             updateFileLocationStmt.run(now, existingFile.id)
             updatedCount++
           } else {
-            if (
-              existingFile.file_name !== candidate.fileName ||
-              existingFile.extension !== candidate.extension ||
-              existingFile.category !== candidate.category
-            ) {
-              this.db
-                .prepare(
-                  'UPDATE file_locations SET file_name = ?, extension = ?, category = ?, updated_at_ms = ? WHERE id = ?;'
-                )
-                .run(
-                  candidate.fileName,
-                  candidate.extension,
-                  candidate.category,
-                  now,
-                  existingFile.id
-                )
-            }
             updateObsLastSeenStmt.run(candidate.discoveredAtMs, currentObs.id)
             updateFileLocationStmt.run(now, existingFile.id)
             unchangedCount++

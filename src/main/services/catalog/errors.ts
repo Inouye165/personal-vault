@@ -65,3 +65,27 @@ export class MigrationError extends CatalogError {
     Object.setPrototypeOf(this, new.target.prototype)
   }
 }
+
+export class FileMetadataConflictError extends CatalogError {
+  readonly originalPath: string
+  readonly field: 'fileName' | 'extension' | 'category'
+  readonly recordedValue: string
+  readonly candidateValue: string
+
+  constructor(
+    originalPath: string,
+    field: 'fileName' | 'extension' | 'category',
+    recordedValue: string,
+    candidateValue: string
+  ) {
+    super(
+      `Conflicting ${field} for recorded path "${originalPath}": recorded "${recordedValue}", candidate "${candidateValue}"`
+    )
+    this.name = 'FileMetadataConflictError'
+    this.originalPath = originalPath
+    this.field = field
+    this.recordedValue = recordedValue
+    this.candidateValue = candidateValue
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
