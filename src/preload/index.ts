@@ -14,6 +14,12 @@ import {
   DismissJobRequestSchema,
   DismissJobResponseSchema,
   ScanJobProgressSchema,
+  GetDuplicateGroupsRequestSchema,
+  GetDuplicateGroupsResponseSchema,
+  GetDuplicateGroupMembersRequestSchema,
+  GetDuplicateGroupMembersResponseSchema,
+  SetDuplicateReviewRequestSchema,
+  SetDuplicateReviewResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -24,7 +30,13 @@ import {
   type GetActiveJobResponse,
   type GetLatestJobResponse,
   type DismissJobResponse,
-  type ScanJobProgress
+  type ScanJobProgress,
+  type GetDuplicateGroupsRequest,
+  type GetDuplicateGroupsResponse,
+  type GetDuplicateGroupMembersRequest,
+  type GetDuplicateGroupMembersResponse,
+  type SetDuplicateReviewRequest,
+  type SetDuplicateReviewResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -165,6 +177,51 @@ const api: VaultApi = {
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.SCAN_PROGRESS_EVENT, listener)
     }
+  },
+
+  async getDuplicateGroups(
+    request: GetDuplicateGroupsRequest = { offset: 0, limit: 20 }
+  ): Promise<GetDuplicateGroupsResponse> {
+    const parsed = validatePayload(GetDuplicateGroupsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDuplicateGroups request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DUPLICATES_GET_GROUPS, parsed.data)
+    const result = validatePayload(GetDuplicateGroupsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDuplicateGroups response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDuplicateGroupMembers(
+    request: GetDuplicateGroupMembersRequest
+  ): Promise<GetDuplicateGroupMembersResponse> {
+    const parsed = validatePayload(GetDuplicateGroupMembersRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDuplicateGroupMembers request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DUPLICATES_GET_MEMBERS, parsed.data)
+    const result = validatePayload(GetDuplicateGroupMembersResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDuplicateGroupMembers response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async setDuplicateReview(
+    request: SetDuplicateReviewRequest
+  ): Promise<SetDuplicateReviewResponse> {
+    const parsed = validatePayload(SetDuplicateReviewRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid setDuplicateReview request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DUPLICATES_SET_REVIEW, parsed.data)
+    const result = validatePayload(SetDuplicateReviewResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid setDuplicateReview response from main: ${result.error}`)
+    }
+    return result.data
   }
 }
 

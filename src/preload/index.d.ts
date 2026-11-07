@@ -8,7 +8,13 @@ import type {
   GetActiveJobResponse,
   GetLatestJobResponse,
   DismissJobResponse,
-  ScanJobProgress
+  ScanJobProgress,
+  GetDuplicateGroupsRequest,
+  GetDuplicateGroupsResponse,
+  GetDuplicateGroupMembersRequest,
+  GetDuplicateGroupMembersResponse,
+  SetDuplicateReviewRequest,
+  SetDuplicateReviewResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -24,6 +30,11 @@ export interface VaultApi {
   getLatestScanJob: () => Promise<GetLatestJobResponse>
   dismissScanJob: (jobId: number) => Promise<DismissJobResponse>
   onScanProgress: (callback: (progress: ScanJobProgress) => void) => () => void
+  getDuplicateGroups: (request?: GetDuplicateGroupsRequest) => Promise<GetDuplicateGroupsResponse>
+  getDuplicateGroupMembers: (
+    request: GetDuplicateGroupMembersRequest
+  ) => Promise<GetDuplicateGroupMembersResponse>
+  setDuplicateReview: (request: SetDuplicateReviewRequest) => Promise<SetDuplicateReviewResponse>
 }
 
 declare global {

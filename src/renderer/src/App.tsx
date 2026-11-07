@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { DuplicateReviewPanel } from './components/DuplicateReviewPanel'
 import { EmptyState } from './components/EmptyState'
 import { Header } from './components/Header'
 import { ScanJobsPanel } from './components/ScanJobsPanel'
@@ -63,20 +64,25 @@ export function App() {
           {state.phase === 'ready' && state.vaultStatus.sourceCount === 0 && (
             <EmptyState currentTab={currentTab} scanJobsProps={scanPanelProps} />
           )}
-          {state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && (
-            <div className="catalog-populated-view">
-              <ScanJobsPanel {...scanPanelProps} />
-              <div className="populated-summary-card">
-                <h2>Catalog Inventory</h2>
-                <p>
-                  Connected Sources: <strong>{state.vaultStatus.sourceCount}</strong>
-                </p>
-                <p>
-                  Cataloged Files: <strong>{state.vaultStatus.itemCount}</strong>
-                </p>
+          {state.phase === 'ready' &&
+            state.vaultStatus.sourceCount > 0 &&
+            currentTab === 'duplicates' && <DuplicateReviewPanel />}
+          {state.phase === 'ready' &&
+            state.vaultStatus.sourceCount > 0 &&
+            currentTab !== 'duplicates' && (
+              <div className="catalog-populated-view">
+                <ScanJobsPanel {...scanPanelProps} />
+                <div className="populated-summary-card">
+                  <h2>Catalog Inventory</h2>
+                  <p>
+                    Connected Sources: <strong>{state.vaultStatus.sourceCount}</strong>
+                  </p>
+                  <p>
+                    Cataloged Files: <strong>{state.vaultStatus.itemCount}</strong>
+                  </p>
+                </div>
               </div>
-            </div>
-          )}
+            )}
         </div>
       </main>
     </div>

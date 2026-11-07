@@ -89,3 +89,39 @@ export class FileMetadataConflictError extends CatalogError {
     Object.setPrototypeOf(this, new.target.prototype)
   }
 }
+
+export class DuplicateReviewError extends CatalogError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DuplicateReviewError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class DuplicateGroupNotFoundError extends DuplicateReviewError {
+  constructor(sha256: string, byteSize: number) {
+    super(`Duplicate group not found for sha256 "${sha256}" and byte size ${byteSize}`)
+    this.name = 'DuplicateGroupNotFoundError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class StaleReviewError extends DuplicateReviewError {
+  constructor(
+    message = 'Stale review: the duplicate group has changed since it was loaded. Please refresh before saving.'
+  ) {
+    super(message)
+    this.name = 'StaleReviewError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class InvalidPreferredLocationError extends DuplicateReviewError {
+  constructor(preferredLocationId: number) {
+    super(
+      `Preferred location ${preferredLocationId} is not an active member of this duplicate group`
+    )
+    this.name = 'InvalidPreferredLocationError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}

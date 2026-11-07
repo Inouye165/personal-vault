@@ -20,7 +20,35 @@ const healthyApi = (): VaultApi => ({
   getActiveScanJob: vi.fn(async () => ({ job: null })),
   getLatestScanJob: vi.fn(async () => ({ job: null })),
   dismissScanJob: vi.fn(async () => ({ success: true })),
-  onScanProgress: vi.fn(() => () => {})
+  onScanProgress: vi.fn(() => () => {}),
+  getDuplicateGroups: vi.fn(async () => ({
+    items: [],
+    totalCount: 0,
+    offset: 0,
+    limit: 20,
+    hasMore: false
+  })),
+  getDuplicateGroupMembers: vi.fn(async () => ({
+    sha256: 'a'.repeat(64),
+    byteSize: 100,
+    groupSignature: 'sig',
+    reviewStatus: 'unreviewed' as const,
+    preferredLocationId: null,
+    hasStaleDecision: false,
+    items: [],
+    totalCount: 0,
+    offset: 0,
+    limit: 50,
+    hasMore: false
+  })),
+  setDuplicateReview: vi.fn(async () => ({
+    sha256: 'a'.repeat(64),
+    byteSize: 100,
+    status: 'reviewed' as const,
+    preferredLocationId: null,
+    groupSignature: 'sig',
+    reviewedAtMs: 1000
+  }))
 })
 
 const mount = async () => {

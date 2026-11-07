@@ -13,6 +13,12 @@ import {
   SelectRootsResponseSchema,
   StartScanRequestSchema,
   VaultStatusSchema,
+  GetDuplicateGroupsRequestSchema,
+  GetDuplicateGroupsResponseSchema,
+  GetDuplicateGroupMembersRequestSchema,
+  GetDuplicateGroupMembersResponseSchema,
+  SetDuplicateReviewRequestSchema,
+  SetDuplicateReviewResponseSchema,
   validatePayload,
   type AppInfo,
   type DismissJobResponse,
@@ -20,7 +26,10 @@ import {
   type GetLatestJobResponse,
   type JobActionResponse,
   type SelectRootsResponse,
-  type VaultStatus
+  type VaultStatus,
+  type GetDuplicateGroupsResponse,
+  type GetDuplicateGroupMembersResponse,
+  type SetDuplicateReviewResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -231,6 +240,97 @@ export function registerIpcHandlers({
         error: err instanceof Error ? err.message : String(err)
       })
     }
+  })
+
+  handle(IPC_CHANNELS.DUPLICATES_GET_GROUPS, (raw: unknown): GetDuplicateGroupsResponse => {
+    const parsed = validatePayload(GetDuplicateGroupsRequestSchema, raw ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid getDuplicateGroups request: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      return GetDuplicateGroupsResponseSchema.parse({
+        items: [],
+        totalCount: 0,
+        offset: parsed.data.offset ?? 0,
+        limit: parsed.data.limit ?? 20,
+        hasMore: false
+      })
+    }
+    const result = catalog.getDuplicateGroups(parsed.data)
+    const formatted = {
+      items: result.items.map((g) => ({
+        sha256: g.sha256,
+        byteSize: g.byteSize,
+        fileCount: g.fileCount,
+        groupSignature: g.groupSignature,
+        reviewStatus: g.reviewStatus,
+        preferredLocationId: g.preferredLocationId,
+        hasStaleDecision: g.hasStaleDecision,
+        reviewedAtMs: g.reviewedAtMs,
+        previewLocations: g.locations.map((loc) => ({
+          id: loc.id,
+          sourceId: loc.sourceId,
+          originalPath: loc.originalPath,
+          normalizedPath: loc.normalizedPath,
+          fileName: loc.fileName,
+          extension: loc.extension,
+          category: loc.category,
+          byteSize: loc.byteSize,
+          filesystemBirthtimeMs: loc.filesystemBirthtimeMs,
+          filesystemMtimeMs: loc.filesystemMtimeMs,
+          inferredCaptureTimeMs: loc.inferredCaptureTimeMs,
+          firstDiscoveredAtMs: loc.firstDiscoveredAtMs,
+          lastSeenAtMs: loc.lastSeenAtMs,
+          activeHash: loc.activeHash,
+          activeHashVerifiedAtMs: loc.activeHashVerifiedAtMs,
+          discoveryObservationId: loc.discoveryObservationId
+        })),
+        truncatedLocations: g.truncatedLocations
+      })),
+      totalCount: result.totalCount,
+      offset: result.offset,
+      limit: result.limit,
+      hasMore: result.hasMore
+    }
+    const validated = validatePayload(GetDuplicateGroupsResponseSchema, formatted)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetDuplicateGroupsResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.DUPLICATES_GET_MEMBERS, (raw: unknown): GetDuplicateGroupMembersResponse => {
+    const parsed = validatePayload(GetDuplicateGroupMembersRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDuplicateGroupMembers request: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog database is not available')
+    }
+    const result = catalog.getDuplicateGroupMembers(parsed.data)
+    const validated = validatePayload(GetDuplicateGroupMembersResponseSchema, result)
+    if (!validated.success) {
+      throw new Error(
+        `Invalid outgoing GetDuplicateGroupMembersResponse in main: ${validated.error}`
+      )
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.DUPLICATES_SET_REVIEW, (raw: unknown): SetDuplicateReviewResponse => {
+    const parsed = validatePayload(SetDuplicateReviewRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid setDuplicateReview request: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog database is not available')
+    }
+    const result = catalog.setDuplicateReview(parsed.data)
+    const validated = validatePayload(SetDuplicateReviewResponseSchema, result)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SetDuplicateReviewResponse in main: ${validated.error}`)
+    }
+    return validated.data
   })
 
   handle(IPC_CHANNELS.SCAN_PROGRESS_EVENT, (): never => {

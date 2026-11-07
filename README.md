@@ -65,6 +65,7 @@ npm run build && npm run smoke:built
 npm run build:unpack && npm run smoke:unpacked
 npm run verify:sqlite    # real Electron SQLite driver and catalog repository verification
 npm run verify:scan      # real Electron end-to-end scan workflow and recovery verification
+npm run verify:duplicates # real Electron end-to-end duplicate review and invalidation verification
 ```
 
 Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.

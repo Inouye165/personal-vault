@@ -235,3 +235,19 @@ src/
    - **Accessible Renderer UI**:
      - `ScanJobsPanel` integrates into the existing desktop layout without unsolicited redesign.
      - Accessible controls: folder selection via native dialog, progress indicators (`role="progressbar"`), status badges, control buttons (Pause, Resume, Cancel, Dismiss), recovery alerts for interrupted jobs, and expandable error logs.
+10. **Exact Duplicate Grouping & Review Workflow (Stage 3)**:
+    - **Exact Content Identity**: Duplicate groups are formed by matching verified SHA-256 AND observed byte size across active observations (`discovery_observations.is_current = 1 AND hash_observations.is_active = 1 AND hash_observations.observed_byte_size = discovery_observations.byte_size`). Inactive, invalidated, or superseded observations are strictly excluded.
+    - **Deterministic Group Signatures**: Every duplicate group's membership and observation state is represented by a deterministic `groupSignature` (SHA-256 digest of sorted member tokens `file_location_id:discovery_observation_id:hash_observation_id`). Any addition, removal, or file modification changes this signature.
+    - **Persistent Review Annotations (Migration 5)**: The `duplicate_reviews` table persists user decisions: `(sha256, byte_size, status, preferred_location_id, group_signature, reviewed_at_ms, updated_at_ms)`. Decisions are catalog annotations only; they never mutate recorded facts or imply copying or deletion.
+    - **Decision Invalidation Policy & Stale Write Rejection**:
+      - A review decision is valid if and only if the current group signature matches the recorded signature and any selected `preferred_location_id` remains an active member.
+      - If membership or observations change out of band or through a rescan, the decision is automatically invalidated: the group reports `reviewStatus: 'unreviewed'`, `preferredLocationId: null`, and `hasStaleDecision: true`.
+      - Stale writes from an outdated review screen are detected and rejected via `StaleReviewError` when `expectedGroupSignature` differs from the current signature.
+    - **Independently Bounded, Deterministic Pagination**:
+      - Groups query (`getDuplicateGroups`) deterministically orders by `file_count DESC, byte_size DESC, sha256 ASC`.
+      - Members query (`getDuplicateGroupMembers`) deterministically orders by `file_location_id ASC`, allowing full traversal of large duplicate groups without unbounded memory loading. Truncated member previews never imply the entire group is shown.
+    - **Side-by-Side Review UI & Operation Distinctions**:
+      - Integrated into the existing Duplicates view with honest loading, empty, and error states.
+      - Displays side-by-side filenames, absolute paths, byte sizes, filesystem creation/modification dates (with explicit "Unknown" for null values), and observation provenance (observation ID and verification timestamp).
+      - Prominently explains catalog-index removal, vault-copy deletion, and original-source deletion as distinct operations (none implemented).
+      - Prevents asynchronous response race conditions during rapid group switching via selection tokens.

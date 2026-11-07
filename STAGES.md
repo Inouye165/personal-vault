@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stage 1 and Stage 2 (substages 2A-2D) are complete. Stage 2 independently accepted at `71e1af7`. Stage 3 is next; Stages 3-8 are future work. Public release has not occurred and has no scheduled date.
+Stage 1 and Stage 2 are complete (independently accepted at `070e3cb` and `71e1af7`). Stage 3 implementation is complete and awaiting independent review; Stages 4-8 are future work. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status   | Acceptance |
-| ----- | -------------------------------------------------------------- | -------- | ---------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete | `070e3cb`  |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete | `71e1af7`  |
-| 3     | Exact duplicate grouping and review                            | Planned  | Pending    |
-| 4     | Verified vault copying and portable metadata                   | Planned  | Pending    |
-| 5     | Fast photo browsing, ratings, and similarity review            | Planned  | Pending    |
-| 6     | Semantic photo search and metadata filters                     | Planned  | Pending    |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned  | Pending    |
-| 8     | Export, recovery, release validation, beta, and public release | Planned  | Pending    |
+| Stage | Deliverable                                                    | Status          | Acceptance |
+| ----- | -------------------------------------------------------------- | --------------- | ---------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete        | `070e3cb`  |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete        | `71e1af7`  |
+| 3     | Exact duplicate grouping and review                            | Awaiting review | Pending    |
+| 4     | Verified vault copying and portable metadata                   | Planned         | Pending    |
+| 5     | Fast photo browsing, ratings, and similarity review            | Planned         | Pending    |
+| 6     | Semantic photo search and metadata filters                     | Planned         | Pending    |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned         | Pending    |
+| 8     | Export, recovery, release validation, beta, and public release | Planned         | Pending    |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -58,14 +58,16 @@ Exit: users can manage scans and recover interrupted work after restart without 
 
 ## Stage 3 - Exact duplicate review
 
-**Planned.**
+**Awaiting independent review.**
 
-- [ ] Group identical content by SHA-256 across filenames and locations.
-- [ ] Present duplicate groups with side-by-side recorded metadata.
-- [ ] Support explicit review and selection without automatic source deletion.
-- [ ] Distinguish catalog removal, vault-copy deletion, and original-source deletion.
+- [x] Group identical content by verified SHA-256 and byte size across filenames and locations.
+- [x] Present duplicate groups with side-by-side recorded metadata, explicit unknown values, and observation provenance.
+- [x] Support explicit review decisions (reviewed/unreviewed, optional preferred location) without mutating recorded facts or modifying sources.
+- [x] Enforce decision invalidation policy: reset decision when group membership, content, or observations change; reject stale writes.
+- [x] Distinguish catalog-index removal, vault-copy deletion, and original-source deletion as distinct operations (none implemented).
+- [x] Verify real Electron IPC duplicate review across scan, inspection, restart persistence, and rescan invalidation.
 
-Exit: users can understand and review duplicate groups without losing locations or differing metadata. Existing catalog queries alone do not complete this stage.
+Exit: users can understand and review duplicate groups without losing locations or differing metadata.
 
 ## Stage 4 - Verified vault copying
 

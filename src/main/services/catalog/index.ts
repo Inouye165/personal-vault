@@ -21,7 +21,11 @@ export {
   SourceNotFoundError,
   FileLocationNotFoundError,
   MigrationError,
-  FileMetadataConflictError
+  FileMetadataConflictError,
+  DuplicateReviewError,
+  DuplicateGroupNotFoundError,
+  StaleReviewError,
+  InvalidPreferredLocationError
 } from './errors'
 export { CURRENT_SCHEMA_VERSION, checkSchemaCompatibility, runMigrations } from './migrations'
 export {
@@ -43,6 +47,13 @@ export type {
   DuplicateGroupOptions,
   PaginatedResult,
   DuplicateGroup,
+  DuplicateReviewStatus,
+  DuplicateReviewFilter,
+  DuplicateMemberRecord,
+  DuplicateGroupMembersOptions,
+  DuplicateGroupMembersResult,
+  SetDuplicateReviewInput,
+  DuplicateReviewRecord,
   CatalogStats,
   ScanJobStatus,
   ScanJobPhase,

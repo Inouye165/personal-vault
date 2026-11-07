@@ -51,7 +51,10 @@ describe('preload bridge', () => {
         'dismissScanJob',
         'getActiveScanJob',
         'getLatestScanJob',
-        'onScanProgress'
+        'onScanProgress',
+        'getDuplicateGroups',
+        'getDuplicateGroupMembers',
+        'setDuplicateReview'
       ].sort()
     )
   })

@@ -32,7 +32,7 @@ describe('Stage 2D — SQLite Catalog Scan Jobs and Checkpoints', () => {
 
   describe('Schema Migrations 3 and 4', () => {
     it('sets CURRENT_SCHEMA_VERSION to 4 and creates scan_jobs, scan_job_errors, and scan_job_files tables with is_dismissed column', () => {
-      expect(CURRENT_SCHEMA_VERSION).toBe(4)
+      expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(4)
       db = CatalogDatabase.open({ catalogPath })
 
       const raw = new DatabaseSync(catalogPath)
@@ -51,7 +51,7 @@ describe('Stage 2D — SQLite Catalog Scan Jobs and Checkpoints', () => {
         const version = raw
           .prepare('SELECT MAX(version) as max_version FROM schema_migrations;')
           .get() as { max_version: number }
-        expect(version.max_version).toBe(4)
+        expect(version.max_version).toBeGreaterThanOrEqual(4)
       } finally {
         raw.close()
       }
@@ -158,7 +158,7 @@ describe('Stage 2D — SQLite Catalog Scan Jobs and Checkpoints', () => {
         const version = raw2
           .prepare('SELECT MAX(version) as max_version FROM schema_migrations;')
           .get() as { max_version: number }
-        expect(version.max_version).toBe(4)
+        expect(version.max_version).toBeGreaterThanOrEqual(4)
 
         const job = raw2.prepare('SELECT * FROM scan_jobs WHERE id = 1;').get() as {
           status: string

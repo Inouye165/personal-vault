@@ -49,10 +49,18 @@ Verification: implementation host **276 passed, 0 skipped** across all 11 test f
 
 ## Stage 3: Exact Duplicate Grouping and Review Workflow
 
-- [ ] SHA-256 exact duplicate detection independent of filename or location.
-- [ ] Grouping interface to present duplicate clusters for user inspection.
-- [ ] Distinction between catalog removal, vault copy deletion, and source deletion.
-- [ ] Side-by-side comparison view showing metadata differences across duplicate instances.
+Status: **complete — awaiting independent review** (see HANDOFF.md).
+
+Verification: implementation host **312 passed, 0 skipped** across all 16 test files, with strict typecheck, lint, formatting, production build, unpacked build, real Electron SQLite repository checks (`verify:sqlite`, `verify:sqlite:unpacked`), scan workflow checks (`verify:scan`, `verify:scan:unpacked`), and isolated-fixture real Electron duplicate review checks (`verify:duplicates`, `verify:duplicates:unpacked`) passed.
+
+- [x] Exact duplicate grouping by current verified SHA-256 AND byte size across distinct original paths, preserving all differing metadata.
+- [x] Schema Migration 5: `duplicate_reviews` table for persistent review annotations (`reviewed`/`unreviewed`, optional `preferred_location_id`, `group_signature`).
+- [x] Invalidation policy & stale write detection: deterministic `groupSignature` based on active member IDs, discovery IDs, and hash IDs; automatic invalidation when membership, content, or observations change; stale write rejection via `StaleReviewError`.
+- [x] Independently bounded, deterministically ordered paginated queries for duplicate groups and duplicate group members. Truncated member list never implies group is fully shown.
+- [x] Side-by-side inspection view in Duplicates tab displaying filenames, absolute paths, byte sizes, filesystem creation/modification dates, and hash observation provenance with verification timestamp and observation ID. Recorded facts strictly separated from inferred metadata; explicit unknown values.
+- [x] Explicit presentation distinguishing catalog removal, vault copy deletion, and source deletion as separate operations (none implemented).
+- [x] Narrow typed IPC channels (`DUPLICATES_GET_GROUPS`, `DUPLICATES_GET_MEMBERS`, `DUPLICATES_SET_REVIEW`) with bidirectional Zod validation and top-level sender authorization.
+- [x] Isolated-fixture verification script (`scripts/verify-electron-duplicate-review.mjs`) exercising scan-generated groups, member inspection, review decisions, persistence across restart, invalidation on modified-file rescan, stale write rejection, and source preservation invariance in real Electron and unpacked binary.
 
 ---
 

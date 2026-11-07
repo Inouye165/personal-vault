@@ -10,7 +10,10 @@ export const IPC_CHANNELS = {
   SCAN_GET_ACTIVE_JOB: 'scan:get-active-job',
   SCAN_GET_LATEST_JOB: 'scan:get-latest-job',
   SCAN_DISMISS_JOB: 'scan:dismiss-job',
-  SCAN_PROGRESS_EVENT: 'scan:progress-event'
+  SCAN_PROGRESS_EVENT: 'scan:progress-event',
+  DUPLICATES_GET_GROUPS: 'duplicates:get-groups',
+  DUPLICATES_GET_MEMBERS: 'duplicates:get-members',
+  DUPLICATES_SET_REVIEW: 'duplicates:set-review'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

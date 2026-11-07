@@ -196,8 +196,12 @@ export interface UnhashedFilesOptions extends PaginationOptions {
   readonly afterId?: number
 }
 
+export type DuplicateReviewStatus = 'unreviewed' | 'reviewed'
+export type DuplicateReviewFilter = 'all' | 'unreviewed' | 'reviewed'
+
 export interface DuplicateGroupOptions extends PaginationOptions {
   readonly maxLocationsPerGroup?: number
+  readonly filter?: DuplicateReviewFilter
 }
 
 export interface PaginatedResult<T> {
@@ -212,8 +216,66 @@ export interface DuplicateGroup {
   readonly sha256: string
   readonly byteSize: number
   readonly fileCount: number
+  readonly groupSignature: string
+  readonly reviewStatus: DuplicateReviewStatus
+  readonly preferredLocationId: number | null
+  readonly hasStaleDecision: boolean
+  readonly reviewedAtMs: number | null
   readonly locations: readonly CatalogFileRecord[]
   readonly truncatedLocations: boolean
+}
+
+export interface DuplicateMemberRecord {
+  readonly fileLocationId: number
+  readonly sourceId: number
+  readonly originalPath: string
+  readonly normalizedPath: string
+  readonly fileName: string
+  readonly extension: string
+  readonly category: 'photo' | 'document'
+  readonly byteSize: number
+  readonly filesystemBirthtimeMs: number | null
+  readonly filesystemMtimeMs: number | null
+  readonly inferredCaptureTimeMs: number | null
+  readonly firstDiscoveredAtMs: number
+  readonly lastSeenAtMs: number
+  readonly discoveryObservationId: number
+  readonly hashObservationId: number
+  readonly activeHash: string
+  readonly activeHashVerifiedAtMs: number
+  readonly isPreferred: boolean
+}
+
+export interface DuplicateGroupMembersOptions extends PaginationOptions {
+  readonly sha256: string
+  readonly byteSize: number
+}
+
+export interface DuplicateGroupMembersResult extends PaginatedResult<DuplicateMemberRecord> {
+  readonly sha256: string
+  readonly byteSize: number
+  readonly groupSignature: string
+  readonly reviewStatus: DuplicateReviewStatus
+  readonly preferredLocationId: number | null
+  readonly hasStaleDecision: boolean
+  readonly reviewedAtMs: number | null
+}
+
+export interface SetDuplicateReviewInput {
+  readonly sha256: string
+  readonly byteSize: number
+  readonly status: DuplicateReviewStatus
+  readonly preferredLocationId?: number | null
+  readonly expectedGroupSignature: string
+}
+
+export interface DuplicateReviewRecord {
+  readonly sha256: string
+  readonly byteSize: number
+  readonly status: DuplicateReviewStatus
+  readonly preferredLocationId: number | null
+  readonly groupSignature: string
+  readonly reviewedAtMs: number
 }
 
 export interface CatalogStats {

@@ -16,6 +16,8 @@
     "verify:sqlite:unpacked": "node scripts/verify-electron-sqlite.mjs --mode=unpacked",
     "verify:scan": "node scripts/verify-electron-scan.mjs",
     "verify:scan:unpacked": "node scripts/verify-electron-scan.mjs --mode=unpacked",
+    "verify:duplicates": "node scripts/verify-electron-duplicate-review.mjs",
+    "verify:duplicates:unpacked": "node scripts/verify-electron-duplicate-review.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

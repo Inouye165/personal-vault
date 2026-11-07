@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 4
+export const CURRENT_SCHEMA_VERSION = 5
 
 interface Migration {
   readonly version: number
@@ -291,6 +291,28 @@ const MIGRATIONS: readonly Migration[] = [
         );
 
         CREATE INDEX IF NOT EXISTS idx_scan_job_files_location ON scan_job_files(file_location_id);
+      `)
+    }
+  },
+  {
+    version: 5,
+    name: 'duplicate_reviews',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS duplicate_reviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          status TEXT NOT NULL CHECK (status IN ('unreviewed', 'reviewed')),
+          preferred_location_id INTEGER REFERENCES file_locations(id) ON DELETE SET NULL,
+          group_signature TEXT NOT NULL,
+          reviewed_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          UNIQUE(sha256, byte_size)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_duplicate_reviews_hash_size ON duplicate_reviews(sha256, byte_size);
+        CREATE INDEX IF NOT EXISTS idx_duplicate_reviews_preferred ON duplicate_reviews(preferred_location_id);
       `)
     }
   }
