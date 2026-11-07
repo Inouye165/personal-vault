@@ -78,6 +78,11 @@ src/
 │           ├── path-normalization.ts # Documented platform-aware lookup key normalization
 │           ├── types.ts      # Persistence contracts, records, and pagination interfaces
 │           └── index.ts      # Public catalog exports
+│       └── jobs/          # Stage 2D: resumable scan jobs and coordinator
+│           ├── coordinator.ts # ScanJobCoordinator (orchestrator, checkpointing, pause/resume, cancel)
+│           ├── errors.ts     # Domain errors (ActiveJobConflictError, JobNotFoundError, JobStateError)
+│           ├── types.ts      # Job options, progress, and event contracts
+│           └── index.ts      # Public jobs exports
 ├── preload/
 │   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
@@ -208,3 +213,25 @@ src/
    - **Source Preservation Invariance**:
      - Database writes affect strictly the app-owned SQLite catalog file.
      - Source files on disk remain strictly read-only and unaltered.
+9. **Resumable Scan Jobs & IPC/UI Integration (Stage 2D)**:
+   - **Job State Machine & Migration 3**:
+     - Schema migration 3 introduces `scan_jobs` and `scan_job_errors` tables.
+     - Scan job lifecycle states: `running`, `paused`, `cancelled`, `interrupted`, `failed`, `completed`.
+     - Checkpoint progress (`discovered_count`, `hashed_count`, `failed_count`, `last_checkpoint_ms`) is committed incrementally during scanning.
+     - Structured error records in `scan_job_errors` store `file_path`, `phase` (`discovery` | `hashing`), `error_code`, `error_message`, and timestamp, keeping failures visible rather than silently dropping files.
+   - **Concurrency Control & Event Loop Yielding**:
+     - `ScanJobCoordinator` enforces at most one active job across the application (`ActiveJobConflictError`).
+     - Processing loop interleaves batch discovery and chunked hashing with cooperative `setImmediate` event loop yielding, keeping Electron's main process and UI completely responsive without worker thread IPC serialization overhead.
+   - **Pause, Resume, and Cancellation**:
+     - `pauseScan()` checkpoints progress and yields gracefully.
+     - `cancelScan()` aborts the active pipeline via `AbortSignal`, flushes committed work, and marks the job status as `cancelled`.
+   - **Restart Recovery & Changed-File Revalidation**:
+     - On coordinator startup (`initialize()`), any jobs left in `running` or `paused` state (e.g. from an abrupt crash or power loss) are transitioned to `interrupted` via `markRunningJobsAsInterrupted()`.
+     - When an interrupted job is resumed, the coordinator re-runs discovery across the configured roots. The catalog inspects existing observations: if file size, birthtime, or mtime have changed out-of-band, the prior observation is deactivated, its active hash is invalidated, and the file is queued for fresh SHA-256 hashing. Saved checkpoints are never trusted as proof that file contents remain unchanged.
+   - **Typed IPC Contracts & Preload Boundary**:
+     - Typed IPC channels: `SCAN_SELECT_ROOTS`, `SCAN_START_JOB`, `SCAN_PAUSE_JOB`, `SCAN_RESUME_JOB`, `SCAN_CANCEL_JOB`, `SCAN_GET_ACTIVE_JOB`, and `SCAN_PROGRESS_EVENT`.
+     - All arguments and responses are strictly validated in both main and preload using Zod schemas (`ipc-schemas.ts`).
+     - IPC handlers enforce sender authorization (`validateSender`) matching application security policies.
+   - **Accessible Renderer UI**:
+     - `ScanJobsPanel` integrates into the existing desktop layout without unsolicited redesign.
+     - Accessible controls: folder selection via native dialog, progress indicators (`role="progressbar"`), status badges, control buttons (Pause, Resume, Cancel, Dismiss), recovery alerts for interrupted jobs, and expandable error logs.

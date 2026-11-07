@@ -4,6 +4,11 @@ import {
   NavigationTabSchema,
   VaultStatusSchema,
   SearchQuerySchema,
+  ScanJobProgressSchema,
+  StartScanRequestSchema,
+  JobIdRequestSchema,
+  SelectRootsResponseSchema,
+  JobActionResponseSchema,
   validatePayload
 } from '../../src/shared/validation/ipc-schemas.js'
 
@@ -117,6 +122,90 @@ describe('IPC Boundary Schemas and Runtime Validation', () => {
       }
       const res = validatePayload(SearchQuerySchema, invalid)
       expect(res.success).toBe(false)
+    })
+  })
+
+  describe('ScanJobProgressSchema', () => {
+    it('accepts a fully populated valid progress payload', () => {
+      const valid = {
+        jobId: 1,
+        status: 'running',
+        phase: 'hashing',
+        roots: ['D:/photos'],
+        discoveredCount: 10,
+        hashedCount: 5,
+        totalFilesToHash: 10,
+        totalBytes: 50000,
+        hashedBytes: 25000,
+        skippedCount: 1,
+        errorCount: 0,
+        currentPath: 'D:/photos/pic.jpg',
+        errors: [],
+        startedAtMs: 1000,
+        updatedAtMs: 2000,
+        completedAtMs: null
+      }
+      const res = validatePayload(ScanJobProgressSchema, valid)
+      expect(res.success).toBe(true)
+    })
+
+    it('rejects invalid scan statuses or negative counts', () => {
+      const invalid = {
+        jobId: 1,
+        status: 'dancing',
+        phase: 'discovery',
+        roots: ['D:/photos'],
+        discoveredCount: -1,
+        hashedCount: 0,
+        totalFilesToHash: 0,
+        totalBytes: 0,
+        hashedBytes: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        errors: [],
+        startedAtMs: 1000,
+        updatedAtMs: 2000,
+        completedAtMs: null
+      }
+      const res = validatePayload(ScanJobProgressSchema, invalid)
+      expect(res.success).toBe(false)
+    })
+  })
+
+  describe('StartScanRequestSchema', () => {
+    it('accepts valid roots array', () => {
+      const valid = { roots: ['D:/photos', 'D:/docs'] }
+      expect(validatePayload(StartScanRequestSchema, valid).success).toBe(true)
+    })
+
+    it('rejects empty roots array', () => {
+      const invalid = { roots: [] }
+      expect(validatePayload(StartScanRequestSchema, invalid).success).toBe(false)
+    })
+  })
+
+  describe('JobIdRequestSchema', () => {
+    it('accepts valid positive job id', () => {
+      expect(validatePayload(JobIdRequestSchema, { jobId: 123 }).success).toBe(true)
+    })
+
+    it('rejects zero or negative job id', () => {
+      expect(validatePayload(JobIdRequestSchema, { jobId: 0 }).success).toBe(false)
+      expect(validatePayload(JobIdRequestSchema, { jobId: -5 }).success).toBe(false)
+    })
+  })
+
+  describe('JobActionResponseSchema', () => {
+    it('accepts valid action response', () => {
+      const valid = { success: true }
+      expect(validatePayload(JobActionResponseSchema, valid).success).toBe(true)
+    })
+  })
+
+  describe('SelectRootsResponseSchema', () => {
+    it('accepts valid directory selection response', () => {
+      const valid = { cancelled: false, rootPaths: ['D:/photos'] }
+      expect(validatePayload(SelectRootsResponseSchema, valid).success).toBe(true)
     })
   })
 })

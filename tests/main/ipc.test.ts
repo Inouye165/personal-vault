@@ -15,6 +15,7 @@ import { IPC_CHANNELS } from '../../src/shared/contracts/channels'
 import { registerIpcHandlers } from '../../src/main/ipc/handlers'
 import { createSenderValidator } from '../../src/main/ipc/sender'
 import { resolveAppLocation } from '../../src/main/navigation'
+import type { ScanJobCoordinator } from '../../src/main/services/jobs'
 
 const documentPath = resolve('app', 'out', 'renderer', 'index.html')
 const documentUrl = pathToFileURL(documentPath).href
@@ -56,6 +57,88 @@ describe('IPC handlers: trusted sender', () => {
   it('acknowledges a valid tab and refuses an invalid one', async () => {
     await expect(invoke(IPC_CHANNELS.NAVIGATE_SET_TAB, trusted, 'photos')).resolves.toBe(true)
     await expect(invoke(IPC_CHANNELS.NAVIGATE_SET_TAB, trusted, 'settings')).resolves.toBe(false)
+  })
+
+  it('handles scan directory selection', async () => {
+    registered.clear()
+    const location = resolveAppLocation({ isPackaged: true, rendererUrl: undefined, documentPath })
+    registerIpcHandlers({
+      validateSender: createSenderValidator({
+        getTrustedWebContentsId: () => TRUSTED_ID,
+        location
+      }),
+      selectDirectories: async () => ({ cancelled: false, filePaths: ['D:/photos'] })
+    })
+
+    await expect(invoke(IPC_CHANNELS.SCAN_SELECT_ROOTS, trusted)).resolves.toEqual({
+      cancelled: false,
+      rootPaths: ['D:/photos']
+    })
+  })
+
+  it('handles scan job actions with validation', async () => {
+    registered.clear()
+    const location = resolveAppLocation({ isPackaged: true, rendererUrl: undefined, documentPath })
+    const mockCoordinator = {
+      startScan: vi.fn().mockResolvedValue({
+        jobId: 1,
+        status: 'running',
+        phase: 'discovery',
+        roots: ['D:/photos'],
+        discoveredCount: 0,
+        hashedCount: 0,
+        totalFilesToHash: 0,
+        totalBytes: 0,
+        hashedBytes: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        errors: [],
+        startedAtMs: 1000,
+        updatedAtMs: 1000,
+        completedAtMs: null
+      }),
+      pauseScan: vi.fn().mockResolvedValue({
+        jobId: 1,
+        status: 'paused',
+        phase: 'discovery',
+        roots: ['D:/photos'],
+        discoveredCount: 0,
+        hashedCount: 0,
+        totalFilesToHash: 0,
+        totalBytes: 0,
+        hashedBytes: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        errors: [],
+        startedAtMs: 1000,
+        updatedAtMs: 1000,
+        completedAtMs: null
+      }),
+      resumeScan: vi.fn(),
+      cancelScan: vi.fn(),
+      getActiveJob: vi.fn().mockReturnValue(null),
+      onProgress: vi.fn()
+    }
+
+    registerIpcHandlers({
+      validateSender: createSenderValidator({
+        getTrustedWebContentsId: () => TRUSTED_ID,
+        location
+      }),
+      coordinator: mockCoordinator as unknown as ScanJobCoordinator
+    })
+
+    // Start scan
+    const startRes = await invoke(IPC_CHANNELS.SCAN_START_JOB, trusted, { roots: ['D:/photos'] })
+    expect(startRes).toMatchObject({ success: true, job: { jobId: 1, status: 'running' } })
+
+    // Pause scan
+    const pauseRes = await invoke(IPC_CHANNELS.SCAN_PAUSE_JOB, trusted, { jobId: 1 })
+    expect(pauseRes).toMatchObject({ success: true, job: { jobId: 1, status: 'paused' } })
+
+    // Get active job
+    const activeRes = await invoke(IPC_CHANNELS.SCAN_GET_ACTIVE_JOB, trusted)
+    expect(activeRes).toEqual({ job: null })
   })
 })
 

@@ -15,7 +15,11 @@ vi.mock('electron', () => ({
       electron.exposed[name] = api
     }
   },
-  ipcRenderer: { invoke: electron.invoke }
+  ipcRenderer: {
+    invoke: electron.invoke,
+    on: vi.fn(),
+    removeListener: vi.fn()
+  }
 }))
 
 async function loadApi() {
@@ -32,9 +36,22 @@ beforeEach(() => {
 })
 
 describe('preload bridge', () => {
-  it('exposes only the three narrow methods', async () => {
+  it('exposes only the narrow typed methods', async () => {
     const api = await loadApi()
-    expect(Object.keys(api).sort()).toEqual(['getAppInfo', 'getVaultStatus', 'setTab'])
+    expect(Object.keys(api).sort()).toEqual(
+      [
+        'getAppInfo',
+        'getVaultStatus',
+        'setTab',
+        'selectRoots',
+        'startScan',
+        'pauseScan',
+        'resumeScan',
+        'cancelScan',
+        'getActiveScanJob',
+        'onScanProgress'
+      ].sort()
+    )
   })
 
   it('returns validated responses', async () => {
@@ -72,7 +89,33 @@ describe('preload bridge', () => {
 
   it('rejects an unknown tab without calling the main process', async () => {
     const api = await loadApi()
-    await expect(api.setTab!('settings')).rejects.toThrow(/invalid/i)
+    await expect(
+      api.setTab!(
+        'settings' as unknown as import('../../src/shared/validation/ipc-schemas.js').NavigationTab
+      )
+    ).rejects.toThrow(/invalid/i)
     expect(electron.invoke).not.toHaveBeenCalled()
+  })
+
+  it('validates startScan requests and responses', async () => {
+    electron.invoke.mockResolvedValueOnce({ success: true })
+    const api = await loadApi()
+
+    // Invalid request: empty roots
+    await expect(api.startScan!({ roots: [] })).rejects.toThrow(/invalid/i)
+    expect(electron.invoke).not.toHaveBeenCalled()
+
+    // Valid request
+    await expect(api.startScan!({ roots: ['D:/photos'] })).resolves.toEqual({ success: true })
+    expect(electron.invoke).toHaveBeenCalledWith('scan:start-job', { roots: ['D:/photos'] })
+  })
+
+  it('validates selectRoots response', async () => {
+    electron.invoke.mockResolvedValueOnce({ cancelled: false, rootPaths: ['D:/photos'] })
+    const api = await loadApi()
+    await expect(api.selectRoots!()).resolves.toEqual({
+      cancelled: false,
+      rootPaths: ['D:/photos']
+    })
   })
 })

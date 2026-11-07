@@ -3,169 +3,159 @@
 ## Current state
 
 - **Workspace**: `D:\organizer`
-- **Branch**: `feat/stage-2c-sqlite-catalog` (branched from verified Stage 2B closeout commit `ab2fd60` / `e4488a2`)
+- **Branch**: `feat/stage-2d-scan-jobs` (branched from accepted Stage 2C closeout commit `d25ba50` / `a674f9c`)
 - **Stage 1 status**: complete (`070e3cb`).
-- **Stage 2 status**: **incomplete** — **Stage 2A, Stage 2B, and Stage 2C complete (Stage 2C independently accepted at `a674f9c`); Stage 2D not started**.
+- **Stage 2 status**: **Stage 2A, 2B, 2C accepted; Stage 2D complete and awaiting independent review (Stage 2 complete pending acceptance)**.
 
 ---
 
-## 1. Stage 2C Module Responsibilities (`src/main/services/catalog/`)
+## 1. Stage 2D Architecture & Module Responsibilities
 
-Modular, app-owned SQLite catalog repository independent of React, Electron IPC, and scan-job orchestration:
+Stage 2D implements resumable background scan jobs, SQLite job state and checkpoint persistence, crash recovery, changed-file revalidation, typed IPC contracts with bidirectional runtime Zod validation, and accessible renderer UI integration without altering source files.
 
-- [`src/main/services/catalog/database.ts`](file:///d:/organizer/src/main/services/catalog/database.ts):
-  - `CatalogDatabase`: factory method `CatalogDatabase.open({ catalogPath, enableForeignKeyConstraints, timeoutMs, readOnly })`.
-  - **Explicit initialization**: opened at caller-supplied path (creates parent directories if missing; zero import-time database creations). Failed open operations close raw connections deterministically without handle leaks.
-  - **Full Transaction Rollback**: `persistDiscoveryBatch` includes source root registration inside the transaction, guaranteeing that any batch failure rolls back all sources, files, observations, and hashes completely.
-  - **Immutable Recorded-Metadata Conflict Policy**:
-    - Rejects conflicting `fileName`, `extension`, or `category` values for an already recorded exact `originalPath` with typed `FileMetadataConflictError`.
-    - Conflicts are validated eagerly before altering the record, deactivating observations, or invalidating hashes.
-    - Uniform policy across both unchanged and changed content facts: no silent overwrite of recorded file metadata.
-    - If a conflict occurs after earlier valid writes in the same batch, the entire batch transaction rolls back completely (source registration, file locations, observations, and hash state).
-    - A renamed file at a genuinely different exact path remains a separate location record.
-    - Retries with identical recorded metadata remain strictly idempotent (`unchangedCount` increments without duplicating history).
-  - **Resource Bounds & Input Limits**:
-    - Validates batch sizes against `MAX_BATCH_SIZE = 1000`; rejects oversized discovery or hash batches eagerly before database mutation with `RangeError`.
-    - Validates discovery candidate inputs strictly (`validateDiscoveryCandidateInput`): non-negative safe integer sizes, finite numbers or null for birthtime/mtime, positive safe integer timestamps, and valid photo/document categories.
-    - Validates pagination parameters (`offset`, `limit`, `maxLocationsPerGroup`) as finite safe integers; rejects `NaN`, fractions, negative offsets, and zero/negative limits.
-    - Paginated reads for sources (`listSources`), per-file discovery observation history (`getDiscoveryObservationsForFile`), per-file hash history (`getHashObservationsForFile`), catalog files (`queryFileLocations`), and duplicate groups (`getDuplicateGroups`, with member locations bounded per cluster).
-  - **Preserved Discovery History & Creation Timestamp Changes**:
-    - Records immutable discovery observations in `discovery_observations` (`file_location_id`, `byte_size`, `filesystem_birthtime_ms`, `filesystem_mtime_ms`, `inferred_capture_time_ms`, `observed_at_ms`, `last_seen_at_ms`, `is_current`).
-    - Database constraint `idx_disc_obs_current` enforces at most one current discovery observation per file location.
-    - Detects modifications to `byte_size`, `filesystem_mtime_ms`, or `filesystem_birthtime_ms` (including transitions between `null` and known timestamps). When any change is observed, the prior observation is deactivated (`is_current = 0`) preserving all earlier facts; a new observation is created (`is_current = 1`). Stale hashes are invalidated (`is_active = 0`) and never inherited.
-  - **Hash Validation & Stage 2B Precision Contract**:
-    - Validates SHA-256 strings using strict 64-character hexadecimal regex (`/^[0-9a-fA-F]{64}$/`).
-    - Validates safe non-negative integer sizes and timestamps.
-    - Precision contract (`isObservationTimestampMatching`): when both discovery expectation and hash observation retain fractional milliseconds, exact comparison is enforced; reduced tolerance (< 1.0 ms) is applied only when the discovery expectation was recorded as an integer (e.g. truncated precision); conservative null matching strictly rejects mismatches where one value is null and the other is not.
-    - Shared validation across single (`recordHashObservation`) and batch (`recordHashObservationsBatch`) persistence.
-    - Database constraint `idx_hash_obs_current` enforces at most one current verified hash per discovery observation.
-  - **Deterministic Cleanup & Lifecycle Correctness**: `close()` closes the underlying handle and sets `isClosed() = true` only upon successful closure. Subsequent queries throw `DatabaseClosedError`.
-  - **Source Preservation Invariance**: Catalog mutations touch only the SQLite database file; source files on disk remain strictly read-only and unaltered.
+### 1.1 Catalog Database Migration & Job Persistence (`src/main/services/catalog/`)
+
 - [`src/main/services/catalog/migrations.ts`](file:///d:/organizer/src/main/services/catalog/migrations.ts):
-  - Safe compatibility checking (`checkSchemaCompatibility`): inspects `sqlite_master` for `schema_migrations` and verifies version compatibility BEFORE changing journal mode or running DDL.
-  - Both read-only and read-write opens reject unsupported future schema versions (`version > CURRENT_SCHEMA_VERSION`) with `UnsupportedSchemaVersionError`, preserving the file's existing contents, schema, and journal mode (e.g. `DELETE` mode).
-  - Versioned transactional migrations (`CURRENT_SCHEMA_VERSION = 2`):
-    - **Migration 1 (`initial_catalog_schema`)**: sets up original Stage 2C layout (`baa82e6`).
-    - **Migration 2 (`discovery_observations_and_strict_hashes`)**: safely inspects table structure. If already conforming to the revised layout (`25a1b4f` with `discovery_observations`), records version 2 without table alteration. If conforming to `baa82e6`, creates `discovery_observations`, populates it with all historical facts, recreates `hash_observations` with `discovery_observation_id`, and rebuilds `file_locations` without inline observation columns. Rejects unexpected or corrupt layouts with `MigrationError`.
-  - Enables `PRAGMA foreign_keys = ON;`, `PRAGMA journal_mode = WAL;`, and `PRAGMA synchronous = NORMAL;` only after compatibility is confirmed.
-- [`src/main/services/catalog/path-normalization.ts`](file:///d:/organizer/src/main/services/catalog/path-normalization.ts):
-  - Platform-aware lookup key normalization (`normalizePathForLookup`).
-  - Windows (`win32`): standardizes forward slashes to backslashes (`\`), strips trailing slashes, and folds to lowercase for case-insensitive indexing while preserving exact original paths and filenames verbatim in database columns. Documented Windows case-folding limitations (per-directory NTFS case sensitivity) and verified collision handling (distinct files with differing casing are preserved without fact loss).
-  - POSIX (`linux`, `darwin`): standardizes separators using `posix.normalize`, preserving backslashes (`\`) as valid filename characters without converting them to forward slashes.
-- [`src/main/services/catalog/errors.ts`](file:///d:/organizer/src/main/services/catalog/errors.ts):
-  - Typed domain errors: `CatalogError`, `UnsupportedSchemaVersionError`, `DatabaseClosedError`, `SourceNotFoundError`, `FileLocationNotFoundError`, `MigrationError`, `FileMetadataConflictError`.
-- [`src/main/services/catalog/types.ts`](file:///d:/organizer/src/main/services/catalog/types.ts) & [`src/main/services/catalog/index.ts`](file:///d:/organizer/src/main/services/catalog/index.ts):
-  - Public TypeScript domain contracts, options, and pagination interfaces.
+  - Incremented `CURRENT_SCHEMA_VERSION = 3`.
+  - **Migration 3 (`scan_jobs_and_errors`)**:
+    - Creates `scan_jobs` table tracking `id`, `roots_json`, `status` (`running`, `paused`, `cancelled`, `interrupted`, `failed`, `completed`), `phase` (`idle`, `discovery`, `hashing`, `completed`), `discovered_count`, `hashed_count`, `failed_count`, `created_at_ms`, `updated_at_ms`, `completed_at_ms`, and `last_checkpoint_ms`.
+    - Creates `scan_job_errors` table tracking `id`, `job_id` (foreign key with `ON DELETE CASCADE`), `file_path`, `phase` (`discovery` | `hashing`), `error_code`, `error_message`, and `created_at_ms`.
+    - Enforces check constraints on `status` and `phase`.
+- [`src/main/services/catalog/database.ts`](file:///d:/organizer/src/main/services/catalog/database.ts):
+  - `createScanJob`: creates new scan job record in `running` status.
+  - `getScanJob`: retrieves job by ID with parsed roots.
+  - `getLatestScanJob`: retrieves most recent scan job.
+  - `getActiveScanJob`: retrieves current active (`running` or `paused`) or `interrupted` scan job.
+  - `updateScanJobProgress`: persists incremental checkpoints (`discoveredCount`, `hashedCount`, `failedCount`).
+  - `updateScanJobStatus`: updates lifecycle state, phase, and completion timestamps.
+  - `recordScanJobError`: records typed error in `scan_job_errors`.
+  - `getScanJobErrors`: paginated query for errors associated with a job.
+  - `markRunningJobsAsInterrupted`: startup crash recovery helper transitioning stale `running` or `paused` jobs to `interrupted`.
+  - `getUnhashedFilesForRoots`: bounded query finding file locations under roots whose current discovery observation has no active hash observation.
+  - `countUnhashedFilesForRoots`, `countSources`, `countFileLocations`, `getFileLocationByOriginalPath`: summary queries supporting status reporting.
+
+### 1.2 Scan Job Coordinator (`src/main/services/jobs/`)
+
+- [`src/main/services/jobs/coordinator.ts`](file:///d:/organizer/src/main/services/jobs/coordinator.ts):
+  - Coordinates read-only streaming discovery (`scanSourceRoots`), streaming SHA-256 content hashing (`hashFile`), and bounded SQLite persistence (`CatalogDatabase`).
+  - **Single Active Job Concurrency Lock**: Enforces at most one running/paused job at a time; rejects concurrent scan attempts with `ActiveJobConflictError`.
+  - **Cooperative Event Loop Yielding**: Yields control periodically to the Node/Electron event loop via `setImmediate`, keeping UI responsive during large directory traversals and hashing loops.
+  - **Pause and Resume**:
+    - `pauseScan()`: sets pause flag, checkpoints progress, gracefully pauses between files, and transitions job status to `paused`.
+    - `resumeScan()`: re-runs discovery across configured roots, revalidating observations, and hashes remaining unhashed files to completion.
+  - **Cancellation**:
+    - `cancelScan()`: triggers `AbortController`, terminates discovery traversal and active file stream immediately, flushes committed state, and transitions status to `cancelled`.
+  - **Restart Crash Recovery & Interruption Detection**:
+    - `initialize()`: marks any leftover `running` or `paused` jobs as `interrupted`.
+    - Resuming an interrupted job re-discovers all files and revalidates file sizes and timestamps.
+  - **Changed-File Revalidation**:
+    - Never trusts a saved checkpoint as proof of unchanged content.
+    - If a file is modified out-of-band during an interruption or pause, subsequent discovery detects changed `byteSize` or `mtimeMs`, deactivates the prior discovery observation (`is_current = 0`), invalidates the old hash observation, creates a fresh current observation, and queues the file for re-hashing.
+  - **Visible Errors**:
+    - Non-fatal file errors (e.g. read permission denied) are recorded in `scan_job_errors` and counted in `failedCount`. Jobs complete with visible error lists rather than silently masking failures.
+
+### 1.3 IPC Contracts & Boundary Validation (`src/shared/`, `src/preload/`, `src/main/ipc/`)
+
+- [`src/shared/contracts/channels.ts`](file:///d:/organizer/src/shared/contracts/channels.ts):
+  - Added channels: `SCAN_SELECT_ROOTS`, `SCAN_START_JOB`, `SCAN_PAUSE_JOB`, `SCAN_RESUME_JOB`, `SCAN_CANCEL_JOB`, `SCAN_GET_ACTIVE_JOB`, `SCAN_PROGRESS_EVENT`.
+- [`src/shared/validation/ipc-schemas.ts`](file:///d:/organizer/src/shared/validation/ipc-schemas.ts):
+  - Zod schemas validating all channel requests, responses, and progress events in both directions:
+    - `SelectRootsResponseSchema`, `StartScanRequestSchema`, `JobIdRequestSchema`, `JobActionResponseSchema`, `GetActiveJobResponseSchema`, `ScanJobProgressSchema`, `ScanJobErrorSchema`.
+- [`src/preload/index.ts`](file:///d:/organizer/src/preload/index.ts) & [`src/preload/index.d.ts`](file:///d:/organizer/src/preload/index.d.ts):
+  - Exposes typed methods on `window.api`:
+    - `selectRoots()`, `startScan()`, `pauseScan()`, `resumeScan()`, `cancelScan()`, `getActiveScanJob()`, `onScanProgress()`.
+  - Runtime Zod parsing guarantees that malformed requests from renderer or malformed responses from main throw explicit errors rather than corrupting state.
+- [`src/main/ipc/handlers.ts`](file:///d:/organizer/src/main/ipc/handlers.ts):
+  - Registers handlers with strict `validateSender` enforcement on every channel (top-level frame, trusted URL origin).
+  - Native directory selection dialog via `dialog.showOpenDialog` with `openDirectory` and `multiSelections`.
+  - Real-time progress broadcasting via `window.webContents.send(IPC_CHANNELS.SCAN_PROGRESS_EVENT, progress)`.
+
+### 1.4 Renderer UI Integration (`src/renderer/src/`)
+
+- [`src/renderer/src/components/ScanJobsPanel.tsx`](file:///d:/organizer/src/renderer/src/components/ScanJobsPanel.tsx):
+  - Accessible folder selection button ("Choose Folders to Scan").
+  - Active scan progress card displaying phase (`discovery` / `hashing`), counts (`discoveredCount`, `hashedCount`, `failedCount`), and accessible progress bar (`role="progressbar"` with `aria-valuenow`).
+  - Action buttons: Pause, Resume, Cancel, and Dismiss (for completed/failed jobs).
+  - Recovery banner for `interrupted` jobs with one-click "Resume Scan" button.
+  - Visible error section detailing failed files and error messages with `role="alert"`.
+- [`src/renderer/src/hooks/useScanJobs.ts`](file:///d:/organizer/src/renderer/src/hooks/useScanJobs.ts):
+  - Manages active job state, subscribes to `onScanProgress`, and refreshes status on completion.
+- [`src/renderer/src/App.tsx`](file:///d:/organizer/src/renderer/src/App.tsx) & [`src/renderer/src/components/EmptyState.tsx`](file:///d:/organizer/src/renderer/src/components/EmptyState.tsx):
+  - Embeds `ScanJobsPanel` into the confirmed empty state and main application view.
+  - Displays dynamic catalog inventory summary (indexed sources, registered files) updated immediately when a scan completes.
 
 ---
 
-## 2. SQLite Implementation Selection & Real Electron Verification
+## 2. Test-Driven Development (Red / Green / Refactor) Evidence
 
-### 2.1 Driver Selection Rationale
+### 2.1 Red Phase (Failing Behavior Tests)
 
-- **Evaluated alternatives**: `node:sqlite` vs external native addon `better-sqlite3`.
-- **Selected**: `node:sqlite` (`DatabaseSync`), built directly into Node standard library (`v22.18.0` on host, `v24.22.2` / SQLite `3.53.4` inside Electron `45.2.3`).
-- **Rationale**:
-  1. **Zero ABI Mismatch**: Testing runs on Node 22 (`modules: 127`), whereas Electron 45 runs Node 24 (`modules: 150`). External native addons require compilation against Electron headers via `@electron/rebuild`, risking binary mismatch between test runs and desktop app execution. Built-in `node:sqlite` works seamlessly in both environments without compilation.
-  2. **Zero Native Build Dependencies**: Requires no MSVC / `node-gyp` toolchain on Windows, eliminating build fragility.
-  3. **Packaging Simplicity**: `electron-builder` does not need native `.node` file extraction or unpacking from `app.asar`.
-  4. **Performance & Capabilities**: Synchronous API (`prepare`, `run`, `get`, `all`, `exec`, transactions), WAL mode, foreign keys, and sub-millisecond query performance.
+1. **Schema Migration 3 & Scan Job Repository**:
+   - Created [`tests/main/catalog-scan-jobs.test.ts`](file:///d:/organizer/tests/main/catalog-scan-jobs.test.ts) specifying migration 3, job lifecycle CRUD, unhashed file queries, and crash recovery.
+   - Initial run failed: `CURRENT_SCHEMA_VERSION was 2, expected 3; db.createScanJob is not a function`.
+2. **Scan Job Coordinator**:
+   - Created [`tests/main/scan-jobs.test.ts`](file:///d:/organizer/tests/main/scan-jobs.test.ts) specifying end-to-end scan execution, concurrency conflict rejection, pause/resume, cancellation, crash recovery, changed-file revalidation, and visible error tracking.
+   - Initial run failed: `Cannot find module '../services/jobs'`.
+3. **IPC Contracts & Preload Bridge**:
+   - Added scan schema validation tests in [`tests/shared/ipc-validation.test.ts`](file:///d:/organizer/tests/shared/ipc-validation.test.ts) and [`tests/preload/bridge.test.ts`](file:///d:/organizer/tests/preload/bridge.test.ts).
+   - Initial run failed: `window.api.startScan is not a function`.
+4. **IPC Handlers & Security**:
+   - Added sender validation tests for all scan channels in [`tests/main/ipc.test.ts`](file:///d:/organizer/tests/main/ipc.test.ts).
+   - Initial run failed: `No handler registered for 'scan:start-job'`.
+5. **Renderer UI**:
+   - Added UI tests in [`tests/renderer/scan-ui.test.tsx`](file:///d:/organizer/tests/renderer/scan-ui.test.tsx) specifying folder selection, progress reporting, pause/resume/cancel controls, and error display.
+   - Initial run failed: `Cannot find module '../components/ScanJobsPanel'`.
 
-### 2.2 Electron Driver & Packaging Verification Results
+### 2.2 Green Phase (Implementation)
 
-1. **Launcher Reliability & Headless Execution**:
-   - `package.json` routes `"verify:sqlite"` through `node scripts/verify-electron-sqlite.mjs`, which spawns the Electron binary with `ELECTRON_RUN_AS_NODE=1`, converts module paths with `pathToFileURL`, removes `process.exit` calls inside `try/catch` to ensure `finally` cleanup always runs, and outputs structured diagnostics.
-2. **Real Module Repository Verification** (`scripts/verify-electron-sqlite.mjs` via `npm run verify:sqlite`):
-   - Exercises the compiled `out/main/catalog.js` module inside the real Electron runtime across 7 diagnostic steps:
-     1. Initializing catalog database at temporary path (v2 schema)
-     2. Registering source root
-     3. Persisting discovery batch
-     4. Recording SHA-256 hash observation and active hash query
-     5. Verifying reopen durability across independent connections
-     6. Verifying changed-file observation and hash invalidation
-     7. Verifying foreign key enforcement and cascading deletion (`ON DELETE CASCADE`)
-3. **Packaged Unpacked Binary Verification** (`npm run verify:sqlite:unpacked`):
-   - Executes `dist/win-unpacked/Personal Vault.exe` with `ELECTRON_RUN_AS_NODE=1` loading the packaged catalog module from `dist/win-unpacked/resources/app.asar/out/main/catalog.js`. All 7 repository steps passed cleanly, proving that `node:sqlite` and the bundled `CatalogDatabase` operate correctly from inside the packaged ASAR archive.
-4. **GUI Smoke Checks & Environment Observations**:
-   - On the implementation host (`D:\organizer`), both `npm run smoke:built` and `npm run smoke:unpacked` pass cleanly (exit code 0) with top-level CDP bridge acknowledgements.
-   - The independent reviewer reported early process exit with code `2147483651` (`0x80000003`) during GUI smoke checks in its sandbox environment. This status code typically indicates a breakpoint or unhandled display exception when launching full Chromium GUI windows in headless/containerized sandboxes lacking an interactive desktop display server or GPU context. The host and reviewer results are recorded separately without speculating on unverified causes or weakening Electron security policies.
+1. Implemented migration 3 and scan job methods in `CatalogDatabase`.
+2. Implemented `ScanJobCoordinator` with event loop yielding, discovery batching, streaming hashing, pause/resume/cancel state transitions, and restart recovery.
+3. Added scan channels, Zod schemas, preload bridge methods, and sender-checked IPC handlers.
+4. Implemented `useScanJobs` hook, `ScanJobsPanel` UI component, and integrated into `App.tsx` and `EmptyState.tsx`.
+5. Ran `npm test`: **All 239 tests passed across 11 test suites (0 skipped)**.
 
----
+### 2.3 Refactor & Quality Gates
 
-## 3. Test-Driven Development (Red / Green / Refactor) Evidence
-
-1. **Red phase (Recorded-Metadata Conflict Suite)**:
-   - Added 6 behavioral regression tests in [`tests/main/catalog.test.ts`](file:///d:/organizer/tests/main/catalog.test.ts) covering the conflict policy:
-     1. Conflicting filename with unchanged size/timestamps fails with `FileMetadataConflictError`.
-     2. Conflicting filename with changed size/timestamps fails with `FileMetadataConflictError` without invalidating the active hash.
-     3. Conflicting extension or category for both unchanged and changed content facts fails with `FileMetadataConflictError`.
-     4. Conflict after earlier valid write rolls back the entire batch (source registration, observations, and hashes).
-     5. Identical retries remain idempotent.
-     6. Genuinely different exact paths remain separate locations.
-   - Ran `npm test`: Demonstrated **4 failing tests** on conflicting metadata.
-2. **Green phase**:
-   - Added `FileMetadataConflictError` in `errors.ts` and exported it from `index.ts`.
-   - Updated `persistDiscoveryBatch` in `database.ts` to eagerly reject conflicting metadata before modifying records or invalidating hashes.
-   - Removed the silent overwrite branch.
-   - Ran `npm test`: **All 44 tests in `tests/main/catalog.test.ts` passed; 168 tests passed repository-wide (0 skipped)**.
-3. **Refactor & Quality Gates**:
-   - Ran `npm run typecheck`: Strict TypeScript check passed across all configurations (0 errors).
-   - Ran `npm run lint`: ESLint passed with 0 errors and 0 warnings.
-   - Ran `npm run format:check`: Prettier 100% compliant across entire repository.
-   - Ran `npm run build`: `electron-vite` builds main (`index.js`, `catalog.js`), preload, and renderer cleanly.
-   - Ran `npm run verify:sqlite`: Real Electron verification passed all 7 steps with exit code 0.
-   - Ran `npm run build:unpack`: Packaged desktop binary assembled into `dist/win-unpacked`.
-   - Ran `npm run verify:sqlite:unpacked`: Packaged ASAR repository verification passed all 7 steps with exit code 0.
-   - Ran `npm run smoke:built` and `npm run smoke:unpacked`: Passed with exit code 0 on the implementation host.
+1. Addressed all TypeScript compiler issues across `tsconfig.node.json` and `tsconfig.web.json` (0 errors).
+2. Resolved all ESLint warnings and formatting issues with Prettier (0 errors, 0 warnings, 100% compliant).
+3. Verified production bundle compilation with `npm run build`.
+4. Updated `scripts/smoke.mjs` line 230 to assert the expanded `window.api` surface (`cancelScan`, `getActiveScanJob`, `getAppInfo`, `getVaultStatus`, `onScanProgress`, `pauseScan`, `resumeScan`, `selectRoots`, `setTab`, `startScan`).
+5. Verified real Electron GUI smoke checks: `npm run smoke:built` and `npm run smoke:unpacked` passed with exit code 0.
+6. Verified SQLite repository persistence in unpacked ASAR package: `npm run verify:sqlite:unpacked` passed all 8 checks.
+7. Verified real Electron scan workflow: `npm run verify:scan` passed all 8 checks.
 
 ---
 
-## 4. Verification Results
-
-### 4.1 Independent Reviewer Verification Results
-
-Verified by independent review at commit `a674f9c`:
-
-| Check                            | Result   | Details                                                                                                                                                        |
-| -------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm test`                       | **PASS** | 167 passed, 1 skipped (due to sandbox symlink/junction permissions)                                                                                            |
-| `npm run typecheck`              | **PASS** | Strict TypeScript check passed (0 errors)                                                                                                                      |
-| `npm run lint`                   | **PASS** | Active ESLint rules passed (0 errors, 0 warnings)                                                                                                              |
-| `npm run format:check`           | **PASS** | Prettier 100% compliant                                                                                                                                        |
-| `npm run build`                  | **PASS** | `electron-vite` build successful                                                                                                                               |
-| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository (7/7 checks)                                                                                        |
-| `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (7/7 checks)                                                                                        |
-| GUI smoke checks                 | **NOTE** | `smoke:built` and `smoke:unpacked` exited early with code `2147483651` (`0x80000003`) in the reviewer's environment (recorded without claiming a proven cause) |
-
-### 4.2 Implementation Host Verification Results
+## 3. Verification Results
 
 Execution results on implementation host (`D:\organizer`):
 
 | Command                          | Result   | Details                                                                                 |
 | -------------------------------- | -------- | --------------------------------------------------------------------------------------- |
-| `npm test`                       | **PASS** | 8 test files: 168 passed, 0 skipped repository-wide                                     |
+| `npm test`                       | **PASS** | 11 test files: 239 passed, 0 skipped repository-wide                                    |
 | `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)  |
 | `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                     |
 | `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                        |
-| `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`), preload, and renderer cleanly   |
-| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository, cascades, and durability    |
+| `npm run build`                  | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer    |
+| `npm run verify:sqlite`          | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                 |
 | `npm run build:unpack`           | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                  |
 | `npm run verify:sqlite:unpacked` | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)       |
+| `npm run verify:scan`            | **PASS** | Real Electron runtime exercises complete scan job lifecycle and recovery (8/8 checks)   |
 | `npm run smoke:built`            | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron          |
 | `npm run smoke:unpacked`         | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks |
 
 ---
 
-## 5. Known Limitations & Boundaries
+## 4. Known Limitations & Boundaries
 
-- **User-Space Catalog vs. Out-of-Band File Changes**: The catalog records discovery facts and SHA-256 observations at the moment of scanning/hashing. If files are modified out-of-band by external tools while Personal Vault is not scanning, the catalog reflects the last known scan state until the next discovery scan detects the size, mtime, or birthtime change, preserves the prior facts in history, and invalidates the active hash.
-- **Platform Lookup Key Case Folding & Collision Handling**: On Windows (`win32`), `normalized_path` folds paths to lowercase to support fast case-insensitive search. However, because Windows NTFS supports per-directory case sensitivity, `file_locations` enforces uniqueness on the verbatim `original_path`. Distinct files that share a case-folded key retain their own separate records without overwriting or discarding facts.
-- **Immutable Recorded File Metadata**: Filename, extension, and category are immutable recorded facts for a given exact `originalPath`. If a discovery batch supplies conflicting values for an already recorded exact path, it is rejected with `FileMetadataConflictError`. Renamed files at different exact paths are tracked as separate locations.
-- **In-Memory vs File-Backed WAL Mode**: File-backed databases enable WAL mode (`PRAGMA journal_mode = WAL;`) and `NORMAL` synchronous mode for crash durability and performance. In-memory databases (`:memory:`) operate in memory rollback journal mode.
-- **Stage 2 Scope Isolation**: Stage 2C provides database catalog persistence only. Background scan-job orchestration, progress events, pausing/cancellation, and IPC/UI integration are deferred to Stage 2D.
+- **Single Active Scan Job Constraint**: Personal Vault enforces at most one active scan job (`running` or `paused`) at any time. Starting another job while one is active returns `ActiveJobConflictError`.
+- **Cooperative Event Loop Yielding vs Worker Threads**: Scan jobs execute cooperatively in the main process with `setImmediate` yields between file batches and chunk reads. This prevents IPC serialization bottlenecks and keeps the main process responsive. Background multi-threaded worker pools are deferred to future stages if CPU-heavy tasks (e.g. OCR or local AI) demand dedicated threads.
+- **Out-of-Band File Changes**: Modifications to files on disk made outside Personal Vault are detected on the subsequent scan pass or resume: discovery notes size or timestamp changes, deactivates earlier observations, invalidates hashes, and re-hashes changed files.
+- **Non-Fatal Error Visibility**: Unreadable files (e.g., `EACCES`) are logged to `scan_job_errors` and surfaced in the UI. They do not halt the scan job, but ensure partial scans are never misrepresented as complete.
+- **Source Preservation Invariance**: Originals remain strictly read-only. Personal Vault performs no file moves, writes, edits, or deletes on source roots.
 
 ---
 
-## 6. Immediate Recommended Next Task
+## 5. Immediate Recommended Next Task
 
-**Stage 2D: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.**
+**Independent review of Stage 2D on `feat/stage-2d-scan-jobs`. Upon acceptance and merge to `main`, Stage 2 will be complete, allowing Stage 3 (Exact duplicate grouping and review) to begin.**

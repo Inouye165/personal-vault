@@ -44,7 +44,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve('src/main/index.ts'),
-          catalog: resolve('src/main/services/catalog/index.ts')
+          catalog: resolve('src/main/services/catalog/index.ts'),
+          jobs: resolve('src/main/services/jobs/index.ts')
         }
       }
     }

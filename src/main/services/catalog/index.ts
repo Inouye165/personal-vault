@@ -39,5 +39,14 @@ export type {
   DuplicateGroupOptions,
   PaginatedResult,
   DuplicateGroup,
-  CatalogStats
+  CatalogStats,
+  ScanJobStatus,
+  ScanJobPhase,
+  ScanJobRecord,
+  ScanJobErrorRecord,
+  CreateScanJobInput,
+  UpdateScanJobProgressInput,
+  RecordScanJobErrorInput,
+  UnhashedFileRecord,
+  UnhashedCountResult
 } from './types'

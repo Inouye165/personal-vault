@@ -4,6 +4,8 @@ import { registerIpcHandlers } from './ipc/handlers'
 import { createSenderValidator } from './ipc/sender'
 import { resolveAppLocation, secureWebContents } from './navigation'
 import { setupSecurityPolicies } from './security'
+import { CatalogDatabase } from './services/catalog'
+import { ScanJobCoordinator } from './services/jobs'
 
 const documentPath = join(__dirname, '../renderer/index.html')
 
@@ -15,6 +17,8 @@ const location = resolveAppLocation({
 })
 
 let mainWindow: BrowserWindow | null = null
+let catalog: CatalogDatabase | null = null
+let coordinator: ScanJobCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -62,19 +66,37 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     setupSecurityPolicies(location)
+
+    const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
+    catalog = CatalogDatabase.open({ catalogPath })
+    coordinator = new ScanJobCoordinator({ catalog })
+    await coordinator.initialize()
+
     registerIpcHandlers({
       validateSender: createSenderValidator({
         getTrustedWebContentsId: () => mainWindow?.webContents.id,
         location
-      })
+      }),
+      catalog,
+      coordinator,
+      getMainWindow: () => mainWindow
     })
     createWindow()
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
+  })
+
+  app.on('before-quit', () => {
+    if (coordinator?.hasActiveJob()) {
+      void coordinator.cancelActiveJob()
+    }
+    if (catalog && !catalog.isClosed()) {
+      catalog.close()
+    }
   })
 
   app.on('window-all-closed', () => {

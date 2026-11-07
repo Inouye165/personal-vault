@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 2
+export const CURRENT_SCHEMA_VERSION = 3
 
 interface Migration {
   readonly version: number
@@ -229,6 +229,47 @@ const MIGRATIONS: readonly Migration[] = [
         CREATE INDEX idx_file_locations_source ON file_locations(source_id);
         CREATE INDEX idx_file_locations_category ON file_locations(category);
         CREATE INDEX idx_file_locations_normalized_path ON file_locations(normalized_path);
+      `)
+    }
+  },
+  {
+    version: 3,
+    name: 'scan_jobs_and_checkpoints',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS scan_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          status TEXT NOT NULL CHECK (status IN ('running', 'paused', 'cancelled', 'interrupted', 'failed', 'completed')),
+          roots_json TEXT NOT NULL,
+          phase TEXT NOT NULL CHECK (phase IN ('discovery', 'hashing', 'completed')),
+          discovered_count INTEGER NOT NULL DEFAULT 0 CHECK (discovered_count >= 0),
+          hashed_count INTEGER NOT NULL DEFAULT 0 CHECK (hashed_count >= 0),
+          total_files_to_hash INTEGER NOT NULL DEFAULT 0 CHECK (total_files_to_hash >= 0),
+          total_bytes INTEGER NOT NULL DEFAULT 0 CHECK (total_bytes >= 0),
+          hashed_bytes INTEGER NOT NULL DEFAULT 0 CHECK (hashed_bytes >= 0),
+          skipped_count INTEGER NOT NULL DEFAULT 0 CHECK (skipped_count >= 0),
+          error_count INTEGER NOT NULL DEFAULT 0 CHECK (error_count >= 0),
+          error_message TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          started_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scan_jobs_status ON scan_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_scan_jobs_created ON scan_jobs(created_at_ms DESC);
+
+        CREATE TABLE IF NOT EXISTS scan_job_errors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id INTEGER NOT NULL REFERENCES scan_jobs(id) ON DELETE CASCADE,
+          path TEXT NOT NULL,
+          code TEXT NOT NULL,
+          message TEXT NOT NULL,
+          phase TEXT NOT NULL CHECK (phase IN ('discovery', 'hashing')),
+          occurred_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scan_job_errors_job ON scan_job_errors(job_id);
       `)
     }
   }

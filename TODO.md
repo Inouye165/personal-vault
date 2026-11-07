@@ -30,9 +30,9 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 ## Stage 2: Read-Only Discovery, Metadata Inventory, and Resumable Scan Jobs
 
-Status: **incomplete — Stage 2A, Stage 2B, and Stage 2C complete (Stage 2C independently accepted at `a674f9c`); Stage 2D not started** (see HANDOFF.md).
+Status: **complete for Stage 2D — awaiting independent review; Stage 2 complete pending acceptance** (see HANDOFF.md).
 
-Verification: implementation host **168 passed, 0 skipped** across all 8 test files, with strict typecheck, lint, formatting, production build, real Electron smoke checks (built, unpacked), Electron SQLite repository verification (`verify:sqlite`), and unpacked ASAR package verification (`verify:sqlite:unpacked`) passed. Independent review verified **167 passed, 1 skipped** (sandbox junction permissions), with typecheck, lint, formatting, build, and both Electron SQLite repository checks passed.
+Verification: implementation host **239 passed, 0 skipped** across all 11 test files, with strict typecheck, lint, formatting, production build, real Electron smoke checks (built, unpacked), Electron SQLite repository verification (`verify:sqlite`), unpacked ASAR package verification (`verify:sqlite:unpacked`), and Electron scan workflow verification (`verify:scan`) passed.
 
 - [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
 - [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, validated resource limits (`resolveDiscoveryLimits` enforcing positive safe integers for `maxPendingDirectories`, `maxVisitedDirectories`, and collector-only `maxCollectedRecords`), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.
@@ -40,10 +40,10 @@ Verification: implementation host **168 passed, 0 skipped** across all 8 test fi
 - [x] **Stage 2A**: Configurable candidate photo/document extension policy (including `.md` and `.txt`) with documented source-root and subdirectory exclusion precedence (`excludedPaths` including ancestor exclusions > `excludedDirectoryNames` > `softwareClutterDirectoryNames` > `hiddenAndSystemNames` / dot-entries).
 - [x] **Stage 2A**: Factual filesystem metadata inventory (original path, filename, extension, byte size, honest nullable creation and modification times) and verified source preservation.
 - [x] **Stage 2A**: Independent review accepted at `5dd6320`.
-- [x] **Stage 2B**: Read-only streaming SHA-256 content hashing (`hashFile`, bounded chunked reads, mandatory non-empty approved roots, sub-ms timestamp preservation, post-read pathname revalidation, handle close failure reporting, AbortSignal cancellation, and deterministic cleanup).
+- [x] **Stage 2B**: Read-only streaming SHA-256 content hashing (`hashFile`, bounded chunked reads, mandatory non-empty approved roots, sub-ms timestamp precision, post-read pathname revalidation, handle close failure reporting, AbortSignal cancellation, and deterministic cleanup).
 - [x] **Stage 2B**: Independent review accepted at `e4488a2`.
 - [x] **Stage 2C**: SQLite catalog schema for recorded file facts and inventory persistence (`CatalogDatabase`, `node:sqlite` driver, explicit caller-supplied paths, versioned migrations, foreign key cascades, normalized lookup keys vs. verbatim original paths, honest nullable timestamps, immutable discovery observations with changed-file history preservation and hash invalidation, immutable recorded metadata conflict policy, bounded paginated reads, deterministic connection cleanup). Independent review accepted at `a674f9c`.
-- [ ] **Stage 2D (next)**: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.
+- [x] **Stage 2D**: Resumable background scan jobs, SQLite job state & checkpoint persistence (migration 3 `scan_jobs` and `scan_job_errors`), pause/resume, cancellation, restart crash recovery (`markRunningJobsAsInterrupted`), out-of-band changed file revalidation, visible error lists, typed IPC contracts with bidirectional Zod validation and sender authorization, accessible renderer controls with progress indicators, and verified source preservation. Awaiting independent review.
 
 ---
 

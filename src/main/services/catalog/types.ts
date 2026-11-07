@@ -118,6 +118,79 @@ export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly sha256?: string
 }
 
+export type ScanJobStatus =
+  'running' | 'paused' | 'cancelled' | 'interrupted' | 'failed' | 'completed'
+
+export type ScanJobPhase = 'discovery' | 'hashing' | 'completed'
+
+export interface ScanJobRecord {
+  readonly id: number
+  readonly status: ScanJobStatus
+  readonly phase: ScanJobPhase
+  readonly roots: readonly string[]
+  readonly discoveredCount: number
+  readonly hashedCount: number
+  readonly totalFilesToHash: number
+  readonly totalBytes: number
+  readonly hashedBytes: number
+  readonly skippedCount: number
+  readonly errorCount: number
+  readonly errorMessage: string | null
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+  readonly startedAtMs: number
+  readonly completedAtMs: number | null
+}
+
+export interface ScanJobErrorRecord {
+  readonly id: number
+  readonly jobId: number
+  readonly path: string
+  readonly code: string
+  readonly message: string
+  readonly phase: 'discovery' | 'hashing'
+  readonly occurredAtMs: number
+}
+
+export interface CreateScanJobInput {
+  readonly roots: readonly string[]
+  readonly nowMs?: number
+}
+
+export interface UpdateScanJobProgressInput {
+  readonly phase?: ScanJobPhase
+  readonly discoveredCount?: number
+  readonly hashedCount?: number
+  readonly totalFilesToHash?: number
+  readonly totalBytes?: number
+  readonly hashedBytes?: number
+  readonly skippedCount?: number
+  readonly errorCount?: number
+  readonly nowMs?: number
+}
+
+export interface RecordScanJobErrorInput {
+  readonly path: string
+  readonly code: string
+  readonly message: string
+  readonly phase: 'discovery' | 'hashing'
+  readonly occurredAtMs?: number
+}
+
+export interface UnhashedFileRecord {
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly originalPath: string
+  readonly byteSize: number
+  readonly filesystemBirthtimeMs: number | null
+  readonly filesystemMtimeMs: number | null
+}
+
+export interface UnhashedCountResult {
+  readonly count: number
+  readonly totalBytes: number
+}
+
 export interface DuplicateGroupOptions extends PaginationOptions {
   readonly maxLocationsPerGroup?: number
 }

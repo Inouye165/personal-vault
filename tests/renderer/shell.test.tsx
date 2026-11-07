@@ -11,7 +11,14 @@ const healthyApi = (): VaultApi => ({
     isPackaged: false
   })),
   getVaultStatus: vi.fn(async () => ({ sourceCount: 0, itemCount: 0, isReady: true })),
-  setTab: vi.fn(async () => true)
+  setTab: vi.fn(async () => true),
+  selectRoots: vi.fn(async () => ({ cancelled: true, rootPaths: [] })),
+  startScan: vi.fn(async () => ({ success: true })),
+  pauseScan: vi.fn(async () => ({ success: true })),
+  resumeScan: vi.fn(async () => ({ success: true })),
+  cancelScan: vi.fn(async () => ({ success: true })),
+  getActiveScanJob: vi.fn(async () => ({ job: null })),
+  onScanProgress: vi.fn(() => () => {})
 })
 
 const mount = async () => {

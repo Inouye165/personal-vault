@@ -227,7 +227,18 @@ async function main() {
     const bridge = await evaluate(cdp, BRIDGE_PROBE)
     if (!bridge.hasApi) fail('window.api is missing')
     else {
-      const expectMethods = ['getAppInfo', 'getVaultStatus', 'setTab']
+      const expectMethods = [
+        'cancelScan',
+        'getActiveScanJob',
+        'getAppInfo',
+        'getVaultStatus',
+        'onScanProgress',
+        'pauseScan',
+        'resumeScan',
+        'selectRoots',
+        'setTab',
+        'startScan'
+      ]
       if (JSON.stringify(bridge.methods) !== JSON.stringify(expectMethods)) {
         fail(`window.api methods were ${JSON.stringify(bridge.methods)}`)
       }

@@ -25,11 +25,20 @@ import type {
   DuplicateGroupOptions,
   HashObservationRecord,
   BatchPersistenceResult,
+  CreateScanJobInput,
   PaginatedResult,
   PaginationOptions,
   QueryFileLocationsOptions,
   RecordHashObservationInput,
-  SourceRecord
+  RecordScanJobErrorInput,
+  ScanJobErrorRecord,
+  ScanJobPhase,
+  ScanJobRecord,
+  ScanJobStatus,
+  SourceRecord,
+  UnhashedCountResult,
+  UnhashedFileRecord,
+  UpdateScanJobProgressInput
 } from './types'
 
 interface RawFileRow {
@@ -80,6 +89,35 @@ interface RawSourceRow {
   normalized_root_path: string
   created_at_ms: number
   updated_at_ms: number
+}
+
+interface RawScanJobRow {
+  id: number
+  status: ScanJobStatus
+  roots_json: string
+  phase: ScanJobPhase
+  discovered_count: number
+  hashed_count: number
+  total_files_to_hash: number
+  total_bytes: number
+  hashed_bytes: number
+  skipped_count: number
+  error_count: number
+  error_message: string | null
+  created_at_ms: number
+  updated_at_ms: number
+  started_at_ms: number
+  completed_at_ms: number | null
+}
+
+interface RawScanJobErrorRow {
+  id: number
+  job_id: number
+  path: string
+  code: string
+  message: string
+  phase: 'discovery' | 'hashing'
+  occurred_at_ms: number
 }
 
 export const MAX_BATCH_SIZE = 1000
@@ -1090,5 +1128,328 @@ export class CatalogDatabase {
       hashedAtMs: row.hashed_at_ms,
       isActive: row.is_active === 1
     }
+  }
+
+  private mapScanJobRow(row: RawScanJobRow): ScanJobRecord {
+    let roots: string[]
+    try {
+      roots = JSON.parse(row.roots_json) as string[]
+    } catch {
+      roots = []
+    }
+    return {
+      id: row.id,
+      status: row.status,
+      phase: row.phase,
+      roots,
+      discoveredCount: row.discovered_count,
+      hashedCount: row.hashed_count,
+      totalFilesToHash: row.total_files_to_hash,
+      totalBytes: row.total_bytes,
+      hashedBytes: row.hashed_bytes,
+      skippedCount: row.skipped_count,
+      errorCount: row.error_count,
+      errorMessage: row.error_message,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      startedAtMs: row.started_at_ms,
+      completedAtMs: row.completed_at_ms
+    }
+  }
+
+  private mapScanJobErrorRow(row: RawScanJobErrorRow): ScanJobErrorRecord {
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      path: row.path,
+      code: row.code,
+      message: row.message,
+      phase: row.phase,
+      occurredAtMs: row.occurred_at_ms
+    }
+  }
+
+  public createScanJob(input: CreateScanJobInput): ScanJobRecord {
+    this.assertOpen()
+    if (!Array.isArray(input.roots) || input.roots.length === 0) {
+      throw new TypeError('roots must be a non-empty array of strings')
+    }
+    for (const r of input.roots) {
+      if (typeof r !== 'string' || r.trim() === '') {
+        throw new TypeError('roots entries must be non-empty strings')
+      }
+    }
+    const now = input.nowMs ?? Date.now()
+    const rootsJson = JSON.stringify(input.roots)
+    const stmt = this.db.prepare(`
+      INSERT INTO scan_jobs (
+        status, roots_json, phase, discovered_count, hashed_count,
+        total_files_to_hash, total_bytes, hashed_bytes, skipped_count,
+        error_count, error_message, created_at_ms, updated_at_ms, started_at_ms, completed_at_ms
+      ) VALUES ('running', ?, 'discovery', 0, 0, 0, 0, 0, 0, 0, NULL, ?, ?, ?, NULL);
+    `)
+    const result = stmt.run(rootsJson, now, now, now)
+    const job = this.getScanJob(Number(result.lastInsertRowid))
+    if (!job) {
+      throw new Error('Failed to create scan job')
+    }
+    return job
+  }
+
+  public getScanJob(id: number): ScanJobRecord | null {
+    this.assertOpen()
+    validateSafeInteger(id, 'id', 1)
+    const stmt = this.db.prepare('SELECT * FROM scan_jobs WHERE id = ?;')
+    const row = stmt.get(id) as RawScanJobRow | undefined
+    return row ? this.mapScanJobRow(row) : null
+  }
+
+  public getLatestScanJob(): ScanJobRecord | null {
+    this.assertOpen()
+    const stmt = this.db.prepare(
+      'SELECT * FROM scan_jobs ORDER BY created_at_ms DESC, id DESC LIMIT 1;'
+    )
+    const row = stmt.get() as RawScanJobRow | undefined
+    return row ? this.mapScanJobRow(row) : null
+  }
+
+  public getActiveScanJob(): ScanJobRecord | null {
+    this.assertOpen()
+    const stmt = this.db.prepare(
+      "SELECT * FROM scan_jobs WHERE status IN ('running', 'paused', 'interrupted') ORDER BY created_at_ms DESC, id DESC LIMIT 1;"
+    )
+    const row = stmt.get() as RawScanJobRow | undefined
+    return row ? this.mapScanJobRow(row) : null
+  }
+
+  public updateScanJobProgress(id: number, input: UpdateScanJobProgressInput): void {
+    this.assertOpen()
+    validateSafeInteger(id, 'id', 1)
+    const now = input.nowMs ?? Date.now()
+    const fields: string[] = ['updated_at_ms = ?']
+    const values: SQLInputValue[] = [now]
+
+    if (input.phase !== undefined) {
+      fields.push('phase = ?')
+      values.push(input.phase)
+    }
+    if (input.discoveredCount !== undefined) {
+      validateSafeInteger(input.discoveredCount, 'discoveredCount', 0)
+      fields.push('discovered_count = ?')
+      values.push(input.discoveredCount)
+    }
+    if (input.hashedCount !== undefined) {
+      validateSafeInteger(input.hashedCount, 'hashedCount', 0)
+      fields.push('hashed_count = ?')
+      values.push(input.hashedCount)
+    }
+    if (input.totalFilesToHash !== undefined) {
+      validateSafeInteger(input.totalFilesToHash, 'totalFilesToHash', 0)
+      fields.push('total_files_to_hash = ?')
+      values.push(input.totalFilesToHash)
+    }
+    if (input.totalBytes !== undefined) {
+      validateSafeInteger(input.totalBytes, 'totalBytes', 0)
+      fields.push('total_bytes = ?')
+      values.push(input.totalBytes)
+    }
+    if (input.hashedBytes !== undefined) {
+      validateSafeInteger(input.hashedBytes, 'hashedBytes', 0)
+      fields.push('hashed_bytes = ?')
+      values.push(input.hashedBytes)
+    }
+    if (input.skippedCount !== undefined) {
+      validateSafeInteger(input.skippedCount, 'skippedCount', 0)
+      fields.push('skipped_count = ?')
+      values.push(input.skippedCount)
+    }
+    if (input.errorCount !== undefined) {
+      validateSafeInteger(input.errorCount, 'errorCount', 0)
+      fields.push('error_count = ?')
+      values.push(input.errorCount)
+    }
+
+    values.push(id)
+    this.db.prepare(`UPDATE scan_jobs SET ${fields.join(', ')} WHERE id = ?;`).run(...values)
+  }
+
+  public updateScanJobStatus(
+    id: number,
+    status: ScanJobStatus,
+    options?: { errorMessage?: string; completedAtMs?: number; nowMs?: number }
+  ): void {
+    this.assertOpen()
+    validateSafeInteger(id, 'id', 1)
+    const now = options?.nowMs ?? Date.now()
+    const completedAt = options?.completedAtMs ?? (status === 'completed' ? now : null)
+    const errMsg = options?.errorMessage ?? null
+    this.db
+      .prepare(
+        `UPDATE scan_jobs
+         SET status = ?, error_message = COALESCE(?, error_message), completed_at_ms = COALESCE(?, completed_at_ms), updated_at_ms = ?
+         WHERE id = ?;`
+      )
+      .run(status, errMsg, completedAt, now, id)
+  }
+
+  public recordScanJobError(jobId: number, input: RecordScanJobErrorInput): void {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    const occurredAt = input.occurredAtMs ?? Date.now()
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO scan_job_errors (job_id, path, code, message, phase, occurred_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?);`
+        )
+        .run(jobId, input.path, input.code, input.message, input.phase, occurredAt)
+      this.db
+        .prepare(
+          `UPDATE scan_jobs
+           SET error_count = error_count + 1, updated_at_ms = ?
+           WHERE id = ?;`
+        )
+        .run(occurredAt, jobId)
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // Suppress rollback errors
+      }
+      throw err
+    }
+  }
+
+  public getScanJobErrors(
+    jobId: number,
+    options?: { limit?: number }
+  ): readonly ScanJobErrorRecord[] {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    const limit = options?.limit ?? 100
+    validateSafeInteger(limit, 'limit', 1, MAX_PAGE_LIMIT)
+    const rows = this.db
+      .prepare('SELECT * FROM scan_job_errors WHERE job_id = ? ORDER BY id DESC LIMIT ?;')
+      .all(jobId, limit) as unknown as RawScanJobErrorRow[]
+    return rows.map((r) => this.mapScanJobErrorRow(r))
+  }
+
+  public markRunningJobsAsInterrupted(nowMs: number): number {
+    this.assertOpen()
+    const res = this.db
+      .prepare(
+        "UPDATE scan_jobs SET status = 'interrupted', updated_at_ms = ? WHERE status = 'running';"
+      )
+      .run(nowMs)
+    return Number(res.changes)
+  }
+
+  public getUnhashedFilesForRoots(
+    roots: readonly string[],
+    options?: PaginationOptions
+  ): readonly UnhashedFileRecord[] {
+    this.assertOpen()
+    if (!Array.isArray(roots) || roots.length === 0) return []
+    const normalizedRoots = roots.map((r) => normalizePathForLookup(r))
+    const placeholders = normalizedRoots.map(() => '?').join(', ')
+    const limit =
+      options?.limit !== undefined
+        ? validateSafeInteger(options.limit, 'limit', 1, MAX_PAGE_LIMIT)
+        : 1000
+    const offset =
+      options?.offset !== undefined ? validateSafeInteger(options.offset, 'offset', 0) : 0
+
+    const stmt = this.db.prepare(`
+      SELECT
+        fl.id AS file_location_id,
+        fl.original_path,
+        d.id AS discovery_observation_id,
+        d.byte_size,
+        d.filesystem_birthtime_ms,
+        d.filesystem_mtime_ms
+      FROM file_locations fl
+      JOIN sources s ON fl.source_id = s.id
+      JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      WHERE s.normalized_root_path IN (${placeholders})
+        AND h.id IS NULL
+      ORDER BY fl.id ASC
+      LIMIT ? OFFSET ?;
+    `)
+    const rows = stmt.all(...normalizedRoots, limit, offset) as Array<{
+      file_location_id: number
+      original_path: string
+      discovery_observation_id: number
+      byte_size: number
+      filesystem_birthtime_ms: number | null
+      filesystem_mtime_ms: number | null
+    }>
+    return rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      discoveryObservationId: r.discovery_observation_id,
+      originalPath: r.original_path,
+      byteSize: r.byte_size,
+      filesystemBirthtimeMs: r.filesystem_birthtime_ms,
+      filesystemMtimeMs: r.filesystem_mtime_ms
+    }))
+  }
+
+  public countUnhashedFilesForRoots(roots: readonly string[]): UnhashedCountResult {
+    this.assertOpen()
+    if (!Array.isArray(roots) || roots.length === 0) return { count: 0, totalBytes: 0 }
+    const normalizedRoots = roots.map((r) => normalizePathForLookup(r))
+    const placeholders = normalizedRoots.map(() => '?').join(', ')
+
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(d.byte_size), 0) AS total_bytes
+      FROM file_locations fl
+      JOIN sources s ON fl.source_id = s.id
+      JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      WHERE s.normalized_root_path IN (${placeholders})
+        AND h.id IS NULL;
+    `)
+    const row = stmt.get(...normalizedRoots) as { count: number; total_bytes: number }
+    return {
+      count: row.count,
+      totalBytes: row.total_bytes
+    }
+  }
+
+  public countSources(): number {
+    this.assertOpen()
+    const row = this.db.prepare('SELECT COUNT(*) as count FROM sources;').get() as { count: number }
+    return row.count
+  }
+
+  public countFileLocations(): number {
+    this.assertOpen()
+    const row = this.db.prepare('SELECT COUNT(*) as count FROM file_locations;').get() as {
+      count: number
+    }
+    return row.count
+  }
+
+  public getFileLocationByOriginalPath(originalPath: string): CatalogFileRecord | null {
+    this.assertOpen()
+    if (!originalPath || typeof originalPath !== 'string') {
+      throw new TypeError('originalPath must be a non-empty string')
+    }
+    const sql = `
+      SELECT
+        f.id, f.source_id, f.original_path, f.normalized_path, f.file_name, f.extension, f.category,
+        f.created_at_ms as first_discovered_at_ms, f.updated_at_ms as last_seen_at_ms,
+        d.id as discovery_observation_id, d.byte_size, d.filesystem_birthtime_ms,
+        d.filesystem_mtime_ms, d.inferred_capture_time_ms,
+        h.sha256 as active_hash, h.hashed_at_ms as active_hash_verified_at_ms
+      FROM file_locations f
+      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      WHERE f.original_path = ?;
+    `
+    const row = this.db.prepare(sql).get(originalPath) as unknown as RawFileRow | undefined
+    return row ? this.mapFileRow(row) : null
   }
 }

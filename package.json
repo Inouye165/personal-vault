@@ -14,6 +14,7 @@
     "smoke:unpacked": "node scripts/smoke.mjs --mode=unpacked",
     "verify:sqlite": "node scripts/verify-electron-sqlite.mjs",
     "verify:sqlite:unpacked": "node scripts/verify-electron-sqlite.mjs --mode=unpacked",
+    "verify:scan": "node scripts/verify-electron-scan.mjs",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

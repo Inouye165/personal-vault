@@ -264,6 +264,28 @@ async function runVerification(catalogModulePath) {
       throw new Error('Discovery observations were not cascade-deleted')
     }
 
+    // Step 8: Scan jobs creation, lifecycle, and recovery
+    console.log('  8. Verifying scan jobs lifecycle and restart recovery...')
+    const job = db.createScanJob({ roots: ['D:\\Photos'], nowMs: 1000 })
+    if (job.status !== 'running' || job.phase !== 'discovery') {
+      throw new Error(`Unexpected scan job initial state: ${job.status}/${job.phase}`)
+    }
+    db.updateScanJobProgress(job.id, { discoveredCount: 10, totalBytes: 50000, nowMs: 1500 })
+    db.updateScanJobStatus(job.id, 'paused', { nowMs: 2000 })
+    const pausedJob = db.getScanJob(job.id)
+    if (pausedJob.status !== 'paused' || pausedJob.discoveredCount !== 10) {
+      throw new Error('Scan job progress or status update failed')
+    }
+    db.updateScanJobStatus(job.id, 'running', { nowMs: 2500 })
+    const interruptedCount = db.markRunningJobsAsInterrupted(3000)
+    if (interruptedCount !== 1) {
+      throw new Error(`Expected 1 interrupted job, got ${interruptedCount}`)
+    }
+    const recovered = db.getScanJob(job.id)
+    if (recovered.status !== 'interrupted' || recovered.discoveredCount !== 10) {
+      throw new Error('Scan job restart recovery failed')
+    }
+
     success = true
     console.log(
       `[verify-sqlite] ALL CHECKS PASSED: CatalogDatabase operates correctly in Electron runtime (${isUnpackedMode ? 'unpacked' : 'built'}).`

@@ -186,7 +186,7 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
         const row = checkDb
           .prepare('SELECT MAX(version) as max_version FROM schema_migrations')
           .get() as { max_version: number }
-        expect(row.max_version).toBe(2)
+        expect(row.max_version).toBe(CURRENT_SCHEMA_VERSION)
       } finally {
         checkDb.close()
       }
@@ -315,7 +315,7 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
         const row = checkDb
           .prepare('SELECT MAX(version) as max_version FROM schema_migrations')
           .get() as { max_version: number }
-        expect(row.max_version).toBe(2)
+        expect(row.max_version).toBe(CURRENT_SCHEMA_VERSION)
       } finally {
         checkDb.close()
       }

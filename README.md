@@ -63,6 +63,8 @@ A visible window is **not** proof that the app works: a broken preload still sho
 npm run smoke:dev        # electron-vite dev server + Electron
 npm run build && npm run smoke:built
 npm run build:unpack && npm run smoke:unpacked
+npm run verify:sqlite    # real Electron SQLite driver and catalog repository verification
+npm run verify:scan      # real Electron end-to-end scan workflow and recovery verification
 ```
 
 Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.
