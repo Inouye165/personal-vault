@@ -24,13 +24,14 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
     }
   })
 
-  describe('Resource limit validation', () => {
+  describe('Resource limit validation and approved roots requirement', () => {
     it('rejects invalid chunkSizeBytes before opening files', async () => {
       const invalidChunks = [0, -1, 500, 1023, 16 * 1024 * 1024 + 1, NaN, Infinity, 1024.5]
       for (const chunk of invalidChunks) {
         await expect(
           hashFile({
             filePath: join(tempDir, 'dummy.txt'),
+            approvedRoots: [tempDir],
             limits: { chunkSizeBytes: chunk }
           })
         ).rejects.toThrow(RangeError)
@@ -43,6 +44,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
         await expect(
           hashFile({
             filePath: join(tempDir, 'dummy.txt'),
+            approvedRoots: [tempDir],
             limits: { maxFileSizeBytes: size }
           })
         ).rejects.toThrow(RangeError)
@@ -67,12 +69,87 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       await expect(
         hashFile({
           filePath: join(tempDir, 'dummy.txt'),
+          approvedRoots: [tempDir],
           limits: { chunkSizeBytes: -64 },
           fsAdapter: mockAdapter
         })
       ).rejects.toThrow(RangeError)
 
       expect(lstatCalled).toBe(false)
+    })
+
+    it('rejects missing or empty approvedRoots before filesystem access', async () => {
+      let lstatCalled = false
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat() {
+          lstatCalled = true
+          throw new Error('should not be called')
+        },
+        async realpath(p) {
+          return p
+        },
+        async open() {
+          throw new Error('should not be called')
+        }
+      }
+
+      // Missing approvedRoots
+      await expect(
+        hashFile({
+          filePath: join(tempDir, 'dummy.txt'),
+          // @ts-expect-error approvedRoots is required by type
+          approvedRoots: undefined,
+          fsAdapter: mockAdapter
+        })
+      ).rejects.toThrow(RangeError)
+
+      // Empty approvedRoots array
+      await expect(
+        hashFile({
+          filePath: join(tempDir, 'dummy.txt'),
+          approvedRoots: [],
+          fsAdapter: mockAdapter
+        })
+      ).rejects.toThrow(RangeError)
+
+      // Array with blank string
+      await expect(
+        hashFile({
+          filePath: join(tempDir, 'dummy.txt'),
+          approvedRoots: ['   '],
+          fsAdapter: mockAdapter
+        })
+      ).rejects.toThrow(RangeError)
+
+      expect(lstatCalled).toBe(false)
+    })
+
+    it('rejects approved root that is a regular file or does not exist', async () => {
+      const regularFileAsRoot = join(tempDir, 'file-root.txt')
+      await fs.writeFile(regularFileAsRoot, 'not a directory')
+      const targetFile = join(tempDir, 'target.txt')
+      await fs.writeFile(targetFile, 'content')
+
+      const result = await hashFile({
+        filePath: targetFile,
+        approvedRoots: [regularFileAsRoot]
+      })
+
+      expect(result.status).toBe('rejected')
+      if (result.status === 'rejected') {
+        expect(result.reason).toBe('outside_approved_root')
+      }
+
+      const missingRoot = join(tempDir, 'nonexistent-root')
+      const result2 = await hashFile({
+        filePath: targetFile,
+        approvedRoots: [missingRoot]
+      })
+
+      expect(result2.status).toBe('rejected')
+      if (result2.status === 'rejected') {
+        expect(result2.reason).toBe('outside_approved_root')
+      }
     })
   })
 
@@ -81,7 +158,10 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       const filePath = join(tempDir, 'empty.txt')
       await fs.writeFile(filePath, Buffer.alloc(0))
 
-      const result = await hashFile({ filePath })
+      const result = await hashFile({
+        filePath,
+        approvedRoots: [tempDir]
+      })
       expect(result.status).toBe('success')
       if (result.status === 'success') {
         expect(result.sha256).toBe(
@@ -100,7 +180,10 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const expectedSha256 = createHash('sha256').update(payload).digest('hex')
 
-      const result = await hashFile({ filePath })
+      const result = await hashFile({
+        filePath,
+        approvedRoots: [tempDir]
+      })
       expect(result.status).toBe('success')
       if (result.status === 'success') {
         expect(result.sha256).toBe(expectedSha256)
@@ -120,14 +203,17 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const res1 = await hashFile({
         filePath: file1,
+        approvedRoots: [tempDir],
         limits: { chunkSizeBytes: 1024 } // 1 KiB chunks
       })
       const res2 = await hashFile({
         filePath: file2,
+        approvedRoots: [tempDir],
         limits: { chunkSizeBytes: 32 * 1024 } // 32 KiB chunks
       })
       const resDefault = await hashFile({
-        filePath: file1 // default 64 KiB chunks
+        filePath: file1,
+        approvedRoots: [tempDir]
       })
 
       expect(res1.status).toBe('success')
@@ -157,7 +243,10 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const statBefore = await fs.stat(filePath)
 
-      const result = await hashFile({ filePath })
+      const result = await hashFile({
+        filePath,
+        approvedRoots: [tempDir]
+      })
       expect(result.status).toBe('success')
 
       const statAfter = await fs.stat(filePath)
@@ -187,7 +276,10 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
 
       if (linkCreated) {
-        const result = await hashFile({ filePath: linkFile })
+        const result = await hashFile({
+          filePath: linkFile,
+          approvedRoots: [tempDir]
+        })
         expect(result.status).toBe('rejected')
         if (result.status === 'rejected') {
           expect(result.reason).toBe('symbolic_link')
@@ -199,7 +291,10 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       const dirPath = join(tempDir, 'some-dir')
       await fs.mkdir(dirPath)
 
-      const result = await hashFile({ filePath: dirPath })
+      const result = await hashFile({
+        filePath: dirPath,
+        approvedRoots: [tempDir]
+      })
       expect(result.status).toBe('rejected')
       if (result.status === 'rejected') {
         expect(result.reason).toBe('not_regular_file')
@@ -283,6 +378,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath,
+        approvedRoots: [tempDir],
         limits: { maxFileSizeBytes: 500 }
       })
 
@@ -301,8 +397,9 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath,
+        approvedRoots: [tempDir],
         expectation: {
-          byteSize: stat.size + 10, // wrong expectation
+          byteSize: stat.size + 10,
           mtimeMs: stat.mtimeMs
         }
       })
@@ -320,9 +417,10 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath,
+        approvedRoots: [tempDir],
         expectation: {
           byteSize: stat.size,
-          mtimeMs: stat.mtimeMs - 5000 // changed mtime
+          mtimeMs: stat.mtimeMs - 5000
         }
       })
 
@@ -332,72 +430,6 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
     })
 
-    it('detects file modified while reading via mock adapter post-stat mismatch', async () => {
-      let readCount = 0
-      let closed = false
-
-      const fakeStats: ReadOnlyFileStats = {
-        size: 2048,
-        mtimeMs: 1000,
-        birthtimeMs: 500,
-        isFile: () => true,
-        isDirectory: () => false,
-        isSymbolicLink: () => false
-      }
-
-      const mockHandle: ReadOnlyFileHandle = {
-        async stat(): Promise<ReadOnlyFileStats> {
-          if (readCount > 0) {
-            // Stat after read reports modified mtime and size
-            return {
-              ...fakeStats,
-              size: 2500,
-              mtimeMs: 2000
-            }
-          }
-          return fakeStats
-        },
-        async read(buffer, offset): Promise<{ bytesRead: number }> {
-          readCount++
-          if (readCount === 1) {
-            buffer.fill(1, offset, offset + 1024)
-            return { bytesRead: 1024 }
-          }
-          if (readCount === 2) {
-            buffer.fill(2, offset, offset + 1024)
-            return { bytesRead: 1024 }
-          }
-          return { bytesRead: 0 }
-        },
-        async close(): Promise<void> {
-          closed = true
-        }
-      }
-
-      const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
-          return fakeStats
-        },
-        async realpath(p: string): Promise<string> {
-          return p
-        },
-        async open(): Promise<ReadOnlyFileHandle> {
-          return mockHandle
-        }
-      }
-
-      const result = await hashFile({
-        filePath: '/virtual/unstable.txt',
-        limits: { chunkSizeBytes: 1024 },
-        fsAdapter: mockAdapter
-      })
-
-      expect(result.status).toBe('file_changed')
-      expect(closed).toBe(true)
-      // Never return a partial digest
-      expect('sha256' in result).toBe(false)
-    })
-
     it('detects birthtime mismatch against discovery expectation', async () => {
       const filePath = join(tempDir, 'changed-birthtime.txt')
       await fs.writeFile(filePath, 'hello')
@@ -405,6 +437,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath,
+        approvedRoots: [tempDir],
         expectation: {
           byteSize: stat.size,
           mtimeMs: stat.mtimeMs,
@@ -415,6 +448,221 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       expect(result.status).toBe('file_changed')
       if (result.status === 'file_changed') {
         expect(result.reason).toBe('birthtime_modified_discovery')
+      }
+    })
+
+    it('detects fractional-millisecond mtime change between lstat and open', async () => {
+      let lstatCalled = false
+      let closed = false
+
+      const stat1: ReadOnlyFileStats = {
+        size: 100,
+        mtimeMs: 1000.1, // fractional ms
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const stat2: ReadOnlyFileStats = {
+        size: 100,
+        mtimeMs: 1000.2, // changed by 0.1 ms (flooring would erroneously treat them as 1000 === 1000)
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          lstatCalled = true
+          return stat1
+        },
+        async realpath(p: string): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          return {
+            async stat(): Promise<ReadOnlyFileStats> {
+              return stat2
+            },
+            async read(): Promise<{ bytesRead: number }> {
+              return { bytesRead: 0 }
+            },
+            async close(): Promise<void> {
+              closed = true
+            }
+          }
+        }
+      }
+
+      const result = await hashFile({
+        filePath: '/virtual/fractional.txt',
+        approvedRoots: ['/virtual'],
+        fsAdapter: mockAdapter
+      })
+
+      expect(lstatCalled).toBe(true)
+      expect(result.status).toBe('file_changed')
+      if (result.status === 'file_changed') {
+        expect(result.reason).toBe('mtime_modified_during_read')
+      }
+      expect(closed).toBe(true)
+    })
+
+    it('detects fractional-millisecond mtime change during read (pre vs post stat)', async () => {
+      let readCount = 0
+      let closed = false
+
+      const preStat: ReadOnlyFileStats = {
+        size: 1024,
+        mtimeMs: 2000.125,
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const postStat: ReadOnlyFileStats = {
+        size: 1024,
+        mtimeMs: 2000.875, // changed within same integer second
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          return preStat
+        },
+        async realpath(p: string): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          return {
+            async stat(): Promise<ReadOnlyFileStats> {
+              return readCount > 0 ? postStat : preStat
+            },
+            async read(buf, offset): Promise<{ bytesRead: number }> {
+              readCount++
+              if (readCount === 1) {
+                buf.fill(0, offset, offset + 1024)
+                return { bytesRead: 1024 }
+              }
+              return { bytesRead: 0 }
+            },
+            async close(): Promise<void> {
+              closed = true
+            }
+          }
+        }
+      }
+
+      const result = await hashFile({
+        filePath: '/virtual/post-frac.txt',
+        approvedRoots: ['/virtual'],
+        limits: { chunkSizeBytes: 1024 },
+        fsAdapter: mockAdapter
+      })
+
+      expect(result.status).toBe('file_changed')
+      if (result.status === 'file_changed') {
+        expect(result.reason).toBe('mtime_modified_during_read')
+      }
+      expect(closed).toBe(true)
+    })
+
+    it('tolerates integer discovery expectation with live sub-millisecond precision, but detects >= 1ms changes', async () => {
+      const mockDirStat: ReadOnlyFileStats = {
+        size: 0,
+        mtimeMs: 0,
+        birthtimeMs: 0,
+        isFile: () => false,
+        isDirectory: () => true,
+        isSymbolicLink: () => false
+      }
+
+      const liveStat: ReadOnlyFileStats = {
+        size: 100,
+        mtimeMs: 1700000000123.456, // live stat has fractional ms
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          return p === '/virtual' ? mockDirStat : liveStat
+        },
+        async realpath(p): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          let readDone = false
+          return {
+            async stat(): Promise<ReadOnlyFileStats> {
+              return liveStat
+            },
+            async read(buf, offset): Promise<{ bytesRead: number }> {
+              if (readDone) return { bytesRead: 0 }
+              readDone = true
+              buf.fill(0, offset, offset + 100)
+              return { bytesRead: 100 }
+            },
+            async close(): Promise<void> {}
+          }
+        }
+      }
+
+      // Expected integer timestamp with sub-ms truncated in discovery (1700000000123)
+      const resMatch = await hashFile({
+        filePath: '/virtual/consistent.txt',
+        approvedRoots: ['/virtual'],
+        expectation: {
+          byteSize: 100,
+          mtimeMs: 1700000000123 // within 1ms tolerance
+        },
+        fsAdapter: mockAdapter
+      })
+
+      expect(resMatch.status).toBe('success')
+
+      // Expected integer timestamp that differs by >= 1ms (1700000000125)
+      const resMismatch = await hashFile({
+        filePath: '/virtual/consistent.txt',
+        approvedRoots: ['/virtual'],
+        expectation: {
+          byteSize: 100,
+          mtimeMs: 1700000000125
+        },
+        fsAdapter: mockAdapter
+      })
+
+      expect(resMismatch.status).toBe('file_changed')
+      if (resMismatch.status === 'file_changed') {
+        expect(resMismatch.reason).toBe('mtime_modified_discovery')
       }
     })
 
@@ -432,7 +680,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
 
       const openedStats: ReadOnlyFileStats = {
-        size: 200, // Changed between lstat and open!
+        size: 200,
         mtimeMs: 1000,
         birthtimeMs: 500,
         isFile: () => true,
@@ -441,7 +689,17 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
 
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
           lstatCount++
           return initialStats
         },
@@ -465,6 +723,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath: '/virtual/changed-before-open.txt',
+        approvedRoots: ['/virtual'],
         fsAdapter: mockAdapter
       })
 
@@ -494,14 +753,24 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
         mtimeMs: 1000,
         birthtimeMs: 500,
         dev: 1,
-        ino: 200, // Inode replaced!
+        ino: 200,
         isFile: () => true,
         isDirectory: () => false,
         isSymbolicLink: () => false
       }
 
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
           return initialStats
         },
         async realpath(p: string): Promise<string> {
@@ -524,6 +793,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath: '/virtual/replaced-before-open.txt',
+        approvedRoots: ['/virtual'],
         fsAdapter: mockAdapter
       })
 
@@ -533,12 +803,15 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
       expect(closed).toBe(true)
     })
+  })
 
-    it('detects dev/ino identity change during read (post-stat)', async () => {
+  describe('Post-read pathname revalidation', () => {
+    it('detects unchanged descriptor whose pathname now identifies a different file', async () => {
       let readDone = false
       let closed = false
 
-      const stat1: ReadOnlyFileStats = {
+      // Descriptor keeps old inode 100
+      const descriptorStat: ReadOnlyFileStats = {
         size: 100,
         mtimeMs: 1000,
         birthtimeMs: 500,
@@ -549,20 +822,31 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
         isSymbolicLink: () => false
       }
 
-      const stat2: ReadOnlyFileStats = {
+      // After reading, lstat on pathname returns new inode 999 (replaced file!)
+      const replacedPathStat: ReadOnlyFileStats = {
         size: 100,
         mtimeMs: 1000,
         birthtimeMs: 500,
         dev: 1,
-        ino: 999, // Swapped!
+        ino: 999,
         isFile: () => true,
         isDirectory: () => false,
         isSymbolicLink: () => false
       }
 
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
-          return stat1
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          return readDone ? replacedPathStat : descriptorStat
         },
         async realpath(p: string): Promise<string> {
           return p
@@ -570,7 +854,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
         async open(): Promise<ReadOnlyFileHandle> {
           return {
             async stat(): Promise<ReadOnlyFileStats> {
-              return readDone ? stat2 : stat1
+              return descriptorStat
             },
             async read(buf, offset): Promise<{ bytesRead: number }> {
               if (readDone) return { bytesRead: 0 }
@@ -586,7 +870,8 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
 
       const result = await hashFile({
-        filePath: '/virtual/replaced-during-read.txt',
+        filePath: '/virtual/inode-swapped.txt',
+        approvedRoots: ['/virtual'],
         fsAdapter: mockAdapter
       })
 
@@ -594,6 +879,145 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       if (result.status === 'file_changed') {
         expect(result.reason).toBe('file_replaced_during_read')
       }
+      expect('sha256' in result).toBe(false)
+      expect(closed).toBe(true)
+    })
+
+    it('detects pathname disappearance after reading', async () => {
+      let readDone = false
+      let closed = false
+
+      const stat: ReadOnlyFileStats = {
+        size: 50,
+        mtimeMs: 1000,
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          if (readDone) {
+            const err = new Error('ENOENT: no such file or directory') as Error & { code: string }
+            err.code = 'ENOENT'
+            throw err
+          }
+          return stat
+        },
+        async realpath(p: string): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          return {
+            async stat(): Promise<ReadOnlyFileStats> {
+              return stat
+            },
+            async read(buf, offset): Promise<{ bytesRead: number }> {
+              if (readDone) return { bytesRead: 0 }
+              readDone = true
+              buf.fill(0, offset, offset + 50)
+              return { bytesRead: 50 }
+            },
+            async close(): Promise<void> {
+              closed = true
+            }
+          }
+        }
+      }
+
+      const result = await hashFile({
+        filePath: '/virtual/disappeared.txt',
+        approvedRoots: ['/virtual'],
+        fsAdapter: mockAdapter
+      })
+
+      expect(result.status).toBe('file_changed')
+      if (result.status === 'file_changed') {
+        expect(result.reason).toBe('file_replaced_during_read')
+      }
+      expect('sha256' in result).toBe(false)
+      expect(closed).toBe(true)
+    })
+
+    it('detects pathname link substitution after reading', async () => {
+      let readDone = false
+      let closed = false
+
+      const regularStat: ReadOnlyFileStats = {
+        size: 50,
+        mtimeMs: 1000,
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const symlinkStat: ReadOnlyFileStats = {
+        size: 50,
+        mtimeMs: 1000,
+        birthtimeMs: 500,
+        isFile: () => false,
+        isDirectory: () => false,
+        isSymbolicLink: () => true
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          return readDone ? symlinkStat : regularStat
+        },
+        async realpath(p: string): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          return {
+            async stat(): Promise<ReadOnlyFileStats> {
+              return regularStat
+            },
+            async read(buf, offset): Promise<{ bytesRead: number }> {
+              if (readDone) return { bytesRead: 0 }
+              readDone = true
+              buf.fill(0, offset, offset + 50)
+              return { bytesRead: 50 }
+            },
+            async close(): Promise<void> {
+              closed = true
+            }
+          }
+        }
+      }
+
+      const result = await hashFile({
+        filePath: '/virtual/link-substituted.txt',
+        approvedRoots: ['/virtual'],
+        fsAdapter: mockAdapter
+      })
+
+      expect(result.status).toBe('file_changed')
+      if (result.status === 'file_changed') {
+        expect(result.reason).toBe('file_replaced_during_read')
+      }
+      expect('sha256' in result).toBe(false)
       expect(closed).toBe(true)
     })
   })
@@ -602,7 +1026,17 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
     it('cancels immediately if signal is already aborted before open', async () => {
       let openCalled = false
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
           return {
             size: 100,
             mtimeMs: 100,
@@ -626,6 +1060,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath: '/virtual/cancelled.txt',
+        approvedRoots: ['/virtual'],
         signal: controller.signal,
         fsAdapter: mockAdapter
       })
@@ -667,7 +1102,17 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
 
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
           return fakeStats
         },
         async realpath(p: string): Promise<string> {
@@ -680,6 +1125,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath: '/virtual/abort-stream.txt',
+        approvedRoots: ['/virtual'],
         limits: { chunkSizeBytes: 1024 },
         signal: controller.signal,
         fsAdapter: mockAdapter
@@ -691,20 +1137,73 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
     })
   })
 
-  describe('Error handling', () => {
-    it('returns file_not_found for missing file', async () => {
-      const missingPath = join(tempDir, 'non-existent-file.txt')
-      const result = await hashFile({ filePath: missingPath })
+  describe('Handle close failures and error handling', () => {
+    it('returns typed error without digest when processing succeeds but handle.close() throws', async () => {
+      const fakeStats: ReadOnlyFileStats = {
+        size: 100,
+        mtimeMs: 1000,
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
 
+      let readDone = false
+      const mockHandle: ReadOnlyFileHandle = {
+        async stat(): Promise<ReadOnlyFileStats> {
+          return fakeStats
+        },
+        async read(buf, offset): Promise<{ bytesRead: number }> {
+          if (readDone) return { bytesRead: 0 }
+          readDone = true
+          buf.fill(1, offset, offset + 100)
+          return { bytesRead: 100 }
+        },
+        async close(): Promise<void> {
+          const err = new Error('EIO: failed to close file descriptor') as Error & { code: string }
+          err.code = 'EIO'
+          throw err
+        }
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          return fakeStats
+        },
+        async realpath(p: string): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          return mockHandle
+        }
+      }
+
+      const result = await hashFile({
+        filePath: '/virtual/close-fail.txt',
+        approvedRoots: ['/virtual'],
+        fsAdapter: mockAdapter
+      })
+
+      // Must NOT return success with a digest!
       expect(result.status).toBe('error')
       if (result.status === 'error') {
-        expect(result.code).toBe('file_not_found')
-        expect(result.errno).toBe('ENOENT')
+        expect(result.code).toBe('io_error')
+        expect(result.message).toContain('failed to close file descriptor')
       }
+      expect('sha256' in result).toBe(false)
     })
 
-    it('releases handle and returns io_error when read throws mid-stream', async () => {
-      let handleClosed = false
+    it('preserves primary read error when both processing and cleanup fail', async () => {
       const fakeStats: ReadOnlyFileStats = {
         size: 10_000,
         mtimeMs: 1000,
@@ -719,15 +1218,29 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
           return fakeStats
         },
         async read(): Promise<{ bytesRead: number }> {
-          throw new Error('EIO: i/o error reading disk')
+          const readErr = new Error('Primary read failed') as Error & { code: string }
+          readErr.code = 'EIO'
+          throw readErr
         },
         async close(): Promise<void> {
-          handleClosed = true
+          const closeErr = new Error('Secondary close failed') as Error & { code: string }
+          closeErr.code = 'EBADF'
+          throw closeErr
         }
       }
 
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
           return fakeStats
         },
         async realpath(p: string): Promise<string> {
@@ -739,20 +1252,114 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       }
 
       const result = await hashFile({
-        filePath: '/virtual/io-error.txt',
+        filePath: '/virtual/both-fail.txt',
+        approvedRoots: ['/virtual'],
         fsAdapter: mockAdapter
       })
 
       expect(result.status).toBe('error')
       if (result.status === 'error') {
-        expect(result.code).toBe('io_error')
+        // Primary error message preserved, not masked by close error
+        expect(result.message).toContain('Primary read failed')
       }
-      expect(handleClosed).toBe(true)
+    })
+
+    it('preserves primary file_changed outcome when instability is detected and handle.close() throws', async () => {
+      let readDone = false
+      const stat1: ReadOnlyFileStats = {
+        size: 100,
+        mtimeMs: 1000,
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+      const stat2: ReadOnlyFileStats = {
+        size: 150, // modified!
+        mtimeMs: 2000,
+        birthtimeMs: 500,
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false
+      }
+
+      const mockHandle: ReadOnlyFileHandle = {
+        async stat(): Promise<ReadOnlyFileStats> {
+          return readDone ? stat2 : stat1
+        },
+        async read(buf, offset): Promise<{ bytesRead: number }> {
+          if (readDone) return { bytesRead: 0 }
+          readDone = true
+          buf.fill(0, offset, offset + 100)
+          return { bytesRead: 100 }
+        },
+        async close(): Promise<void> {
+          throw new Error('EIO on close')
+        }
+      }
+
+      const mockAdapter: ReadOnlyHashingFsAdapter = {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
+          return stat1
+        },
+        async realpath(p: string): Promise<string> {
+          return p
+        },
+        async open(): Promise<ReadOnlyFileHandle> {
+          return mockHandle
+        }
+      }
+
+      const result = await hashFile({
+        filePath: '/virtual/unstable-and-close-fail.txt',
+        approvedRoots: ['/virtual'],
+        fsAdapter: mockAdapter
+      })
+
+      expect(result.status).toBe('file_changed')
+      if (result.status === 'file_changed') {
+        expect(result.reason).toBe('size_modified_during_read')
+      }
+      expect('sha256' in result).toBe(false)
+    })
+
+    it('returns file_not_found for missing file', async () => {
+      const missingPath = join(tempDir, 'non-existent-file.txt')
+      const result = await hashFile({
+        filePath: missingPath,
+        approvedRoots: [tempDir]
+      })
+
+      expect(result.status).toBe('error')
+      if (result.status === 'error') {
+        expect(result.code).toBe('file_not_found')
+        expect(result.errno).toBe('ENOENT')
+      }
     })
 
     it('returns permission_denied when filesystem reports EACCES or EPERM', async () => {
       const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
+        async lstat(p): Promise<ReadOnlyFileStats> {
+          if (p === '/virtual') {
+            return {
+              size: 0,
+              mtimeMs: 0,
+              birthtimeMs: 0,
+              isFile: () => false,
+              isDirectory: () => true,
+              isSymbolicLink: () => false
+            }
+          }
           const err = new Error('Permission denied') as Error & { code: string }
           err.code = 'EACCES'
           throw err
@@ -767,6 +1374,7 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
 
       const result = await hashFile({
         filePath: '/virtual/locked.txt',
+        approvedRoots: ['/virtual'],
         fsAdapter: mockAdapter
       })
 
@@ -774,51 +1382,6 @@ describe('Stage 2B: Read-only streaming SHA-256 hashing', () => {
       if (result.status === 'error') {
         expect(result.code).toBe('permission_denied')
         expect(result.errno).toBe('EACCES')
-      }
-    })
-
-    it('does not crash or mask primary error when handle.close() throws', async () => {
-      const fakeStats: ReadOnlyFileStats = {
-        size: 100,
-        mtimeMs: 1000,
-        birthtimeMs: 500,
-        isFile: () => true,
-        isDirectory: () => false,
-        isSymbolicLink: () => false
-      }
-
-      const mockHandle: ReadOnlyFileHandle = {
-        async stat(): Promise<ReadOnlyFileStats> {
-          return fakeStats
-        },
-        async read(): Promise<{ bytesRead: number }> {
-          throw new Error('read failure')
-        },
-        async close(): Promise<void> {
-          throw new Error('close failure')
-        }
-      }
-
-      const mockAdapter: ReadOnlyHashingFsAdapter = {
-        async lstat(): Promise<ReadOnlyFileStats> {
-          return fakeStats
-        },
-        async realpath(p: string): Promise<string> {
-          return p
-        },
-        async open(): Promise<ReadOnlyFileHandle> {
-          return mockHandle
-        }
-      }
-
-      const result = await hashFile({
-        filePath: '/virtual/close-err.txt',
-        fsAdapter: mockAdapter
-      })
-
-      expect(result.status).toBe('error')
-      if (result.status === 'error') {
-        expect(result.code).toBe('io_error')
       }
     })
   })

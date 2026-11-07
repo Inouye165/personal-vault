@@ -32,7 +32,7 @@ Acceptance criteria: runnable Electron/React shell with isolated main/preload/re
 
 Status: **incomplete - Stage 2A complete; Stage 2B implementation complete and awaiting independent review; Stages 2C and 2D not started** (see HANDOFF.md).
 
-Verification: implementation host **117 passed, 0 skipped** across all 7 test files, with strict typecheck, lint, formatting, and build passed. Filesystem-race and OS-managed access-time limitations remain documented in HANDOFF.md.
+Verification: implementation host **124 passed, 0 skipped** across all 7 test files, with strict typecheck, lint, formatting, and build passed. Filesystem-race and OS-managed access-time limitations remain documented in HANDOFF.md.
 
 - [x] **Stage 2A**: Read-only filesystem scanning adapter (`ReadOnlyFsAdapter` exposing only `lstat`, `realpath`, `opendir`) for explicit caller-supplied roots.
 - [x] **Stage 2A**: Incremental streaming (`scanSourceRoots`) with consumer backpressure, $O(1)$ `BoundedFifoQueue`, validated resource limits (`resolveDiscoveryLimits` enforcing positive safe integers for `maxPendingDirectories`, `maxVisitedDirectories`, and collector-only `maxCollectedRecords`), `O(1)` open directory handles, and `AbortSignal` cancellation with deterministic handle cleanup.
@@ -40,7 +40,7 @@ Verification: implementation host **117 passed, 0 skipped** across all 7 test fi
 - [x] **Stage 2A**: Configurable candidate photo/document extension policy (including `.md` and `.txt`) with documented source-root and subdirectory exclusion precedence (`excludedPaths` including ancestor exclusions > `excludedDirectoryNames` > `softwareClutterDirectoryNames` > `hiddenAndSystemNames` / dot-entries).
 - [x] **Stage 2A**: Factual filesystem metadata inventory (original path, filename, extension, byte size, honest nullable creation and modification times) and verified source preservation.
 - [x] **Stage 2A**: Independent review accepted at `5dd6320`.
-- [x] **Stage 2B**: Read-only streaming SHA-256 content hashing (`hashFile`, bounded chunked reads, fstat pre/post verification, symlink/root validation, discovery expectation checks, AbortSignal cancellation, and deterministic cleanup).
+- [x] **Stage 2B**: Read-only streaming SHA-256 content hashing (`hashFile`, bounded chunked reads, mandatory non-empty approved roots, sub-ms timestamp preservation, post-read pathname revalidation, handle close failure reporting, AbortSignal cancellation, and deterministic cleanup).
 - [ ] **Stage 2B**: Independent review.
 - [ ] **Stage 2C (next)**: SQLite catalog schema for recorded file facts and inventory persistence.
 - [ ] **Stage 2D**: Background worker job controller with progress reporting, pause, cancel, and resumable scan recovery; IPC/UI integration.

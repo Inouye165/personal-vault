@@ -49,10 +49,10 @@ export interface HashFileOptions {
    */
   readonly filePath: string
   /**
-   * Optional list of approved root directory paths.
-   * If specified, the file's canonical path must reside within at least one approved root.
+   * Required non-empty list of approved root directory paths.
+   * The candidate file's canonical path must reside within at least one approved root.
    */
-  readonly approvedRoots?: readonly string[]
+  readonly approvedRoots: readonly [string, ...string[]] | readonly string[]
   /**
    * Optional metadata expected from discovery (e.g. Stage 2A candidate).
    */
