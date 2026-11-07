@@ -58,12 +58,19 @@ src/
 │   │   ├── sender.ts      # Validates the sending WebContents, frame, and URL
 │   │   └── handlers.ts    # Sender-checked handlers: app info, vault status, tab ack
 │   └── services/
-│       └── discovery/     # Stage 2A: read-only traversal, policy, and metadata inventory
-│           ├── fs-adapter.ts # Narrow read-only adapter (lstat, realpath, opendir)
-│           ├── policy.ts     # Candidate extension & exclusion/software-clutter rules
-│           ├── scanner.ts    # Incremental bounded scanner with AbortSignal cleanup
-│           ├── types.ts      # Candidate, skip, error, and result contracts
-│           └── index.ts      # Public discovery exports
+│       ├── discovery/     # Stage 2A: read-only traversal, policy, and metadata inventory
+│       │   ├── fs-adapter.ts # Narrow read-only adapter (lstat, realpath, opendir)
+│       │   ├── policy.ts     # Candidate extension & exclusion/software-clutter rules
+│       │   ├── scanner.ts    # Incremental bounded scanner with AbortSignal cleanup
+│       │   ├── types.ts      # Candidate, skip, error, and result contracts
+│       │   └── index.ts      # Public discovery exports
+│       └── hashing/       # Stage 2B: read-only streaming SHA-256 hashing
+│           ├── fs-adapter.ts # Narrow read-only adapter (lstat, realpath, open 'r')
+│           ├── limits.ts     # Resource limit validation (chunkSizeBytes, maxFileSizeBytes)
+│           ├── path-security.ts # Approved-root canonical containment check
+│           ├── hasher.ts     # Streaming SHA-256 hasher with pre/post fstat verification
+│           ├── types.ts      # Discriminated union outcomes and configuration contracts
+│           └── index.ts      # Public hashing exports
 ├── preload/
 │   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
@@ -139,3 +146,10 @@ src/
      - **Modular Discovery Responsibilities**: Discovery under `src/main/services/discovery/` separates read-only OS calls (`fs-adapter.ts`), extension/clutter/exclusion policy (`policy.ts`), limit validation and bounded queueing (`limits.ts`), shared root/queued/child directory and file-candidate inspection (`inspection.ts`), and streaming/collector orchestration (`scanner.ts`).
      - **Pre-Open Directory Revalidation & TOCTOU Boundaries**: Each queued subdirectory is revalidated (`signal.aborted`, policy, `lstat`, `realpath`, and canonical root containment) immediately before `opendir` is called, rejecting directories that were replaced by links, files, or outside-root targets while queued. Note: user-space path revalidation narrows the TOCTOU window between queuing and opening, though Node's path-based filesystem APIs do not provide a race-proof kernel-level `openat` descriptor sandbox.
      - **Preservation & Provenance Honesty**: `ReadOnlyFsAdapter` exposes only `lstat`, `realpath`, and `opendir` (frozen, no mutation methods). File contents, `birthtime`, and `mtime` are never altered (note: operating systems may update `atime` during read-only directory reads depending on mount/filesystem settings). Missing or unreliable timestamps (such as `0` or non-finite values) are recorded as `null` rather than fabricated from `mtime`. Stage 2A records extension-based candidates and filesystem metadata only; SHA-256 content hashing and embedded metadata extraction belong to subsequent Stage 2 tasks.
+7. **Read-Only Streaming SHA-256 Hashing (Stage 2B)**:
+   - **Bounded Memory & Stream Chunking**: Hashing consumes a constant-sized chunk buffer (default 64 KiB, configurable between 1 KiB and 16 MiB). Files are never loaded entirely into memory.
+   - **Strict Read-Only Preservation**: The underlying descriptor is opened strictly in read-only mode (`open(path, 'r')`). Creation (`birthtime`) and modification (`mtime`) times are unaltered. Operating systems may update `atime` depending on mount/filesystem flags (e.g. `relatime` or NTFS update flags).
+   - **Descriptor Pre/Post Verification (`fstat`) & Unstable Read Detection**: An opened file descriptor is inspected via `handle.stat()` (`fstat`) both immediately after opening and immediately after reading reaches EOF. Observable changes between `lstat` and `open`, changes between pre-stat and post-stat (size, modification timestamp, or device/inode replacement on POSIX), and mismatches against expected discovery metadata return structured `file_changed` outcomes. A successful digest is never returned for an unstable or modified read.
+   - **Path Security & Symlink Rejection**: Symbolic links and non-regular files (directories, sockets, devices) are rejected without opening. Canonical realpaths are verified against approved roots. User-space path validation narrows the TOCTOU window between inspection and opening, though Node does not provide a kernel-level descriptor-relative `openat` sandbox.
+   - **Deterministic Cleanup & Cancellation**: Bounded reads observe `AbortSignal` cooperative cancellation before opening and during chunk streaming. Open handles are safely released in `finally` blocks across success, cancellation, instability, and I/O errors.
+   - **Typed Discriminated Outcomes**: Returns typed results (`success`, `cancelled`, `file_changed`, `rejected`, `error`). Partial digests are strictly excluded from non-success outcomes.
