@@ -40,7 +40,19 @@ function createWindow(): BrowserWindow {
 
   secureWebContents(window.webContents, location)
 
-  window.on('ready-to-show', () => window.show())
+  window.on('ready-to-show', () => {
+    window.show()
+    window.focus()
+  })
+
+  // Fallback to ensure the desktop window is visibly displayed and focused
+  setTimeout(() => {
+    if (!window.isDestroyed() && !window.isVisible()) {
+      window.show()
+      window.focus()
+    }
+  }, 1000)
+
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null
   })
@@ -66,29 +78,34 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  void app.whenReady().then(async () => {
-    setupSecurityPolicies(location)
+  void app
+    .whenReady()
+    .then(async () => {
+      setupSecurityPolicies(location)
 
-    const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
-    catalog = CatalogDatabase.open({ catalogPath })
-    coordinator = new ScanJobCoordinator({ catalog })
-    await coordinator.initialize()
+      const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
+      catalog = CatalogDatabase.open({ catalogPath })
+      coordinator = new ScanJobCoordinator({ catalog })
+      await coordinator.initialize()
 
-    registerIpcHandlers({
-      validateSender: createSenderValidator({
-        getTrustedWebContentsId: () => mainWindow?.webContents.id,
-        location
-      }),
-      catalog,
-      coordinator,
-      getMainWindow: () => mainWindow
+      registerIpcHandlers({
+        validateSender: createSenderValidator({
+          getTrustedWebContentsId: () => mainWindow?.webContents.id,
+          location
+        }),
+        catalog,
+        coordinator,
+        getMainWindow: () => mainWindow
+      })
+      createWindow()
+
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) createWindow()
+      })
     })
-    createWindow()
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    .catch((err) => {
+      console.error('Fatal error during application startup:', err)
     })
-  })
 
   let isQuitting = false
   app.on('before-quit', (event) => {
