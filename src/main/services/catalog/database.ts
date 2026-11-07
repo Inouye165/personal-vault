@@ -1511,6 +1511,22 @@ export class CatalogDatabase {
     }
   }
 
+  public countDiscoveredFilesForJob(jobId: number): { count: number; totalBytes: number } {
+    this.assertOpen()
+    validateSafeInteger(jobId, 'jobId', 1)
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(d.byte_size), 0) AS total_bytes
+      FROM scan_job_files sjf
+      JOIN discovery_observations d ON d.file_location_id = sjf.file_location_id AND d.is_current = 1
+      WHERE sjf.job_id = ?;
+    `)
+    const row = stmt.get(jobId) as { count: number; total_bytes: number } | undefined
+    return {
+      count: row?.count ?? 0,
+      totalBytes: row?.total_bytes ?? 0
+    }
+  }
+
   public getUnhashedFilesForJob(
     jobId: number,
     options?: UnhashedFilesOptions

@@ -5,9 +5,9 @@ import {
   type ScanJobStatus,
   type ScanJobPhase,
   type DiscoveryCandidateInput,
+  getEffectiveRoots,
   MAX_BATCH_SIZE
 } from '../catalog'
-import { normalizePathForLookup } from '../catalog/path-normalization'
 import { scanSourceRoots } from '../discovery'
 import { hashFile } from '../hashing'
 import type { HashCandidateExpectation } from '../hashing/types'
@@ -36,22 +36,6 @@ function validateBatchSize(size: number | undefined): number {
     )
   }
   return size
-}
-
-function getEffectiveRoots(roots: readonly string[]): string[] {
-  const sorted = [...new Set(roots)].sort((a, b) => a.length - b.length)
-  const effective: string[] = []
-  for (const r of sorted) {
-    const norm = normalizePathForLookup(r)
-    const isDescendant = effective.some((parent) => {
-      const parentNorm = normalizePathForLookup(parent)
-      return norm === parentNorm || norm.startsWith(parentNorm + '/')
-    })
-    if (!isDescendant) {
-      effective.push(r)
-    }
-  }
-  return effective
 }
 
 interface ActiveJobState {
@@ -426,11 +410,6 @@ export class ScanJobCoordinator {
       const candidateBatchesByRoot = new Map<string, DiscoveryCandidateInput[]>()
       let uncommittedCandidates = 0
 
-      // Reset pass-specific discovery counts to prevent inflation on resume
-      let passDiscoveredCount = 0
-      let passTotalBytes = 0
-      const seenCandidatePaths = new Set<string>()
-
       const commitCandidates = (): void => {
         for (const [sourceRoot, batch] of candidateBatchesByRoot) {
           if (batch.length > 0) {
@@ -439,6 +418,9 @@ export class ScanJobCoordinator {
           }
         }
         uncommittedCandidates = 0
+        const summary = this.catalog.countDiscoveredFilesForJob(state.jobId)
+        state.discoveredCount = summary.count
+        state.totalBytes = summary.totalBytes
         this.catalog.updateScanJobProgress(state.jobId, {
           discoveredCount: state.discoveredCount,
           totalBytes: state.totalBytes,
@@ -474,15 +456,6 @@ export class ScanJobCoordinator {
         }
 
         if (event.kind === 'candidate') {
-          if (seenCandidatePaths.has(event.candidate.absolutePath)) {
-            continue
-          }
-          seenCandidatePaths.add(event.candidate.absolutePath)
-
-          passDiscoveredCount++
-          passTotalBytes += event.candidate.byteSize
-          state.discoveredCount = passDiscoveredCount
-          state.totalBytes = passTotalBytes
           state.currentPath = event.candidate.absolutePath
 
           let list = candidateBatchesByRoot.get(event.candidate.rootPath)

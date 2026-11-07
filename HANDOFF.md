@@ -174,7 +174,16 @@ Following the third independent review round, four areas were addressed using fa
    - _Audit_: Audited shutdown classification in `ScanJobCoordinator.ts`. When `shutdown()` is called on quit, the execution loop checks `isInterrupted()` before checking `abortController.signal.aborted`, ensuring that application exit consistently produces an `interrupted` (recoverable) result, emits `interrupted` events, and settles completion promises.
    - _Reporting_: Verification diagnostics now log explicit CDP target discovery status. Verification results on the implementation host are reported separately from reviewer environments without speculation.
 
-Ran `npm test`: **All 271 tests passed across 11 test suites (0 skipped)**.
+### 2.6 Independent Review Corrections (Pass 4: Windows Root Containment and Bounded Memory Deduplication)
+
+1. **Windows Root Containment & Directory Open Redundancy Elimination**:
+   - _Failing test_: Added behavioral test with a spying directory adapter counting `opendir` calls on real Windows temporary directories. Selecting both parent and child roots caused the child directory to be opened twice because `getEffectiveRoots` checked `norm.startsWith(parentNorm + '/')`, failing on Windows where normalized paths use backslashes (`\`). Initial test run: failed with `expected 2 to be 1`.
+   - _Resolution_: Implemented `isSameOrDescendantPath` and `getEffectiveRoots` in [`src/main/services/catalog/path-normalization.ts`](file:///d:/organizer/src/main/services/catalog/path-normalization.ts), supporting platform-correct containment across Windows drive roots (`C:\`), UNC roots (`\\server\share`), trailing separators, case-insensitivity on Windows, duplicate roots, and sibling boundaries (`C:\photos` vs `C:\photos_backup`). Added comprehensive unit tests in [`tests/main/catalog.test.ts`](file:///d:/organizer/tests/main/catalog.test.ts). Child directory opens are verified to be exactly 1.
+2. **Bounded Discovery Deduplication**:
+   - _Failing test_: Added tests for duplicate roots and candidate paths crossing batch boundaries with `batchSize: 1`, pause/resume, and verified that counts reflect unique observed files without inflating.
+   - _Resolution_: Removed unbounded in-memory `seenCandidatePaths` Set entirely from `ScanJobCoordinator`. In-flight discovery candidate memory in Node is strictly bounded by `batchSize` (1 <= batchSize <= 1000). Candidates are persisted via `persistDiscoveryBatch`, which inserts into `scan_job_files` (`PRIMARY KEY (job_id, file_location_id)`). Added `CatalogDatabase.countDiscoveredFilesForJob(jobId)` to compute exact unique counts and bytes from SQLite upon every batch commit.
+
+Ran `npm test`: **All 276 tests passed across 11 test suites (0 skipped)**.
 
 ---
 
@@ -184,7 +193,7 @@ Execution results on implementation host (`D:\organizer`):
 
 | Command                          | Result   | Details                                                                                        |
 | -------------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
-| `npm test`                       | **PASS** | 11 test files: 271 passed, 0 skipped repository-wide                                           |
+| `npm test`                       | **PASS** | 11 test files: 276 passed, 0 skipped repository-wide                                           |
 | `npm run typecheck`              | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)         |
 | `npm run lint`                   | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                            |
 | `npm run format:check`           | **PASS** | Prettier 100% compliant across entire repository                                               |

@@ -24,7 +24,11 @@ export {
   FileMetadataConflictError
 } from './errors'
 export { CURRENT_SCHEMA_VERSION, checkSchemaCompatibility, runMigrations } from './migrations'
-export { normalizePathForLookup } from './path-normalization'
+export {
+  normalizePathForLookup,
+  isSameOrDescendantPath,
+  getEffectiveRoots
+} from './path-normalization'
 export type {
   CatalogDatabaseOptions,
   SourceRecord,

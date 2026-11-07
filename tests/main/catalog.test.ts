@@ -14,7 +14,9 @@ import {
   FileMetadataConflictError,
   CURRENT_SCHEMA_VERSION,
   isObservationTimestampMatching,
-  normalizePathForLookup
+  normalizePathForLookup,
+  isSameOrDescendantPath,
+  getEffectiveRoots
 } from '../../src/main/services/catalog'
 import type { DiscoveryCandidateInput } from '../../src/main/services/catalog'
 
@@ -547,6 +549,72 @@ describe('Stage 2C — SQLite Catalog Schema and Inventory Persistence', () => {
       const originalPosix = '/Volumes/Photos/SubFolder/Image.JPG'
       const normalizedPosix = normalizePathForLookup(originalPosix, 'linux')
       expect(normalizedPosix).toBe('/Volumes/Photos/SubFolder/Image.JPG')
+    })
+
+    it('correctly evaluates path containment across Windows and POSIX path formats', () => {
+      // Windows drive root
+      expect(isSameOrDescendantPath('C:\\', 'C:\\Photos\\image.jpg', 'win32')).toBe(true)
+      expect(isSameOrDescendantPath('C:/', 'c:\\photos', 'win32')).toBe(true)
+      expect(isSameOrDescendantPath('C:\\', 'D:\\Photos', 'win32')).toBe(false)
+
+      // Windows directory with and without trailing slash
+      expect(isSameOrDescendantPath('C:\\Photos', 'C:\\Photos\\2026\\pic.jpg', 'win32')).toBe(true)
+      expect(isSameOrDescendantPath('C:/Photos/', 'C:\\Photos\\2026', 'win32')).toBe(true)
+      expect(isSameOrDescendantPath('c:\\photos', 'C:/Photos', 'win32')).toBe(true) // exact same
+
+      // Windows sibling-prefix protection (crucial boundary check)
+      expect(isSameOrDescendantPath('C:\\Photos', 'C:\\Photos_Backup', 'win32')).toBe(false)
+      expect(isSameOrDescendantPath('C:\\Photos', 'C:\\Photos-2026', 'win32')).toBe(false)
+
+      // Windows UNC root
+      expect(isSameOrDescendantPath('\\\\server\\share', '\\\\server\\share\\child', 'win32')).toBe(
+        true
+      )
+      expect(
+        isSameOrDescendantPath('\\\\server\\share\\', '\\\\server\\share\\child', 'win32')
+      ).toBe(true)
+      expect(
+        isSameOrDescendantPath('\\\\server\\share', '\\\\server\\share2\\child', 'win32')
+      ).toBe(false)
+
+      // POSIX root and subdirectories
+      expect(isSameOrDescendantPath('/', '/photos/image.jpg', 'linux')).toBe(true)
+      expect(isSameOrDescendantPath('/photos', '/photos/sub/pic.jpg', 'linux')).toBe(true)
+      expect(isSameOrDescendantPath('/photos/', '/photos/sub', 'linux')).toBe(true)
+      expect(isSameOrDescendantPath('/photos', '/photos_other', 'linux')).toBe(false)
+    })
+
+    it('getEffectiveRoots prunes overlapping and duplicate roots across platforms', () => {
+      // Windows: parent + child in either order
+      const winRoots1 = getEffectiveRoots(['C:\\photos', 'C:\\photos\\child'], 'win32')
+      expect(winRoots1).toEqual(['C:\\photos'])
+
+      const winRoots2 = getEffectiveRoots(['C:\\photos\\child', 'C:\\photos'], 'win32')
+      expect(winRoots2).toEqual(['C:\\photos'])
+
+      // Windows: case-insensitive duplicates and trailing slashes
+      const winDupes = getEffectiveRoots(['C:\\photos', 'c:/photos/', 'C:\\Photos\\'], 'win32')
+      expect(winDupes).toEqual(['C:\\photos'])
+
+      // Windows: sibling directories preserved
+      const winSiblings = getEffectiveRoots(['C:\\photos', 'C:\\photos_backup'], 'win32')
+      expect(winSiblings).toEqual(['C:\\photos', 'C:\\photos_backup'])
+
+      // Windows: multiple drives preserved
+      const winDrives = getEffectiveRoots(['C:\\photos', 'D:\\photos'], 'win32')
+      expect(winDrives).toEqual(['C:\\photos', 'D:\\photos'])
+
+      // POSIX: root / prunes all subdirectories
+      const posixRoot = getEffectiveRoots(['/', '/var/log', '/home/user'], 'linux')
+      expect(posixRoot).toEqual(['/'])
+
+      // POSIX: overlapping subdirectories
+      const posixSub = getEffectiveRoots(['/home/user/photos', '/home/user'], 'linux')
+      expect(posixSub).toEqual(['/home/user'])
+
+      // POSIX: siblings preserved
+      const posixSib = getEffectiveRoots(['/photos', '/photos_backup'], 'linux')
+      expect(posixSib).toEqual(['/photos', '/photos_backup'])
     })
   })
 

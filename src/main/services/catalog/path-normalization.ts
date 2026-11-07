@@ -51,3 +51,35 @@ export function normalizePathForLookup(
   }
   return normalized
 }
+
+export function isSameOrDescendantPath(
+  parentPath: string,
+  childPath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  const pNorm = normalizePathForLookup(parentPath, platform)
+  const cNorm = normalizePathForLookup(childPath, platform)
+  if (pNorm === cNorm) return true
+  const sep = platform === 'win32' ? '\\' : '/'
+  const prefix = pNorm.endsWith(sep) ? pNorm : pNorm + sep
+  return cNorm.startsWith(prefix)
+}
+
+export function getEffectiveRoots(
+  roots: readonly string[],
+  platform: NodeJS.Platform = process.platform
+): string[] {
+  if (!Array.isArray(roots) || roots.length === 0) return []
+  const sorted = [...roots].sort(
+    (a, b) =>
+      normalizePathForLookup(a, platform).length - normalizePathForLookup(b, platform).length
+  )
+  const effective: string[] = []
+  for (const r of sorted) {
+    const isContained = effective.some((parent) => isSameOrDescendantPath(parent, r, platform))
+    if (!isContained) {
+      effective.push(r)
+    }
+  }
+  return effective
+}

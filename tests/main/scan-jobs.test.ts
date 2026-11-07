@@ -710,6 +710,92 @@ describe('Stage 2D — Scan Job Coordinator and Resumable Lifecycle', () => {
     })
   })
 
+  describe('Windows Root Containment and Bounded Deduplication', () => {
+    it('does not open overlapping child directory twice when both parent and child are selected as roots on Windows', async () => {
+      const parentDir = join(testDir, 'containment-parent')
+      const childDir = join(parentDir, 'containment-child')
+      await fs.mkdir(childDir, { recursive: true })
+      await fs.writeFile(join(parentDir, 'parent-item.jpg'), 'parent-bytes')
+      await fs.writeFile(join(childDir, 'child-item.jpg'), 'child-bytes')
+
+      const openedDirs: string[] = []
+      const spyingAdapter = {
+        ...db, // dummy fallback to satisfy type check if needed
+        lstat: async (p: string) => fs.lstat(p),
+        realpath: async (p: string) => fs.realpath(p),
+        opendir: async (dirPath: string) => {
+          openedDirs.push(dirPath)
+          return fs.opendir(dirPath)
+        }
+      }
+
+      const coord = new ScanJobCoordinator({ catalog: db, discoveryFsAdapter: spyingAdapter })
+      const job = await coord.startScan({ roots: [parentDir, childDir] })
+      const res = await coord.waitForJob(job.jobId)
+
+      expect(res.status).toBe('completed')
+      expect(res.discoveredCount).toBe(2)
+      expect(res.hashedCount).toBe(2)
+
+      const normChild = childDir.toLowerCase().replace(/\//g, '\\')
+      const childOpens = openedDirs.filter(
+        (d) => d.toLowerCase().replace(/\//g, '\\') === normChild
+      )
+      expect(childOpens.length).toBe(1)
+    })
+
+    it('deduplicates candidates across batch boundaries without retaining full path inventory in memory', async () => {
+      const batchDir = join(testDir, 'bounded-batch')
+      await fs.mkdir(batchDir, { recursive: true })
+      await fs.writeFile(join(batchDir, 'item1.jpg'), 'item1-bytes')
+      await fs.writeFile(join(batchDir, 'item2.jpg'), 'item2-bytes')
+
+      // Use batchSize: 1 to force every candidate to cross a batch boundary
+      const coord = new ScanJobCoordinator({ catalog: db, batchSize: 1 })
+
+      // Pass duplicate roots that normalize to the same root
+      const job = await coord.startScan({ roots: [batchDir, batchDir] })
+      const res = await coord.waitForJob(job.jobId)
+
+      expect(res.status).toBe('completed')
+      expect(res.discoveredCount).toBe(2)
+      expect(res.hashedCount).toBe(2)
+      expect(res.totalFilesToHash).toBe(2)
+
+      // Verify SQLite state agrees directly
+      const disc = db.countDiscoveredFilesForJob(job.jobId)
+      expect(disc.count).toBe(2)
+      const unhashed = db.countUnhashedFilesForJob(job.jobId)
+      expect(unhashed.count).toBe(0)
+    })
+
+    it('preserves accurate counts across pause and resume with bounded batches', async () => {
+      const pauseDir = join(testDir, 'bounded-pause')
+      await fs.mkdir(pauseDir, { recursive: true })
+      for (let i = 0; i < 5; i++) {
+        await fs.writeFile(join(pauseDir, `pause-${i}.jpg`), `pause-content-${i}`)
+      }
+
+      // batchSize: 2 creates multiple batch commits
+      const coord = new ScanJobCoordinator({ catalog: db, batchSize: 2 })
+      const job = await coord.startScan({ roots: [pauseDir] })
+
+      // Pause the job
+      await coord.pauseScan(job.jobId)
+
+      // Resume to completion
+      const resumed = await coord.resumeScan(job.jobId)
+      const finalRes = await coord.waitForJob(resumed.jobId)
+
+      expect(finalRes.status).toBe('completed')
+      expect(finalRes.discoveredCount).toBe(5)
+      expect(finalRes.hashedCount).toBe(5)
+
+      const disc = db.countDiscoveredFilesForJob(job.jobId)
+      expect(disc.count).toBe(5)
+    })
+  })
+
   describe('Ordinary Application Shutdown and Terminal Result Restoration', () => {
     it('ordinary shutdown consistently produces an interrupted result with emitted event and resolved promise', async () => {
       const slowDir = join(testDir, 'slow-shutdown')
