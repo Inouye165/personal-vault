@@ -5,7 +5,7 @@
 - **Workspace**: `D:\organizer`
 - **Branch**: `feat/stage-2b-streaming-hashing` (branched from verified Stage 2A closeout commit `000923e` / `5dd6320`)
 - **Stage 1 status**: complete (`db43f2c`).
-- **Stage 2 status**: **incomplete** — **Stage 2A complete (accepted at `5dd6320`); Stage 2B correction pass complete and awaiting independent review; Stages 2C and 2D not started**.
+- **Stage 2 status**: **incomplete** — **Stage 2A complete (accepted at `5dd6320`); Stage 2B complete; independent review accepted at `e4488a2`; Stages 2C and 2D not started**.
 
 ---
 
@@ -44,7 +44,7 @@ Modular backend hashing service, independent of Electron IPC and React:
 
 1. **Initial Stage 2B Implementation (`a767a39`)**:
    - Authored 28 behavioral tests in [`tests/main/hashing.test.ts`](file:///d:/organizer/tests/main/hashing.test.ts) covering limits, empty/binary digests, chunk invariance, source preservation, symlink/directory rejection, expectations, cancellation, and deterministic cleanup.
-2. **Review Findings Correction Pass (Current)**:
+2. **Review Findings Correction Pass (`e4488a2`)**:
    - **Red phase**: Added 7 new failing tests (total 35 tests in `tests/main/hashing.test.ts`, 124 tests repository-wide) targeting:
      1. Eager rejection of missing/empty/blank `approvedRoots` before filesystem calls, and rejection of non-directory roots.
      2. Fractional-millisecond mtime preservation and detection for `lstat` vs `preStat` and `preStat` vs `postStat`.
@@ -63,15 +63,15 @@ Modular backend hashing service, independent of Electron IPC and React:
 
 ## 3. Verification Results
 
-All quality gates passed on the implementation host:
+The implementation host verified **124 tests passed, 0 skipped**. The independent reviewer verified **123 tests passed, 1 real-junction test skipped** because sandbox permissions deny junction creation, and separately passed type checking, linting, formatting, and build. These are separate execution results for accepted implementation `e4488a2`; application checks were not rerun for this documentation-only closeout.
 
-| Command                | Result   | Details                                                                                            |
-| ---------------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `npm test`             | **PASS** | 7 test files: 124 passed, 0 skipped (including 35 comprehensive Stage 2B hashing regression tests) |
-| `npm run typecheck`    | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)             |
-| `npm run lint`         | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                                |
-| `npm run format:check` | **PASS** | Prettier 100% compliant across entire repository                                                   |
-| `npm run build`        | **PASS** | `electron-vite` builds main, preload, and renderer cleanly                                         |
+| Command                | Result   | Details                                                                                                                    |
+| ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `npm test`             | **PASS** | 7 test files: 124 passed on host (123 passed, 1 junction test skipped under sandbox permissions during independent review) |
+| `npm run typecheck`    | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)                                     |
+| `npm run lint`         | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                                                        |
+| `npm run format:check` | **PASS** | Prettier 100% compliant across entire repository                                                                           |
+| `npm run build`        | **PASS** | `electron-vite` builds main, preload, and renderer cleanly                                                                 |
 
 ---
 
@@ -79,10 +79,12 @@ All quality gates passed on the implementation host:
 
 - **User-Space Path Revalidation vs. Kernel Descriptor Sandboxing (TOCTOU)**: Pre-open validation (`lstat`, `realpath`, approved root containment check), descriptor-level `fstat` before and after reading, and post-read pathname revalidation (`lstat`, `realpath`, and `postPathStat.ino !== postStat.ino`) drastically narrow the time-of-check-to-time-of-use window and detect observable replacements, disappearances, or modifications. However, Node's standard user-space filesystem APIs do not provide a race-free kernel-level `openat(..., O_NOFOLLOW)` descriptor sandbox.
 - **OS Access Time (`atime`)**: The hashing adapter performs strictly read-only operations (`lstat`, `realpath`, `open` in read mode, and chunked `read`). File bytes, creation time (`birthtime`), and modification time (`mtime`) are never altered. However, the host operating system/filesystem may update access timestamps (`atime`) depending on mount options (e.g. `relatime` on POSIX or NTFS `NtfsDisableLastAccessUpdate`).
+- **Timestamp Precision & Discovery Expectations**: Live file inspections compare modification timestamps with exact sub-millisecond floating-point precision without flooring. For external discovery expectations with integer millisecond precision, comparisons tolerate sub-millisecond truncation within a 1 ms tolerance (`|live - expected| < 1.0 ms`) while detecting shifts >= 1 ms.
+- **Cleanup Behavior & Handle Close Failures**: Handle closure failures on otherwise-successful reads surface as typed `io_error` outcomes without returning a digest. When both processing and cleanup fail, primary failure details are preserved without masking. Native close operations are never blindly retried.
 - **Stage 2 Scope Isolation**: Stage 2B provides streaming SHA-256 calculation only. SQLite catalog persistence belongs to Stage 2C; resumable scan jobs and UI/IPC integration belong to Stage 2D.
 
 ---
 
 ## 5. Immediate Recommended Next Task
 
-**Independent review of Stage 2B correction pass** on `feat/stage-2b-streaming-hashing`. Do not push, merge, or proceed to Stage 2C until review is accepted.
+**Stage 2C: SQLite catalog schema and inventory persistence**, beginning with database initialization, schema migration, recorded file facts storage, and transactional batch persistence. Resumable background scan-job orchestration and IPC/UI integration follow in Stage 2D.
