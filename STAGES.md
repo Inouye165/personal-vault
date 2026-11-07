@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stage 1 and substages 2A-2C are complete. Stage 2D implementation is complete and awaiting independent review; Stages 3-8 are future work. Public release has not occurred and has no scheduled date.
+Stage 1 and Stage 2 (substages 2A-2D) are complete. Stage 2 independently accepted at `71e1af7`. Stage 3 is next; Stages 3-8 are future work. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status                          | Acceptance     |
-| ----- | -------------------------------------------------------------- | ------------------------------- | -------------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete                        | `070e3cb`      |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | In progress; 2D awaiting review | 2A-2C accepted |
-| 3     | Exact duplicate grouping and review                            | Planned                         | Pending        |
-| 4     | Verified vault copying and portable metadata                   | Planned                         | Pending        |
-| 5     | Fast photo browsing, ratings, and similarity review            | Planned                         | Pending        |
-| 6     | Semantic photo search and metadata filters                     | Planned                         | Pending        |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned                         | Pending        |
-| 8     | Export, recovery, release validation, beta, and public release | Planned                         | Pending        |
+| Stage | Deliverable                                                    | Status   | Acceptance |
+| ----- | -------------------------------------------------------------- | -------- | ---------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete | `070e3cb`  |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete | `71e1af7`  |
+| 3     | Exact duplicate grouping and review                            | Planned  | Pending    |
+| 4     | Verified vault copying and portable metadata                   | Planned  | Pending    |
+| 5     | Fast photo browsing, ratings, and similarity review            | Planned  | Pending    |
+| 6     | Semantic photo search and metadata filters                     | Planned  | Pending    |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned  | Pending    |
+| 8     | Export, recovery, release validation, beta, and public release | Planned  | Pending    |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -36,14 +36,14 @@ Status meanings: **Planned** = future work; **Starting** = preparation underway;
 
 ## Stage 2 - Discovery and resumable inventory
 
-**In progress: three of four substages complete; 2D awaiting review.**
+**Complete; accepted at `71e1af7`.**
 
-| Substage | Deliverable                                                       | Status          | Accepted implementation | Documentation closeout |
-| -------- | ----------------------------------------------------------------- | --------------- | ----------------------- | ---------------------- |
-| 2A       | Read-only discovery and filesystem inventory                      | Complete        | `5dd6320`               | `000923e`              |
-| 2B       | Read-only streaming SHA-256 hashing                               | Complete        | `e4488a2`               | `ab2fd60`              |
-| 2C       | SQLite schema, migrations, inventory, and observation persistence | Complete        | `a674f9c`               | `d25ba50`              |
-| 2D       | Resumable background scan jobs and IPC/UI integration             | Awaiting review | Pending                 | Pending                |
+| Substage | Deliverable                                                       | Status   | Accepted implementation | Documentation closeout |
+| -------- | ----------------------------------------------------------------- | -------- | ----------------------- | ---------------------- |
+| 2A       | Read-only discovery and filesystem inventory                      | Complete | `5dd6320`               | `000923e`              |
+| 2B       | Read-only streaming SHA-256 hashing                               | Complete | `e4488a2`               | `ab2fd60`              |
+| 2C       | SQLite schema, migrations, inventory, and observation persistence | Complete | `a674f9c`               | `d25ba50`              |
+| 2D       | Resumable background scan jobs and IPC/UI integration             | Complete | `71e1af7`               | (this commit)          |
 
 Stage 2D:
 
@@ -52,7 +52,7 @@ Stage 2D:
 - [x] Persist checkpoints and recover interrupted jobs with source-file revalidation.
 - [x] Add validated IPC and minimal controls within the existing UI design.
 - [x] Verify actual scanning and recovery in Electron and applicable packaged execution.
-- [ ] Obtain independent acceptance and documentation closeout.
+- [x] Obtain independent acceptance and documentation closeout (`71e1af7`).
 
 Exit: users can manage scans and recover interrupted work after restart without modifying originals or treating stale hashes as verified.
 

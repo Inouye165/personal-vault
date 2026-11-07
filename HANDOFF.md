@@ -5,7 +5,7 @@
 - **Workspace**: `D:\organizer`
 - **Branch**: `feat/stage-2d-scan-jobs` (branched from accepted Stage 2C closeout commit `d25ba50` / `a674f9c`)
 - **Stage 1 status**: complete (`070e3cb`).
-- **Stage 2 status**: **Stage 2A, 2B, 2C accepted; Stage 2D complete and awaiting independent review (Stage 2 complete pending acceptance)**.
+- **Stage 2 status**: **complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`)**.
 
 ---
 
@@ -221,4 +221,4 @@ Execution results on implementation host (`D:\organizer`):
 
 ## 5. Immediate Recommended Next Task
 
-**Independent review of Stage 2D review corrections on `feat/stage-2d-scan-jobs`. Upon acceptance and merge to `main`, Stage 2 will be complete, allowing Stage 3 (Exact duplicate grouping and review) to begin.**
+**Stage 3: Exact duplicate grouping and review workflow on `feat/stage-3-duplicate-review`.**
