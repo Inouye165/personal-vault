@@ -12,6 +12,7 @@
     "smoke:dev": "node scripts/smoke.mjs --mode=dev",
     "smoke:built": "node scripts/smoke.mjs --mode=built",
     "smoke:unpacked": "node scripts/smoke.mjs --mode=unpacked",
+    "verify:sqlite": "electron scripts/verify-electron-sqlite.mjs",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

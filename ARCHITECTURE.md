@@ -64,13 +64,20 @@ src/
 │       │   ├── scanner.ts    # Incremental bounded scanner with AbortSignal cleanup
 │       │   ├── types.ts      # Candidate, skip, error, and result contracts
 │       │   └── index.ts      # Public discovery exports
-│       └── hashing/       # Stage 2B: read-only streaming SHA-256 hashing
-│           ├── fs-adapter.ts # Narrow read-only adapter (lstat, realpath, open 'r')
-│           ├── limits.ts     # Resource limit validation (chunkSizeBytes, maxFileSizeBytes)
-│           ├── path-security.ts # Approved-root canonical containment check
-│           ├── hasher.ts     # Streaming SHA-256 hasher with pre/post fstat verification
-│           ├── types.ts      # Discriminated union outcomes and configuration contracts
-│           └── index.ts      # Public hashing exports
+│       ├── hashing/       # Stage 2B: read-only streaming SHA-256 hashing
+│       │   ├── fs-adapter.ts # Narrow read-only adapter (lstat, realpath, open 'r')
+│       │   ├── limits.ts     # Resource limit validation (chunkSizeBytes, maxFileSizeBytes)
+│       │   ├── path-security.ts # Approved-root canonical containment check
+│       │   ├── hasher.ts     # Streaming SHA-256 hasher with pre/post fstat verification
+│       │   ├── types.ts      # Discriminated union outcomes and configuration contracts
+│       │   └── index.ts      # Public hashing exports
+│       └── catalog/       # Stage 2C: SQLite catalog schema and inventory persistence
+│           ├── database.ts   # CatalogDatabase repository (parameterized, transactions, bounded queries)
+│           ├── errors.ts     # Domain errors (UnsupportedSchemaVersionError, DatabaseClosedError, etc.)
+│           ├── migrations.ts # Versioned transactional migrations and schema definition
+│           ├── path-normalization.ts # Documented platform-aware lookup key normalization
+│           ├── types.ts      # Persistence contracts, records, and pagination interfaces
+│           └── index.ts      # Public catalog exports
 ├── preload/
 │   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
@@ -153,3 +160,39 @@ src/
    - **Descriptor Pre/Post Verification (`fstat`) & Pathname Revalidation**: An opened file descriptor is inspected via `handle.stat()` (`fstat`) both immediately after opening and immediately after reading reaches EOF. Furthermore, the candidate pathname is revalidated on disk after reading (`lstat` and `realpath`), detecting observable replacement, disappearance, link substitution, changed canonical destinations, or descriptor inode/dev mismatches. No successful digest is ever returned for a detected unstable read or path change. While user-space path and descriptor checks drastically narrow the TOCTOU window, Node does not provide a race-proof kernel-level `openat` sandbox.
    - **Deterministic Cleanup, Error Preservation & Cancellation**: Bounded reads observe `AbortSignal` cooperative cancellation. Handle closure failures on otherwise-successful reads surface as typed errors without a digest; when both processing and cleanup fail, primary failure information is preserved without masking.
    - **Typed Discriminated Outcomes**: Returns typed results (`success`, `cancelled`, `file_changed`, `rejected`, `error`). Partial digests are strictly excluded from non-success outcomes.
+8. **SQLite Catalog Schema & Persistence Architecture (Stage 2C)**:
+   - **Driver Selection & Electron/Testing Compatibility**:
+     - Evaluated `node:sqlite` (`DatabaseSync`, built into Node 22.18.0 and Electron 45.2.3's Node 24.22.2 with SQLite 3.53.4) against external C++ addons (`better-sqlite3`).
+     - Selected `node:sqlite`: requires zero native compilation or `@electron/rebuild`, eliminates ABI mismatch risks between testing (Node 22) and Electron main (Electron 45), avoids unpacking native binaries during packaging (`electron-builder`), and natively supports WAL mode, foreign keys, and synchronous parameterized statements.
+     - Verified working in real Electron runtime (`npm run verify:sqlite`, `npm run smoke:built`, and `npm run smoke:unpacked`).
+   - **Explicit Initialization & App-Owned Location**:
+     - Database connection is initialized explicitly via `CatalogDatabase.open({ catalogPath })` at a caller-supplied path.
+     - Never creates files on module import or begins automatic scans.
+     - Parent directories are created automatically if missing.
+   - **Versioned Transactional Schema Migrations**:
+     - Migrations are tracked in `schema_migrations` (`version`, `name`, `applied_at_ms`).
+     - Reopening an existing database at the current version is idempotent and safe.
+     - Reopening with an unsupported future schema version (`version > CURRENT_SCHEMA_VERSION`) fails immediately with `UnsupportedSchemaVersionError` without executing any SQL modifications.
+     - Migrations execute inside an explicit transaction (`BEGIN TRANSACTION` ... `COMMIT`), rolling back changes completely on error.
+   - **Normalized Lookup Keys vs. Verbatim Original Paths**:
+     - `original_path` and `file_name` are preserved exactly as discovered (verbatim case, whitespace, and Unicode characters like emojis or non-ASCII scripts).
+     - `normalized_path` is kept separate solely as a lookup and uniqueness key (`UNIQUE` constraint).
+     - Platform behavior: on Windows (`win32`), slashes are standardized to `\`, trailing separators stripped, and paths folded to lowercase (`.toLowerCase()`) for case-insensitive matching; on POSIX systems (`linux`, `darwin`), standardizes separators and normalizes while preserving case.
+   - **Fact vs. Inference Separation & Timestamp Honesty**:
+     - Filesystem dates (`filesystem_birthtime_ms`, `filesystem_mtime_ms`) are recorded as immutable discovery facts.
+     - `inferred_capture_time_ms` is kept distinct and initialized to `null`. Unknown values remain `null`; filesystem dates are never fabricated as capture dates.
+   - **Changed-File Modeling & Explicit Hash Validity**:
+     - `file_locations` stores the latest recorded discovery facts.
+     - `hash_observations` stores SHA-256 observations with `observed_byte_size`, `observed_mtime_ms`, `hashed_at_ms`, and `is_active` boolean flag.
+     - When a subsequent discovery scan observes that a file's `byte_size` or `filesystem_mtime_ms` has changed, the file's facts are updated and any existing active hash is immediately invalidated (`is_active = 0`). A new scan can never present an old hash as verified for modified file contents.
+     - If discovery observes identical size and mtime, `last_seen_at_ms` is updated while active hash validity is preserved without duplicate rows.
+   - **Foreign Keys, Cascades & Parameterized Transactions**:
+     - Foreign keys are enforced (`PRAGMA foreign_keys = ON;`).
+     - Deleting a source cascades deletion to associated `file_locations` and `hash_observations` (`ON DELETE CASCADE`).
+     - Batch persistence (`persistDiscoveryBatch`, `recordHashObservationsBatch`) executes in a single transaction with automatic rollback if any candidate or observation fails validation.
+   - **Bounded & Paginated Queries**:
+     - Reads are bounded using `LIMIT` and `OFFSET` (`queryFileLocations`, `getDuplicateGroups`) with configurable limits (default 50, maximum 1000) and accurate total counts.
+     - Prevents unbounded memory consumption on large catalogs.
+   - **Source Preservation Invariance**:
+     - Database writes affect strictly the app-owned SQLite catalog file.
+     - Source files on disk remain strictly read-only and unaltered.

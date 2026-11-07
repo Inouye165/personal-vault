@@ -79,6 +79,7 @@ All commands run from project root (`D:\organizer`):
 - **Full bundle build**: `npm run build`
 - **Unpacked desktop binary build**: `npm run build:unpack`
 - **Real Electron bridge smoke checks**: `npm run smoke:dev`, `npm run smoke:built`, `npm run smoke:unpacked` (the unpacked check requires `npm run build:unpack` first)
+- **Electron SQLite driver check**: `npm run verify:sqlite`
 
 ---
 
