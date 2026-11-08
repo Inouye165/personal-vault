@@ -73,12 +73,18 @@ Exit: users can understand and review duplicate groups without losing locations 
 
 ## Stage 4 - Verified vault copying
 
-**Planned.**
+**Implemented; awaiting independent review.**
 
-- [ ] Initialize vault storage and copy selected originals without moving sources.
-- [ ] Verify hashes before acknowledging success; handle failed/interrupted copies safely.
-- [ ] Preserve provenance and portable metadata through manifests or sidecars.
-- [ ] Record import results and an audit trail.
+- [x] Initialize vault storage directory with versioned identity manifest (`vault.json`) and validate separation from source roots.
+- [x] Strict source preservation: source files are strictly read-only; originals are never moved, renamed, touched, overwritten, or deleted.
+- [x] Verified copy pipeline (`copyAndVerifyFileToVault`): pre/post `fstat` source descriptor checks, bounded 64 KiB chunk streaming SHA-256 calculation, post-read path revalidation, and independent post-write destination staging SHA-256 verification before atomic publication.
+- [x] Content-addressed vault storage (`files/<prefix>/<sha256>/<safeName>`) with safe collision handling; duplicate content shares a verified copy while preserving multi-source provenance.
+- [x] Portable metadata manifests (`manifest.json` sidecars) recording original paths, filesystem timestamps, byte size, verified hashes, observation provenance, and audit results; preserving explicit `null`s for missing capture dates/locations without SQLite dependency.
+- [x] Resumable import coordinator (`VaultImportCoordinator`) with single-active-job concurrency locking, pause/resume, cooperative cancellation via `AbortSignal`, restart recovery (`interrupted` status), and owned temporary staging file cleanup.
+- [x] SQLite catalog schema expansion (Migration 6) adding `vaults`, `vault_copies`, `vault_imports`, and `vault_import_items` tables with audit trail.
+- [x] Narrow typed IPC channels (`VAULT_*`) with strict bidirectional Zod validation and top-level sender authorization.
+- [x] Accessible renderer UI (`VaultImportPanel`) with setup card, candidate selection table with filters, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, verified success banner, and operations distinction notice.
+- [x] Isolated-fixture verification script (`scripts/verify-electron-vault-import.mjs`) exercising vault initialization, overlap rejection, candidate queries, verified copying, duplicate content manifest merging, idempotency, modified source rejection, cancellation, restart recovery, and source preservation invariance across real Electron built and unpacked modes.
 
 Exit: originals can be copied with verified integrity and recoverable metadata outside SQLite.
 

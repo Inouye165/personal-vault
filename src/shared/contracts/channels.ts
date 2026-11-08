@@ -13,7 +13,19 @@ export const IPC_CHANNELS = {
   SCAN_PROGRESS_EVENT: 'scan:progress-event',
   DUPLICATES_GET_GROUPS: 'duplicates:get-groups',
   DUPLICATES_GET_MEMBERS: 'duplicates:get-members',
-  DUPLICATES_SET_REVIEW: 'duplicates:set-review'
+  DUPLICATES_SET_REVIEW: 'duplicates:set-review',
+  VAULT_SELECT_DIRECTORY: 'vault:select-directory',
+  VAULT_INITIALIZE: 'vault:initialize',
+  VAULT_GET_ACTIVE: 'vault:get-active',
+  VAULT_SET_ACTIVE: 'vault:set-active',
+  VAULT_GET_IMPORT_CANDIDATES: 'vault:get-import-candidates',
+  VAULT_START_IMPORT: 'vault:start-import',
+  VAULT_PAUSE_IMPORT: 'vault:pause-import',
+  VAULT_RESUME_IMPORT: 'vault:resume-import',
+  VAULT_CANCEL_IMPORT: 'vault:cancel-import',
+  VAULT_GET_ACTIVE_IMPORT: 'vault:get-active-import',
+  VAULT_GET_LATEST_IMPORT: 'vault:get-latest-import',
+  VAULT_PROGRESS_EVENT: 'vault:progress-event'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

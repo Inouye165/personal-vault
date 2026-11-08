@@ -239,6 +239,157 @@ export const SetDuplicateReviewResponseSchema = z.object({
 })
 export type SetDuplicateReviewResponse = z.infer<typeof SetDuplicateReviewResponseSchema>
 
+// ==========================================
+// Stage 4: Vault & Verified Import Schemas
+// ==========================================
+
+export const VaultIdentitySchema = z.object({
+  formatVersion: z.literal(1),
+  vaultId: z.string().min(1),
+  vaultName: z.string().min(1),
+  createdAtMs: z.number().int().nonnegative(),
+  appVersion: z.string().min(1)
+})
+export type VaultIdentity = z.infer<typeof VaultIdentitySchema>
+
+export const SelectVaultDirectoryResponseSchema = z.object({
+  selectedDirectory: z.string().nullable()
+})
+export type SelectVaultDirectoryResponse = z.infer<typeof SelectVaultDirectoryResponseSchema>
+
+export const InitializeVaultRequestSchema = z.object({
+  vaultPath: z.string().min(1),
+  vaultName: z.string().min(1)
+})
+export type InitializeVaultRequest = z.infer<typeof InitializeVaultRequestSchema>
+
+export const InitializeVaultResponseSchema = z.object({
+  vault: VaultIdentitySchema
+})
+export type InitializeVaultResponse = z.infer<typeof InitializeVaultResponseSchema>
+
+export const VaultRecordSchema = z.object({
+  vaultId: z.string().min(1),
+  vaultPath: z.string().min(1),
+  name: z.string().min(1),
+  createdAtMs: z.number().int().nonnegative()
+})
+export type VaultRecord = z.infer<typeof VaultRecordSchema>
+
+export const GetActiveVaultResponseSchema = z.object({
+  vault: VaultRecordSchema.nullable()
+})
+export type GetActiveVaultResponse = z.infer<typeof GetActiveVaultResponseSchema>
+
+export const SetActiveVaultRequestSchema = z.object({
+  vaultPath: z.string().min(1)
+})
+export type SetActiveVaultRequest = z.infer<typeof SetActiveVaultRequestSchema>
+
+export const SetActiveVaultResponseSchema = z.object({
+  vault: VaultRecordSchema
+})
+export type SetActiveVaultResponse = z.infer<typeof SetActiveVaultResponseSchema>
+
+export const ImportCandidateRecordSchema = z.object({
+  fileLocationId: z.number().int().positive(),
+  sourceId: z.number().int().positive(),
+  originalPath: z.string().min(1),
+  fileName: z.string().min(1),
+  extension: z.string(),
+  category: z.enum(['photo', 'document']),
+  byteSize: z.number().int().nonnegative(),
+  filesystemBirthtimeMs: z.number().int().nonnegative().nullable(),
+  filesystemMtimeMs: z.number().int().nonnegative().nullable(),
+  inferredCaptureTimeMs: z.number().int().nonnegative().nullable(),
+  sha256: z.string().length(64),
+  discoveryObservationId: z.number().int().positive(),
+  hashObservationId: z.number().int().positive(),
+  vaultStatus: z.enum(['not_imported', 'copied']),
+  vaultCopyId: z.number().int().positive().nullable().optional(),
+  isPreferred: z.boolean().optional()
+})
+export type ImportCandidateRecord = z.infer<typeof ImportCandidateRecordSchema>
+export type ImportCandidateItem = ImportCandidateRecord
+
+export const GetImportCandidatesRequestSchema = z.object({
+  vaultId: z.string().min(1),
+  offset: z.number().int().nonnegative().optional().default(0),
+  limit: z.number().int().positive().max(500).optional().default(50),
+  filter: z.enum(['all', 'unimported', 'imported']).optional().default('all'),
+  category: z.enum(['photo', 'document']).optional()
+})
+export type GetImportCandidatesRequest = z.infer<typeof GetImportCandidatesRequestSchema>
+
+export const GetImportCandidatesResponseSchema = z.object({
+  items: z.array(ImportCandidateRecordSchema),
+  totalCount: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  hasMore: z.boolean()
+})
+export type GetImportCandidatesResponse = z.infer<typeof GetImportCandidatesResponseSchema>
+
+export const StartImportRequestSchema = z.object({
+  vaultId: z.string().min(1),
+  fileLocationIds: z.array(z.number().int().positive()).min(1)
+})
+export type StartImportRequest = z.infer<typeof StartImportRequestSchema>
+
+export const VaultImportJobRecordSchema = z.object({
+  id: z.string().min(1),
+  vaultId: z.string().min(1),
+  status: z.enum(['running', 'paused', 'cancelled', 'interrupted', 'failed', 'completed']),
+  totalFiles: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  copiedFiles: z.number().int().nonnegative(),
+  copiedBytes: z.number().int().nonnegative(),
+  verifiedFiles: z.number().int().nonnegative(),
+  failedFiles: z.number().int().nonnegative(),
+  startedAtMs: z.number().int().nonnegative(),
+  completedAtMs: z.number().int().nonnegative().nullable().optional(),
+  errorMessage: z.string().nullable().optional()
+})
+export type VaultImportJobRecord = z.infer<typeof VaultImportJobRecordSchema>
+
+export const StartImportResponseSchema = z.object({
+  job: VaultImportJobRecordSchema
+})
+export type StartImportResponse = z.infer<typeof StartImportResponseSchema>
+
+export const VaultImportProgressSchema = z.object({
+  jobId: z.string().min(1),
+  vaultId: z.string().min(1),
+  status: z.enum(['running', 'paused', 'cancelled', 'interrupted', 'failed', 'completed']),
+  phase: z.enum(['revalidating', 'copying', 'verifying', 'publishing', 'writing_manifest', 'idle']),
+  totalFiles: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  copiedFiles: z.number().int().nonnegative(),
+  copiedBytes: z.number().int().nonnegative(),
+  verifiedFiles: z.number().int().nonnegative(),
+  failedFiles: z.number().int().nonnegative(),
+  currentFileName: z.string().optional(),
+  errorMessage: z.string().nullable().optional()
+})
+export type VaultImportProgress = z.infer<typeof VaultImportProgressSchema>
+
+export const GetActiveImportJobResponseSchema = z.object({
+  job: VaultImportJobRecordSchema.nullable()
+})
+export type GetActiveImportJobResponse = z.infer<typeof GetActiveImportJobResponseSchema>
+
+export const GetLatestImportJobResponseSchema = z.object({
+  job: VaultImportJobRecordSchema.nullable()
+})
+export type GetLatestImportJobResponse = z.infer<typeof GetLatestImportJobResponseSchema>
+
+export const VaultImportActionResponseSchema = z.object({
+  success: z.boolean(),
+  job: VaultImportJobRecordSchema.nullable().optional(),
+  message: z.string().optional()
+})
+export type VaultImportActionResponse = z.infer<typeof VaultImportActionResponseSchema>
+
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,
   data: unknown

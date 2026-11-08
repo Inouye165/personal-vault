@@ -76,7 +76,48 @@ describe('Stage 2D — Scan Job UI Integration', () => {
       preferredLocationId: null,
       groupSignature: 'sig',
       reviewedAtMs: 1000
-    }))
+    })),
+    selectVaultDirectory: vi.fn(async () => ({ selectedDirectory: null })),
+    initializeVault: vi.fn(async () => ({
+      vault: {
+        formatVersion: 1 as const,
+        vaultId: 'v-1',
+        vaultName: 'Vault',
+        createdAtMs: Date.now(),
+        appVersion: '0.1.0'
+      }
+    })),
+    getActiveVault: vi.fn(async () => ({ vault: null })),
+    setActiveVault: vi.fn(async () => ({
+      vault: { vaultId: 'v-1', vaultPath: 'D:/vault', name: 'Vault', createdAtMs: Date.now() }
+    })),
+    getImportCandidates: vi.fn(async () => ({
+      items: [],
+      totalCount: 0,
+      offset: 0,
+      limit: 50,
+      hasMore: false
+    })),
+    startImport: vi.fn(async () => ({
+      job: {
+        id: 'j-1',
+        vaultId: 'v-1',
+        status: 'running' as const,
+        totalFiles: 0,
+        totalBytes: 0,
+        copiedFiles: 0,
+        copiedBytes: 0,
+        verifiedFiles: 0,
+        failedFiles: 0,
+        startedAtMs: Date.now()
+      }
+    })),
+    pauseImport: vi.fn(async () => ({ success: true })),
+    resumeImport: vi.fn(async () => ({ success: true })),
+    cancelImport: vi.fn(async () => ({ success: true })),
+    getActiveImportJob: vi.fn(async () => ({ job: null })),
+    getLatestImportJob: vi.fn(async () => ({ job: null })),
+    onImportProgress: vi.fn(() => () => {})
   })
 
   beforeEach(() => {

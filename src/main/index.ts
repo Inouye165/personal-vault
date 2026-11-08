@@ -7,6 +7,7 @@ import { resolveAppLocation, secureWebContents } from './navigation'
 import { setupSecurityPolicies } from './security'
 import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
+import { VaultImportCoordinator } from './services/vault'
 
 function logStartup(message: string): void {
   try {
@@ -39,6 +40,7 @@ logStartup(`Location resolved: kind=${location.kind}, details=${JSON.stringify(l
 let mainWindow: BrowserWindow | null = null
 let catalog: CatalogDatabase | null = null
 let coordinator: ScanJobCoordinator | null = null
+let vaultCoordinator: VaultImportCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -141,6 +143,10 @@ if (!app.requestSingleInstanceLock()) {
       await coordinator.initialize()
       logStartup('coordinator.initialize completed')
 
+      vaultCoordinator = new VaultImportCoordinator({ catalog })
+      await vaultCoordinator.initialize()
+      logStartup('vaultCoordinator.initialize completed')
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -148,6 +154,7 @@ if (!app.requestSingleInstanceLock()) {
         }),
         catalog,
         coordinator,
+        vaultCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -178,6 +185,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down coordinator')
             await coordinator.shutdown()
             logStartup('coordinator shutdown done')
+          }
+          if (vaultCoordinator) {
+            logStartup('shutting down vault coordinator')
+            await vaultCoordinator.shutdown()
+            logStartup('vault coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

@@ -3,378 +3,153 @@
 ## Current state
 
 - **Workspace**: `D:\organizer`
-- **Branch**: `feat/stage-3-duplicate-review` (branched from accepted Stage 2 documentation closeout commit `eea7daa` / `71e1af7`)
+- **Branch**: `feat/stage-4-verified-import` (branched directly from verified Stage 3 closeout commit `cf91653`, ancestry verified)
 - **Stage 1 status**: complete (`070e3cb`).
 - **Stage 2 status**: complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, closeout committed at `eea7daa`).
-- **Stage 3 status**: complete (independently accepted at `79bbf44`, documentation closeout committed on `feat/stage-3-duplicate-review`).
+- **Stage 3 status**: complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
+- **Stage 4 status**: **Implemented; awaiting independent review.** (Never implement on `main`; no push or merge authorized).
 
 ---
 
-## 1. Stage 3 Architecture & Module Responsibilities
+## 1. Stage 4 Architecture & Module Responsibilities
 
-Stage 3 implements exact duplicate grouping by current verified SHA-256 and byte size, persistent review decisions (reviewed/unreviewed status and optional preferred location), deterministic group state signatures, automatic decision invalidation upon membership/content/observation changes, stale write rejection, narrow typed IPC contracts with bidirectional runtime Zod validation, and side-by-side member inspection in the desktop renderer without altering source files.
+Stage 4 implements a modular, offline-first workflow that copies explicitly selected originals into user-selected vault storage, verifies integrity, and preserves portable metadata and multi-source provenance:
 
-### 1.1 Catalog Database Migration 5 & Review Persistence (`src/main/services/catalog/`)
+### 1.1 Inviolable Principle — Source Preservation
+
+- Source files are strictly read-only during discovery, classification, and import.
+- Discovered originals are never moved, renamed, touched, overwritten, or deleted.
+- Source preservation invariance is verified in tests and real Electron fixtures via cryptographic SHA-256 hash, byte size, and sub-millisecond filesystem modification timestamp baseline comparisons.
+
+### 1.2 Separation of Source & Vault Storage (`src/main/services/vault/copier.ts`)
+
+- Strict separation between source roots and vault storage is enforced using canonical `realpath` checks (`validateVaultSeparation`).
+- Direct equality, sub-path nesting (source inside vault, or vault inside source), and symlink/Windows junction escapes are rejected eagerly with `VaultOverlapError`.
+- Separation validation is enforced across all entry points: `initializeVault`, `setActiveVault`, and `startScan`.
+
+### 1.3 Vault Identification & Identity Manifest (`src/main/services/vault/identity.ts`)
+
+- Vault directory is explicitly identified by a versioned identity manifest `vault.json` in the root of the vault:
+  - `formatVersion: 1`
+  - `vaultId`: unique UUID
+  - `vaultName`: user-supplied label
+  - `createdAtMs`: integer timestamp
+  - `appVersion`: application version
+- Arbitrary unmanaged directories without a valid `vault.json` are rejected.
+
+### 1.4 Verified Copy Pipeline (`src/main/services/vault/copier.ts`)
+
+- `copyAndVerifyFileToVault(params)`:
+  1. Opens source file descriptor strictly in read-only mode (`open(path, 'r')`).
+  2. Pre-read `fstat` verifies regular file status, byte size match, and modification timestamp consistency against recorded catalog facts (`isTimestampConsistentWithExpectation`).
+  3. Chunked streaming copy (constant 64 KiB buffer) computing incremental SHA-256 simultaneously into staging destination file in `.vault-temp/`.
+  4. Post-read descriptor `fstat` verifies source remained stable and unaltered throughout the entire copy.
+  5. Post-read pathname revalidation (`lstat` and `realpath`) ensures candidate path on disk was not swapped, moved, or link-substituted during the copy.
+  6. Destination staging file descriptor sync (`fdatasync`), independent descriptor reopening, and complete destination re-read SHA-256 computation to confirm disk bits match expected hash before publication.
+  7. Atomic publication via `renameSync` into content-addressed location `files/<prefix>/<sha256>/<safeName>`. Existing destination files are never silently overwritten.
+  8. Collision-safe naming: filenames are sanitized of control characters and platform reserved characters, preserving extension.
+  9. Deduplicated storage: repeated imports of identical content share a single verified managed file on disk while preserving differing source locations and metadata in the manifest.
+  10. Documented limitations: Narrowed TOCTOU window through descriptor and pathname revalidation; user-space filesystem APIs on POSIX and Win32 lack atomic copy primitives.
+
+### 1.5 Portable Metadata Manifests (`src/main/services/vault/manifest.ts`)
+
+- Written alongside managed copies at `files/<prefix>/<sha256>/manifest.json`.
+- Versioned schema (`formatVersion: 1`), fully machine-readable and interpretable without SQLite.
+- Preserves multi-source provenance: when duplicate source locations share one managed copy, all source paths, differing original filenames, timestamps, and observation IDs are merged and preserved in `sources`.
+- Fact vs. inference separation: unknown capture dates and locations remain explicit `null` (never fabricated).
+- Audit trail: records `importJobId`, `importedAtMs`, verified SHA-256 and byte size, and source stability stats (`preCopyMtimeMs`, `postCopyMtimeMs`, sizes).
+
+### 1.6 Resumable Import Coordinator (`src/main/services/vault/coordinator.ts`)
+
+- `VaultImportCoordinator` manages import job lifecycle:
+  - Concurrency lock: at most one active job across the application (`ActiveJobConflictError`).
+  - Cooperative yielding (`setImmediate`) to keep main event loop and UI completely responsive.
+  - Pause, resume, and cancellation via `AbortSignal`.
+  - Restart recovery: on `initialize()`, stale running or paused jobs are marked `interrupted` via `markRunningImportJobsAsInterrupted()`.
+  - Safe recovery: resuming an interrupted job revalidates sources against live disk state rather than trusting checkpoints.
+  - Cleanup restricted strictly to owned staging temporary files in `.vault-temp/` (`staging_<jobId>_<uuid>.tmp`).
+
+### 1.7 Catalog Database Migration 6 (`src/main/services/catalog/`)
 
 - [`src/main/services/catalog/migrations.ts`](file:///d:/organizer/src/main/services/catalog/migrations.ts):
-  - Incremented `CURRENT_SCHEMA_VERSION = 5`.
-  - **Migration 5 (`duplicate_reviews`)**:
-    - Creates `duplicate_reviews` table tracking `id`, `sha256` (64-char hex), `byte_size` (non-negative integer), `status` (`'unreviewed'` | `'reviewed'`), `preferred_location_id` (`REFERENCES file_locations(id) ON DELETE SET NULL`), `group_signature` (deterministic 64-char hex signature), `reviewed_at_ms`, and `updated_at_ms`.
-    - Enforces uniqueness on `(sha256, byte_size)`.
-    - Creates indexes on `(sha256, byte_size)` and `preferred_location_id`.
-- [`src/main/services/catalog/database.ts`](file:///d:/organizer/src/main/services/catalog/database.ts):
-  - `getDuplicateGroups(options?: DuplicateGroupOptions)`:
-    - Queries duplicate content clusters where `d.is_current = 1 AND h.is_active = 1 AND h.observed_byte_size = d.byte_size` having `COUNT(DISTINCT h.file_location_id) > 1`.
-    - Excludes inactive, invalidated, or superseded discovery observations.
-    - Computes deterministic `groupSignature` for each cluster.
-    - Applies review invalidation check: if stored signature does not match current signature, or if preferred location is no longer an active member, reverts status to `'unreviewed'`, clears preferred location, and sets `hasStaleDecision = true`.
-    - Supports review status filtering (`'all'`, `'unreviewed'`, `'reviewed'`).
-    - Deterministically ordered by `file_count DESC, byte_size DESC, sha256 ASC`.
-    - Bounded pagination with `truncatedLocations` boolean indicating if preview locations list is truncated.
-  - `getDuplicateGroupMembers(options: DuplicateGroupMembersOptions)`:
-    - Dedicated keyset query retrieving all active members of an exact duplicate group.
-    - Deterministically ordered by `file_location_id ASC`.
-    - Independently paginated (`offset`, `limit`, `totalCount`, `hasMore`).
-    - Returns full recorded facts (`fileName`, `originalPath`, `byteSize`, `filesystemBirthtimeMs`, `filesystemMtimeMs`, `firstDiscoveredAtMs`, `lastSeenAtMs`), inferred metadata (`inferredCaptureTimeMs`), hash provenance (`hashObservationId`, `discoveryObservationId`, `activeHash`, `activeHashVerifiedAtMs`), and `isPreferred` boolean.
-  - `setDuplicateReview(input: SetDuplicateReviewInput)`:
-    - Enforces that the target group exists with >= 2 active members.
-    - Verifies that `expectedGroupSignature` matches the current group signature. If not, throws `StaleReviewError`.
-    - Verifies that `preferredLocationId` (if specified) is an active member of the group. If not, throws `InvalidPreferredLocationError`.
-    - Atomically upserts into `duplicate_reviews`.
-    - Decisions are catalog annotations only; they never alter source files or mutate recorded facts.
+  - Incremented `CURRENT_SCHEMA_VERSION = 6`.
+  - **Migration 6**:
+    - `vaults`: `(id, vault_id, vault_path, normalized_vault_path, name, created_at_ms, updated_at_ms, is_active)`
+    - `vault_copies`: `(id, vault_id, sha256, byte_size, relative_path, manifest_relative_path, verified_at_ms, created_at_ms, updated_at_ms)`
+    - `vault_imports`: `(id, vault_id, status, total_files, total_bytes, copied_files, copied_bytes, verified_files, failed_files, started_at_ms, completed_at_ms, updated_at_ms, error_message)`
+    - `vault_import_items`: `(id, import_id, file_location_id, discovery_observation_id, hash_observation_id, sha256, byte_size, status, started_at_ms, completed_at_ms, error_message)`
+    - Enforces foreign keys and unique constraints.
 
-### 1.2 Decision Invalidation Policy & Stale Write Detection
-
-- **Group Signature Computation**:
-  - The signature of an exact duplicate group is calculated as `SHA-256(tokens.join(';'))`, where each member token is `fileLocationId:discoveryObservationId:hashObservationId`, sorted deterministically by `fileLocationId ASC`.
-  - Any change to group membership (new duplicate discovered, or file deleted), content (byte size changed), or verified observation (file modified on disk and rescanned, replacing discovery and hash observation IDs) changes the signature.
-- **Automatic Decision Invalidation**:
-  - If a group's current signature differs from the signature stored at review time:
-    - The review decision is treated as invalidated.
-    - `reviewStatus` is reported as `'unreviewed'`.
-    - `preferredLocationId` is reported as `null`.
-    - `hasStaleDecision` is set to `true`, notifying the user that the group changed.
-  - Never silently carries a reviewed decision onto a changed group or retains an invalid preferred member.
-- **Stale Write Rejection**:
-  - When the client submits a review decision, it passes `expectedGroupSignature`.
-  - If the group has changed since the user loaded the review screen, the catalog rejects the submission with `StaleReviewError` ("Stale review: the duplicate group has changed since it was loaded. Please refresh before saving.").
-
-### 1.3 IPC Contracts & Boundary Validation (`src/shared/`, `src/preload/`, `src/main/ipc/`)
+### 1.8 IPC Contracts & Boundary Validation (`src/shared/`, `src/preload/`, `src/main/ipc/`)
 
 - [`src/shared/contracts/channels.ts`](file:///d:/organizer/src/shared/contracts/channels.ts):
-  - Added channels: `DUPLICATES_GET_GROUPS`, `DUPLICATES_GET_MEMBERS`, `DUPLICATES_SET_REVIEW`.
+  - Added channels: `VAULT_SELECT_DIRECTORY`, `VAULT_INITIALIZE`, `VAULT_GET_ACTIVE`, `VAULT_SET_ACTIVE`, `VAULT_GET_IMPORT_CANDIDATES`, `VAULT_START_IMPORT`, `VAULT_PAUSE_IMPORT`, `VAULT_RESUME_IMPORT`, `VAULT_CANCEL_IMPORT`, `VAULT_GET_ACTIVE_IMPORT`, `VAULT_GET_LATEST_IMPORT`, `VAULT_PROGRESS_EVENT`.
 - [`src/shared/validation/ipc-schemas.ts`](file:///d:/organizer/src/shared/validation/ipc-schemas.ts):
-  - Zod schemas validating all channel requests and responses:
-    - `DuplicateReviewStatusSchema`, `DuplicateReviewFilterSchema`, `DuplicatePreviewLocationSchema`, `DuplicateGroupSummarySchema`, `GetDuplicateGroupsRequestSchema`, `GetDuplicateGroupsResponseSchema`, `DuplicateMemberRecordSchema`, `GetDuplicateGroupMembersRequestSchema`, `GetDuplicateGroupMembersResponseSchema`, `SetDuplicateReviewRequestSchema`, `SetDuplicateReviewResponseSchema`.
-- [`src/preload/index.ts`](file:///d:/organizer/src/preload/index.ts) & [`src/preload/index.d.ts`](file:///d:/organizer/src/preload/index.d.ts):
-  - Exposes typed methods on `window.api`:
-    - `getDuplicateGroups()`, `getDuplicateGroupMembers()`, `setDuplicateReview()`.
-  - Bidirectional runtime Zod parsing guarantees invalid payloads throw immediate errors.
+  - Strict Zod schemas for all requests, responses, and events.
+- [`src/preload/index.ts`](file:///d:/organizer/src/preload/index.ts):
+  - Exposes typed methods on `window.api` with runtime Zod parsing.
 - [`src/main/ipc/handlers.ts`](file:///d:/organizer/src/main/ipc/handlers.ts):
-  - Strict sender authorization (`validateSender`: WebContents ID, top-level frame, trusted application location) enforced on every duplicate review channel.
+  - Top-level sender validation (`validateSender`) on all vault channels.
 
-### 1.4 Renderer UI Integration (`src/renderer/src/`)
+### 1.9 Renderer UI Integration (`src/renderer/src/components/VaultImportPanel.tsx`)
 
-- [`src/renderer/src/components/DuplicateReviewPanel.tsx`](file:///d:/organizer/src/renderer/src/components/DuplicateReviewPanel.tsx):
-  - **Operations Policy Notice**: Clearly explains catalog-index removal, vault-copy deletion, and original-source deletion as three distinct operations, emphasizing that none are implemented in Stage 3 and review decisions are annotations only.
-  - **Confirmed Empty State**: Explicitly reports "No duplicate files found. All cataloged files have unique content." when no duplicates exist.
-  - **Master-Detail Layout**:
-    - Left sidebar: Duplicate groups list with review filter controls (All / Unreviewed / Reviewed), size, copy counts, status badges, and pagination.
-    - Right panel: Group inspection header with full SHA-256 and byte sizes, stale review warning notice with refresh action, review status toggle ("Mark as Reviewed" / "Mark as Unreviewed"), and side-by-side member comparison cards.
-    - Side-by-side member inspection: Filename, absolute path, exact byte size, creation date, modification date, inferred capture date (clearly labeled "(Inferred)"), and hash observation provenance (observation ID and verification timestamp). Missing filesystem dates are explicitly displayed as "Unknown", never fabricated.
-    - Preferred location selection: Accessible "Set as Preferred" buttons and "Preferred Location" badges.
-  - **Asynchronous Race Condition Guard**: `useDuplicateReview` hook utilizes monotonic selection tokens (`selectionTokenRef`), guaranteeing that slow responses from earlier group selections cannot overwrite a newly selected group.
-  - `linkUnhashedFilesForRootsToJob(jobId, roots)`: links unhashed candidate files matching approved root paths into `scan_job_files`.
-  - `updateScanJobProgress`: persists incremental checkpoints (`discoveredCount`, `hashedCount`, `failedCount`).
-  - `updateScanJobStatus`: updates lifecycle state, phase, and completion timestamps.
-  - `recordScanJobError`: records typed error in `scan_job_errors`.
-  - `getScanJobErrors`: paginated query for errors associated with a job.
-  - `markRunningJobsAsInterrupted`: startup crash recovery helper transitioning stale `running` or `paused` jobs to `interrupted`.
-  - `getUnhashedFilesForRoots`: bounded query finding file locations under roots whose current discovery observation has no active hash observation.
-  - `countUnhashedFilesForRoots`, `countSources`, `countFileLocations`, `getFileLocationByOriginalPath`: summary queries supporting status reporting.
-
-### 1.2 Scan Job Coordinator (`src/main/services/jobs/`)
-
-- [`src/main/services/jobs/coordinator.ts`](file:///d:/organizer/src/main/services/jobs/coordinator.ts):
-  - Coordinates read-only streaming discovery (`scanSourceRoots`), streaming SHA-256 content hashing (`hashFile`), and bounded SQLite persistence (`CatalogDatabase`).
-  - **Single Active Job Concurrency Lock**: Enforces at most one running/paused job at a time; rejects concurrent scan attempts with `ActiveJobConflictError`. Ownership is reserved synchronously (`isStarting`) before asynchronous validation.
-  - **Effective Roots & Overlapping Root Scoping**:
-    - Discovers files using `getEffectiveRoots(roots)` to eliminate redundant descendant traversals when parent and child roots are supplied simultaneously, while preserving requested roots.
-    - Tracks candidate discovery in `scan_job_files`, decoupling hashing membership from historic `file_locations.source_id` provenance.
-    - Deduplicates candidate paths across roots via `seenCandidatePaths`.
-  - **Cooperative Event Loop Yielding**: Yields control periodically to the Node/Electron event loop via `setImmediate`, keeping UI responsive during large directory traversals and hashing loops.
-  - **Pause and Resume**:
-    - `pauseScan()`: sets pause flag, checkpoints progress, gracefully pauses between files, and transitions job status to `paused`.
-    - `resumeScan()`: re-runs discovery across configured roots, revalidating observations, and hashes remaining unhashed files to completion.
-  - **Cancellation & Graceful Shutdown**:
-    - `cancelScan()`: triggers `AbortController`, terminates discovery traversal and active file stream immediately, flushes committed state, and transitions status to `cancelled`. Awaits loop termination before returning.
-    - `shutdown()`: triggers graceful abort with `state.status = 'interrupted'` before aborting, guaranteeing application quit records an `interrupted` (recoverable) state rather than `cancelled`.
-  - **Restart Crash Recovery & Interruption Detection**:
-    - `initialize()`: marks any leftover `running` or `paused` jobs as `interrupted`.
-    - Resuming an interrupted job re-discovers all files and revalidates file sizes and timestamps.
-  - **Changed-File Revalidation**:
-    - Never trusts a saved checkpoint as proof of unchanged content.
-    - If a file is modified out-of-band during an interruption or pause, subsequent discovery detects changed `byteSize` or `mtimeMs`, deactivates the prior discovery observation (`is_current = 0`), invalidates the old hash observation, creates a fresh current observation, and queues the file for re-hashing.
-  - **Visible Errors**:
-    - Non-fatal file errors (e.g. read permission denied) are recorded in `scan_job_errors` and counted in `failedCount`. Jobs complete with visible error lists rather than silently masking failures.
-
-### 1.3 IPC Contracts & Boundary Validation (`src/shared/`, `src/preload/`, `src/main/ipc/`)
-
-- [`src/shared/contracts/channels.ts`](file:///d:/organizer/src/shared/contracts/channels.ts):
-  - Added channels: `SCAN_SELECT_ROOTS`, `SCAN_START_JOB`, `SCAN_PAUSE_JOB`, `SCAN_RESUME_JOB`, `SCAN_CANCEL_JOB`, `SCAN_GET_ACTIVE_JOB`, `SCAN_GET_LATEST_JOB`, `SCAN_DISMISS_JOB`, `SCAN_PROGRESS_EVENT`.
-- [`src/shared/validation/ipc-schemas.ts`](file:///d:/organizer/src/shared/validation/ipc-schemas.ts):
-  - Zod schemas validating all channel requests, responses, and progress events in both directions:
-    - `SelectRootsResponseSchema`, `StartScanRequestSchema`, `JobIdRequestSchema`, `JobActionResponseSchema`, `GetActiveJobResponseSchema`, `GetLatestJobResponseSchema`, `DismissJobRequestSchema`, `DismissJobResponseSchema`, `ScanJobProgressSchema`, `ScanJobErrorSchema`.
-- [`src/preload/index.ts`](file:///d:/organizer/src/preload/index.ts) & [`src/preload/index.d.ts`](file:///d:/organizer/src/preload/index.d.ts):
-  - Exposes typed methods on `window.api`:
-    - `selectRoots()`, `startScan()`, `pauseScan()`, `resumeScan()`, `cancelScan()`, `getActiveScanJob()`, `getLatestScanJob()`, `dismissScanJob()`, `onScanProgress()`.
-  - Runtime Zod parsing guarantees that malformed requests from renderer or malformed responses from main throw explicit errors rather than corrupting state.
-- [`src/main/ipc/handlers.ts`](file:///d:/organizer/src/main/ipc/handlers.ts):
-  - Registers handlers with strict `validateSender` enforcement on every channel (top-level frame, trusted URL origin).
-  - Native directory selection dialog via `dialog.showOpenDialog` with `openDirectory` and `multiSelections`.
-  - Real-time progress broadcasting via `window.webContents.send(IPC_CHANNELS.SCAN_PROGRESS_EVENT, progress)`.
-
-### 1.4 Renderer UI Integration (`src/renderer/src/`)
-
-- [`src/renderer/src/components/ScanJobsPanel.tsx`](file:///d:/organizer/src/renderer/src/components/ScanJobsPanel.tsx):
-  - Accessible folder selection button ("Choose Folders to Scan").
-  - Active scan progress card displaying phase (`discovery` / `hashing`), counts (`discoveredCount`, `hashedCount`, `failedCount`), and accessible progress bar (`role="progressbar"` with `aria-valuenow`).
-  - Action buttons: Pause, Resume, Cancel, and Dismiss (for terminal completed or completed-with-errors jobs).
-  - Recovery banner for `interrupted` jobs with one-click "Resume Scan" button.
-  - Visible error section detailing failed files and error messages with `role="alert"`.
-- [`src/renderer/src/hooks/useScanJobs.ts`](file:///d:/organizer/src/renderer/src/hooks/useScanJobs.ts):
-  - Manages job state, queries active/interrupted jobs first; if none exist, queries latest un-dismissed terminal job on startup.
-  - Subscribes to `onScanProgress`, exposes `dismissJob`, and refreshes status on completion.
-- [`src/renderer/src/App.tsx`](file:///d:/organizer/src/renderer/src/App.tsx) & [`src/renderer/src/components/EmptyState.tsx`](file:///d:/organizer/src/renderer/src/components/EmptyState.tsx):
-  - Embeds `ScanJobsPanel` into the confirmed empty state and main application view.
-  - Displays dynamic catalog inventory summary (indexed sources, registered files) updated immediately when a scan completes.
+- Setup Card: Select storage directory via native dialog and initialize vault.
+- Active Vault Status: Displays active vault name, absolute path, and creation date.
+- Candidate Scope Table:
+  - Lists importable files from catalog with original filename, path, byte size, and import status badge (`Not Imported` / `Copied`).
+  - Search and filter controls (`All`, `Unimported`, `Imported`).
+  - Multi-selection with "Select All" and individual checkboxes.
+  - Shows total selected files and byte size before starting.
+- Real-time Progress Bar: Copied count, verified count, total files, and progress track.
+- Control Actions: Pause, Resume, and Cancel.
+- Interrupted Job Recovery: Prominent alert banner offering resume action for interrupted jobs.
+- Verified Success Banner: Displays completion summary upon verified import.
+- Operations Distinction Notice: Prominently explains that catalog index removal, vault copy deletion, and original source deletion are three separate operations (none implemented).
 
 ---
 
-## 2. Test-Driven Development (Red / Green / Refactor) Evidence
+## 2. Verification Results
 
-### 2.1 Red Phase (Failing Behavior Tests)
+### 2.1 Implementation-Host Quality Gates
 
-1. **Schema Migration 3 & Scan Job Repository**:
-   - Created [`tests/main/catalog-scan-jobs.test.ts`](file:///d:/organizer/tests/main/catalog-scan-jobs.test.ts) specifying migration 3, job lifecycle CRUD, unhashed file queries, and crash recovery.
-   - Initial run failed: `CURRENT_SCHEMA_VERSION was 2, expected 3; db.createScanJob is not a function`.
-2. **Scan Job Coordinator**:
-   - Created [`tests/main/scan-jobs.test.ts`](file:///d:/organizer/tests/main/scan-jobs.test.ts) specifying end-to-end scan execution, concurrency conflict rejection, pause/resume, cancellation, crash recovery, changed-file revalidation, and visible error tracking.
-   - Initial run failed: `Cannot find module '../services/jobs'`.
-3. **IPC Contracts & Preload Bridge**:
-   - Added scan schema validation tests in [`tests/shared/ipc-validation.test.ts`](file:///d:/organizer/tests/shared/ipc-validation.test.ts) and [`tests/preload/bridge.test.ts`](file:///d:/organizer/tests/preload/bridge.test.ts).
-   - Initial run failed: `window.api.startScan is not a function`.
-4. **IPC Handlers & Security**:
-   - Added sender validation tests for all scan channels in [`tests/main/ipc.test.ts`](file:///d:/organizer/tests/main/ipc.test.ts).
-   - Initial run failed: `No handler registered for 'scan:start-job'`.
-5. **Renderer UI**:
-   - Added UI tests in [`tests/renderer/scan-ui.test.tsx`](file:///d:/organizer/tests/renderer/scan-ui.test.tsx) specifying folder selection, progress reporting, pause/resume/cancel controls, and error display.
-   - Initial run failed: `Cannot find module '../components/ScanJobsPanel'`.
+All checks executed from `D:\organizer` on the implementation host:
 
-### 2.2 Green Phase (Implementation)
+| Check                   | Command                | Result                              | Exit Code | Notes                                                        |
+| ----------------------- | ---------------------- | ----------------------------------- | --------- | ------------------------------------------------------------ |
+| Unit & Behavioral Tests | `npm test`             | **412 passed across 23 test files** | 0         | Node SQLite, copier, coordinator, catalog, preload, renderer |
+| Strict Typecheck        | `npm run typecheck`    | **Clean pass**                      | 0         | Node + Web TypeScript configs                                |
+| ESLint                  | `npm run lint`         | **Clean pass**                      | 0         | 0 errors, 0 warnings                                         |
+| Prettier Formatting     | `npm run format:check` | **Clean pass**                      | 0         | All files formatted                                          |
+| Production Bundle Build | `npm run build`        | **Clean pass**                      | 0         | Main, preload, renderer bundles generated                    |
+| Desktop Unpacked Build  | `npm run build:unpack` | **Clean pass**                      | 0         | `dist/win-unpacked/Personal Vault.exe` created               |
 
-1. Implemented migration 3 and scan job methods in `CatalogDatabase`.
-2. Implemented `ScanJobCoordinator` with event loop yielding, discovery batching, streaming hashing, pause/resume/cancel state transitions, and restart recovery.
-3. Added scan channels, Zod schemas, preload bridge methods, and sender-checked IPC handlers.
-4. Implemented `useScanJobs` hook, `ScanJobsPanel` UI component, and integrated into `App.tsx` and `EmptyState.tsx`.
-5. ### 2.4 Independent Review Corrections (Pass 2)
+### 2.2 Real Electron Verification Suites
 
-Following independent review feedback, seven issues were identified and addressed using failing behavioral regression tests before implementation:
-
-1. **Hash Queue Traversal Past Failures**:
-   - _Failing test_: Added test verifying coordinator advances past an unhashed missing file with `batchSize: 1` without skipping valid files, and across page boundaries without infinite loops. Initial run: failed with valid file never receiving a hash.
-   - _Resolution_: Implemented keyset pagination (`afterId`) in `CatalogDatabase.getUnhashedFilesForRoots` (`WHERE fl.id > ? ORDER BY fl.id ASC LIMIT ?`) and updated `ScanJobCoordinator` loop to advance `lastSeenLocationId` rather than repeatedly requesting page 1 and filtering in memory.
-2. **Lifecycle Serialization & Ownership Reservation**:
-   - _Failing test_: Added tests for simultaneous `startScan` conflict rejection and starting a scan while a job is `paused`. Initial run: both simultaneous calls succeeded.
-   - _Resolution_: Added synchronous `isStarting` ownership reservation flag and updated `hasActiveJob()` to treat `paused` as active in both in-memory coordinator and database state. Guarded execution loop completion against clearing newer active jobs.
-3. **Deterministic Cancellation & Application Shutdown**:
-   - _Failing test_: Added test ensuring `cancelScan` awaits loop termination, and test ensuring `coordinator.shutdown()` marks running jobs as `interrupted` (not `cancelled`) to preserve recoverable state on app exit.
-   - _Resolution_: Updated `cancelScan` to await `completionPromise`. Added `coordinator.shutdown()` wired to `app.on('before-quit')` in `src/main/index.ts` to await drain before closing the catalog database.
-4. **Accurate Progress & Recovery Accounting**:
-   - _Failing test_: Added test verifying repeated pause/resume and restart recovery do not inflate `discoveredCount`, `totalBytes`, or `hashedCount`. Initial run: counts doubled on resume.
-   - _Resolution_: Reset pass-specific discovery counters (`passDiscoveredCount`, `passTotalBytes`) for each discovery pass, and computed baseline hashed counts from catalog unhashed differences (`total - unhashedCount`).
-5. **Bounded Resource Utilization**:
-   - _Failing test_: Added test ensuring in-memory errors are capped while full history is retained in SQLite, and validation test for `batchSize: 0`.
-   - _Resolution_: Capped in-memory `state.errors` to `MAX_RETAINED_ERRORS = 50` with FIFO shifting, while recording every error durably to SQLite `scan_job_errors`. Added `validateBatchSize` requiring a positive safe integer within catalog limits (`1 <= batchSize <= 1000`).
-6. **Honest Reporting of Partial Results**:
-   - _Failing test_: Added tests in `tests/main/scan-jobs.test.ts` and `tests/renderer/scan-ui.test.tsx` verifying that jobs with errors persist an error summary, display "Completed with errors", show a warning badge and alert notice, and display actual percentage (e.g. 90%) rather than forcing 100%.
-   - _Resolution_: Updated `ScanJobCoordinator` to persist `errorMessage` summary on completion when `errorCount > 0`. Updated `ScanJobsPanel.tsx` to compute actual ratio when errors occur, render `.status-warning` badge, and show warning notice.
-7. **Real Electron Scan Verification over IPC**:
-   - _Resolution_: Rewrote `scripts/verify-electron-scan.mjs` to launch real Electron, exercise `window.api.startScan`, `pauseScan` (mandatory assertion), `resumeScan`, receive real IPC progress events via `onScanProgress`, simulate SQLite crash state, relaunch, recover active job as `interrupted`, resume and revalidate a modified file, and verify source file invariance. Added `--mode=unpacked` support via `npm run verify:scan:unpacked`.
-
-### 2.5 Independent Review Corrections (Pass 3)
-
-Following the third independent review round, four areas were addressed using failing behavioral regression tests before implementation:
-
-1. **Scan Scope Across Overlapping Source Roots**:
-   - _Failing test_: Added test reproducing the reviewer's finding where scanning a parent root (`D:/parent`), modifying a child file (`D:/parent/child/good.jpg`), and scanning the subfolder (`D:/parent/child`) left `activeHash = null` because historical `file_locations.source_id` pointed to the parent root. Also tested subfolder scan followed by parent scan, overlapping roots in the same job (`['D:/photos', 'D:/photos/vacation']`), and verified no hashing outside approved roots.
-   - _Resolution_: Decoupled job hashing scope from historical `source_id` registration. Created Migration 4 introducing the `scan_job_files` junction table (`job_id`, `file_location_id`). Discovery candidates and unhashed files under the approved roots (`linkUnhashedFilesForRootsToJob`) are mapped directly to `scan_job_files`. Added `getEffectiveRoots(roots)` to eliminate redundant descendant directory scans when both parent and child are specified, and deduplicated candidate file paths. Provenance and original `source_id` remain preserved.
-2. **Terminal Results Restoration & Dismissal After Restart**:
-   - _Failing test_: Added unit, IPC, and renderer tests for restoring persisted completed/failed results across application restarts when no active job is running, prioritizing active/interrupted jobs over terminal jobs, and verifying dismissal behavior.
-   - _Resolution_: Added `is_dismissed` column to `scan_jobs` (Migration 4). Added `getLatestScanJob({ unDismissedOnly: true })` and `dismissScanJob(jobId)` to `CatalogDatabase`, exposed via `SCAN_GET_LATEST_JOB` and `SCAN_DISMISS_JOB` IPC channels with Zod schema validation. Updated `useScanJobs` to check active jobs first, falling back to latest un-dismissed terminal job on mount, and added an accessible "Dismiss" button on the terminal status card.
-3. **Actual Crash & Shutdown Recovery Verification in Real Electron**:
-   - _Resolution_: Overhauled `scripts/verify-electron-scan.mjs` to eliminate synthetic SQL insertions. The suite now tests:
-     - Real in-progress scan termination: spawns a background scan over 300 files and abruptly kills the Electron process tree mid-flight.
-     - Relaunch on the same user data directory asserting that the job is recovered as `interrupted`.
-     - Resumption of the recovered job and revalidation of a modified source file.
-     - Direct SQLite inspection asserting that the modified file's new SHA-256 digest is `is_current = 1` and `is_active = 1`, while the previous hash observation is deactivated (`is_active = 0`).
-     - Real graceful quit/reopen recovery asserting that normal `window.close()` / shutdown drain persists the job as `interrupted`.
-     - Strict source preservation invariance ensuring original timestamps and sizes remain intact.
-     - Supports both `--mode=built` and `--mode=unpacked` (14/14 checks).
-4. **Accurate Verification Reporting & Shutdown Classification**:
-   - _Audit_: Audited shutdown classification in `ScanJobCoordinator.ts`. When `shutdown()` is called on quit, the execution loop checks `isInterrupted()` before checking `abortController.signal.aborted`, ensuring that application exit consistently produces an `interrupted` (recoverable) result, emits `interrupted` events, and settles completion promises.
-   - _Reporting_: Verification diagnostics now log explicit CDP target discovery status. Verification results on the implementation host are reported separately from reviewer environments without speculation.
-
-### 2.6 Independent Review Corrections (Pass 4: Windows Root Containment and Bounded Memory Deduplication)
-
-1. **Windows Root Containment & Directory Open Redundancy Elimination**:
-   - _Failing test_: Added behavioral test with a spying directory adapter counting `opendir` calls on real Windows temporary directories. Selecting both parent and child roots caused the child directory to be opened twice because `getEffectiveRoots` checked `norm.startsWith(parentNorm + '/')`, failing on Windows where normalized paths use backslashes (`\`). Initial test run: failed with `expected 2 to be 1`.
-   - _Resolution_: Implemented `isSameOrDescendantPath` and `getEffectiveRoots` in [`src/main/services/catalog/path-normalization.ts`](file:///d:/organizer/src/main/services/catalog/path-normalization.ts), supporting platform-correct containment across Windows drive roots (`C:\`), UNC roots (`\\server\share`), trailing separators, case-insensitivity on Windows, duplicate roots, and sibling boundaries (`C:\photos` vs `C:\photos_backup`). Added comprehensive unit tests in [`tests/main/catalog.test.ts`](file:///d:/organizer/tests/main/catalog.test.ts). Child directory opens are verified to be exactly 1.
-2. **Bounded Discovery Deduplication**:
-   - _Failing test_: Added tests for duplicate roots and candidate paths crossing batch boundaries with `batchSize: 1`, pause/resume, and verified that counts reflect unique observed files without inflating.
-   - _Resolution_: Removed unbounded in-memory `seenCandidatePaths` Set entirely from `ScanJobCoordinator`. In-flight discovery candidate memory in Node is strictly bounded by `batchSize` (1 <= batchSize <= 1000). Candidates are persisted via `persistDiscoveryBatch`, which inserts into `scan_job_files` (`PRIMARY KEY (job_id, file_location_id)`). Added `CatalogDatabase.countDiscoveredFilesForJob(jobId)` to compute exact unique counts and bytes from SQLite upon every batch commit.
-
-### 2.7 Stage 3: Exact Duplicate Grouping and Review (Initial Implementation Evidence)
-
-1. **Schema Migration 5 & Duplicate Queries/Reviews Repository**:
-   - _Failing test_: [`tests/main/catalog-duplicates.test.ts`](file:///d:/organizer/tests/main/catalog-duplicates.test.ts) specified migration 5, grouping by exact SHA-256 + byte size, exclusion of inactive/superseded observations, independently bounded pagination for groups and members, persistent review decisions across reopen, invalidation upon changed membership, and rejection of invalid preferred locations and stale writes.
-   - _Initial run_: Failed with `CURRENT_SCHEMA_VERSION was 4, expected >= 5; db.getDuplicateGroupMembers is not a function; db.setDuplicateReview is not a function`.
-2. **IPC Duplicate Review Contracts & Validation**:
-   - _Failing test_: [`tests/shared/ipc-duplicates-validation.test.ts`](file:///d:/organizer/tests/shared/ipc-duplicates-validation.test.ts) specified Zod validation for request/response schemas.
-   - _Initial run_: Failed with `Cannot read properties of undefined (reading 'parse')`.
-3. **Preload ContextBridge**:
-   - _Failing test_: [`tests/preload/duplicate-bridge.test.ts`](file:///d:/organizer/tests/preload/duplicate-bridge.test.ts) specified exposure and IPC invoke validation of `getDuplicateGroups`, `getDuplicateGroupMembers`, `setDuplicateReview`.
-   - _Initial run_: Failed with `api.getDuplicateGroups is not a function`.
-4. **IPC Handlers & Security**:
-   - _Failing test_: [`tests/main/duplicate-ipc.test.ts`](file:///d:/organizer/tests/main/duplicate-ipc.test.ts) specified sender authorization and rejection of untrusted frames for duplicate review channels.
-   - _Initial run_: Failed with `no handler for undefined`.
-5. **Renderer UI Integration**:
-   - _Failing test_: [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx) specified confirmed empty state, operation distinctions notice, member inspection cards with observation provenance, setting preferred location and marking as reviewed, stale error banners, and rapid selection race-condition prevention.
-   - _Initial run_: Failed with `Unable to find element with text /no duplicate files found/i`.
-
-### 2.8 Stage 3: Independent Review Findings Corrections (Red / Green / Refactor Evidence)
-
-1. **Truly Bounded Database Queries**:
-   - _Findings_: `getDuplicateGroups` and `getDuplicateGroupMembers` loaded all records into memory before applying `Array.slice`.
-   - _Regression tests_: Added tests in [`tests/main/catalog-duplicates.test.ts`](file:///d:/organizer/tests/main/catalog-duplicates.test.ts) exercising complete deterministic pagination beyond page 1 for groups and members.
-   - _Implementation_:
-     - Implemented SQL-level pagination (`LIMIT ? OFFSET ?`) for `getDuplicateGroups` and `getDuplicateGroupMembers`.
-     - Computed deterministic group signatures using bounded incremental streaming (`stmt.iterate`) with $O(1)$ memory.
-     - Managed `_valid_reviewed_groups` SQLite temporary table for SQL-level filtering (`filter === 'all' | 'unreviewed' | 'reviewed'`) without materializing the catalog or all groups in JavaScript.
-2. **Asynchronous Response Safety**:
-   - _Findings_: `submitReview` applied response to whichever group was selected when resolving; requests inside React state updater functions; out-of-order filter/page/refresh responses.
-   - _Regression tests_: Added test `keeps group B intact when saving group A resolves after selecting group B` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
-   - _Red evidence_: Initial run failed: group B had its status mutated to group A's reviewed status.
-   - _Implementation_: Pure state updaters outside setter callbacks; selection token refs and `selectedGroupRef` guarding completions; group B retains its signature, review status, preferred location, and members.
-3. **Member Errors and Changed/Unavailable Groups**:
-   - _Findings_: `membersError` recorded by hook but never displayed; obsolete members displayed after failure/switching; groups falling below 2 members not treated as changed/unavailable.
-   - _Regression tests_: Added tests for member error rendering with retry, obsolete member clearance, and single-member group unavailability in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
-   - _Red evidence_: Initial run failed: error notice not rendered; review actions remained enabled for single-member group.
-   - _Implementation_: Rendered accessible error with retry; immediate clearance of member list on selection change and failure; warning banner when group falls below 2 members; review action controls disabled when invalid or loading.
-4. **Empty Filters and Truthful Messaging**:
-   - _Findings_: Filter controls disappeared when filter returned 0 results, trapping users; claimed all files had unique content; out-of-range page after results shrink.
-   - _Regression tests_: Added test `preserves filter controls and truthful messaging when filter returns zero results, allowing return to All`.
-   - _Red evidence_: Initial run failed: filter buttons disappeared when switching to empty "Reviewed" filter.
-   - _Implementation_: Filter controls remain visible and accessible in empty states; truthful messaging distinguishes "no groups match this filter" from "no currently verified duplicate groups"; auto-recovery from out-of-range pagination when results shrink.
-5. **Preferred-Location Persistence**:
-   - _Findings_: "Set as Preferred" only changed local state and required status toggle to save; local preference leaked across groups and refreshes.
-   - _Regression tests_: Added unit and UI tests verifying immediate persistence on "Set as Preferred" and "Clear Preferred" without toggling status.
-   - _Red evidence_: Initial run failed: `setDuplicateReview` not called immediately upon clicking preferred button.
-   - _Implementation_: Removed unpersisted local state; "Set as Preferred" and "Clear" immediately persist to database with current review status; verified persistence across database close and real Electron application restart.
-
-### 2.9 Stage 3: Independent Review Corrections (Pass 2: Constant Memory, Filter Refill, Request Invalidation, Stale Response Safety)
-
-Following the second round of independent review on commit `c5da2f1`, five areas were addressed using failing behavioral regression tests before implementation:
-
-1. **Truly Bounded Constant Memory Signature Computation & Decision Saving**:
-   - _Findings_: `computeGroupSignature` previously iterated rows but accumulated every member ID in a JavaScript `Set<number>`, which is $O(\text{group size})$ memory overhead. In `setDuplicateReview`, `membersSql.all()` and `.map().join()` were used across the entire group.
-   - _Regression test_: Added test in [`tests/main/catalog-duplicates.test.ts`](file:///d:/organizer/tests/main/catalog-duplicates.test.ts) spying on `rawDb.prepare` during `setDuplicateReview` and asserting that no `.all()` call is executed on member rows.
-   - _Red evidence_: Initial run failed: `expected [ Array(1) ] to have a length of +0 but got 1`.
-   - _Implementation_:
-     - Refactored `computeGroupSignature(sha256, byteSize, preferredLocationId?)` in [`src/main/services/catalog/database.ts`](file:///d:/organizer/src/main/services/catalog/database.ts) to stream member rows via `stmt.iterate` chunk-by-chunk into the SHA-256 hasher, tracking `memberCount` and a `containsPreferred` boolean in strictly $O(1)$ auxiliary JavaScript memory.
-     - Refactored `setDuplicateReview` to reuse `computeGroupSignature` to verify signature, group existence (memberCount >= 2), and preferred location membership with zero array/set materialization.
-2. **Filter & Count Consistency with Automatic Refilling**:
-   - _Findings_: `submitReview` updated list items locally without reapplying the active filter or updating `totalGroups`. Under a filtered view (e.g. `unreviewed`), marking a group `reviewed` left it in the view with stale counts.
-   - _Regression test_: Added test `removes group from unreviewed view and updates counts after marking as reviewed` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
-   - _Red evidence_: Initial run failed: group remained visible in the unreviewed list and counts were not updated.
-   - _Implementation_:
-     - In [`src/renderer/src/hooks/useDuplicateReview.ts`](file:///d:/organizer/src/renderer/src/hooks/useDuplicateReview.ts), when a review status update results in `statusMatchesFilter === false`, triggers `fetchGroups` to purge the item, update `totalGroups`, and refill the page up to `groupsLimit`.
-     - Automatically recovers to previous page if the last item on a page is removed.
-     - Guards save completions against refreshed signatures (`groupSignature === targetSig`) and preserves user active navigation if the user moved to another group or filter while save was pending.
-3. **Request Generation Invalidation on Selection Clear, Filter Transitions, and Unmount**:
-   - _Findings_: Old member request responses could repopulate cleared selection state or trigger loading errors after selection was cleared; React state updaters contained side effects / ref mutations.
-   - _Regression test_: Added test `invalidates in-flight member requests when selection is cleared so deferred responses do not repopulate` and `ignores out-of-order group-list responses when switching filters rapidly` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
-   - _Red evidence_: Initial run failed: deferred member resolution repopulated member list after selection was cleared.
-   - _Implementation_:
-     - Pure state updaters: synchronizer `useEffect` hooks maintain refs (`selectedGroupRef`, `groupsFilterRef`, `groupsOffsetRef`) cleanly outside setter callbacks.
-     - Invalidation tokens: `selectionTokenRef.current++` is synchronously incremented when selection is cleared (`nextSelected === null`), on filter transitions (`setFilter`), and on component unmount.
-4. **UI Preferred Location Clearing**:
-   - _Regression test_: Added test `clears preferred location through UI and calls setDuplicateReview with null` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
-   - _Implementation_: Verified and exercised through UI tests and bridge tests; updated smoke check in [`scripts/smoke.mjs`](file:///d:/organizer/scripts/smoke.mjs) to include duplicate review bridge methods (`getDuplicateGroups`, `getDuplicateGroupMembers`, `setDuplicateReview`).
-5. **Stale Save Response Guarding for Group List Summaries & Save-Triggered Reloads**:
-   - _Findings_: `submitReview` guarded `selectedGroup` by signature, but updated `groups` by SHA-256 and byte size alone. When a review save was delayed and the group was refreshed in the catalog (e.g. signature S2 with invalidated decision), resolving the old save (S1) overwrote the group list summary with S1 and `reviewed` status, leaving list and detail states inconsistent.
-   - _Regression test_: Added deferred-promise test `preserves refreshed group signature S2 and invalidated decision when an old save response resolves with S1` in [`tests/renderer/duplicate-ui.test.tsx`](file:///d:/organizer/tests/renderer/duplicate-ui.test.tsx).
-   - _Red evidence_: Initial run failed: the group list summary was overwritten with `Reviewed` badge and lost its `Review outdated` badge.
-   - _Implementation_:
-     - Added `groupsRef` kept in sync via `useEffect` to provide synchronous access to current list summaries.
-     - `setGroups` verifies that the group in the list is still fresh at `targetSig` before updating in place, and maps only items matching `g.groupSignature === targetSig`.
-     - Save-triggered reloads (`fetchGroups`) are only executed if the group was fresh in the list and the active filter matches the filter when the save was initiated (`activeFilter === submitFilter`).
-     - Added accessible "Refresh duplicate groups" button to the groups sidebar header in [`src/renderer/src/components/DuplicateReviewPanel.tsx`](file:///d:/organizer/src/renderer/src/components/DuplicateReviewPanel.tsx).
+| Verification Suite                   | Target                         | Checks           | Result | Exit Code                                                                                                                                                                                 |
+| ------------------------------------ | ------------------------------ | ---------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run verify:vault`               | Built (`out/main`)             | **11/11 passed** | 0      | Real Electron CDP: init, overlap reject, scan, import, manifest verification, duplicate merging, idempotency, modified-source reject, cancellation, restart recovery, source preservation |
+| `npm run verify:vault:unpacked`      | Unpacked (`dist/win-unpacked`) | **11/11 passed** | 0      | Same complete 11-step verification on packaged Windows executable                                                                                                                         |
+| `npm run verify:duplicates`          | Built (`out/main`)             | **18/18 passed** | 0      | Duplicate review regression check                                                                                                                                                         |
+| `npm run verify:duplicates:unpacked` | Unpacked (`dist/win-unpacked`) | **18/18 passed** | 0      | Duplicate review unpacked regression check                                                                                                                                                |
+| `npm run verify:scan`                | Built (`out/main`)             | **14/14 passed** | 0      | Scan & crash recovery regression check                                                                                                                                                    |
+| `npm run verify:sqlite`              | Built (`out/main`)             | **8/8 passed**   | 0      | Electron `node:sqlite` driver verification                                                                                                                                                |
+| `npm run smoke:built`                | Built (`out/main`)             | **Passed**       | 0      | Preload bridge surface, navigation guard, CSP                                                                                                                                             |
+| `npm run smoke:unpacked`             | Unpacked (`dist/win-unpacked`) | **Passed**       | 0      | Unpacked binary smoke check                                                                                                                                                               |
 
 ---
 
-## 3. Verification Results
+## 3. Preserved Unrelated Files & Working Tree
 
-### 3.1 Test Suite & Skipped Test Analysis
+The following unrelated files remain intact and untouched:
 
-- **Implementation host**: **326 passed, 0 skipped** across all 16 test files.
-- **Reviewer host on 79bbf44**: **325 passed, 1 skipped** across 16 test files.
-- **Identified conditional test**: `tests/main/discovery.test.ts: it.runIf(canCreateRealJunction)('skips real directory junctions both as source roots and as nested entries without traversing outside the root')`.
-- **Reason**: `probeRealJunctionSupport()` executes `symlinkSync(target, link, 'junction')` inside a `try / catch` block and returns `false` on any exception without inspecting the specific error. On environments where junction creation throws an exception, `canCreateRealJunction` evaluates to `false`, causing Vitest to skip this conditional test (producing 1 skipped). On environments where junction creation succeeds, all 21 tests in `discovery.test.ts` execute and pass.
-
-### 3.2 Automated Quality Gates & Real-Process Verification
-
-Execution results on implementation host (`D:\organizer`):
-
-| Command                              | Result   | Details                                                                                        |
-| ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `npm test`                           | **PASS** | 16 test files: 326 passed, 0 skipped repository-wide                                           |
-| `npm run typecheck`                  | **PASS** | Strict TypeScript check across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)         |
-| `npm run lint`                       | **PASS** | Active ESLint rules across all project files (0 errors, 0 warnings)                            |
-| `npm run format:check`               | **PASS** | Prettier 100% compliant across entire repository                                               |
-| `npm run build`                      | **PASS** | `electron-vite` builds main (`index.js`, `catalog.js`, `jobs.js`), preload, renderer           |
-| `npm run build:unpack`               | **PASS** | Packaged binary assembled into `dist/win-unpacked` with ASAR integrity                         |
-| `npm run verify:sqlite`              | **PASS** | Real Electron runtime exercises CatalogDatabase repository (8/8 checks)                        |
-| `npm run verify:sqlite:unpacked`     | **PASS** | Packaged ASAR catalog module exercised via unpacked binary (`Personal Vault.exe`)              |
-| `npm run verify:scan`                | **PASS** | Real Electron runtime exercises scan workflow, IPC, crash & graceful recovery, digests (14/14) |
-| `npm run verify:scan:unpacked`       | **PASS** | Unpacked desktop binary exercises scan workflow, IPC, crash & graceful recovery (14/14)        |
-| `npm run verify:duplicates`          | **PASS** | Real Electron runtime exercises duplicate review, restart, & invalidation (18/18, exit code 0) |
-| `npm run verify:duplicates:unpacked` | **PASS** | Freshly rebuilt unpacked binary duplicate review (18/18 checks, exit code 0)                   |
-| `npm run smoke:built`                | **PASS** | Built desktop shell passes bridge and navigation smoke checks in real Electron                 |
-| `npm run smoke:unpacked`             | **PASS** | Unpacked desktop binary (`dist/win-unpacked`) passes bridge and navigation smoke checks        |
-
-### 3.3 Independent Reviewer Environment Record (79bbf44)
-
-- **Test Suite**: 325 tests passed, 1 conditional junction test skipped (`tests/main/discovery.test.ts: it.runIf(canCreateRealJunction)`).
-- **Code Quality Gates**: Typecheck, lint, and formatting passed cleanly (0 errors, 0 warnings).
-- **Runtime Environment Limitation**: `npm run verify:duplicates` timed out waiting for the application window (`lastError="fetch failed"`, `lastTargets=null`) in the reviewer host environment.
-- **Reviewer Conclusion**: No remaining blockers found in the reviewed correction; Stage 3 accepted at `79bbf44`.
+- `.codex/` directory
+- `scripts/launch-desktop.ps1`
+- `scripts/verify-bridge-and-dialog.mjs`
+- `scripts/verify-desktop-window.ps1`
 
 ---
 
-## 4. Known Limitations & Boundaries
+## 4. Scope Exclusions & Next Steps
 
-- **Review Decisions are Catalog Annotations Only**: Marking a duplicate group as reviewed or selecting a preferred location records metadata in the `duplicate_reviews` SQLite table. It does not copy, move, alter, or delete any source files, nor does it remove entries from the catalog index.
-- **Decision Invalidation Policy**: If a member file is modified, deleted, or added out of band or via a scan, the group's deterministic signature changes. The catalog invalidates any existing review decision for that group upon query, reverting status to `unreviewed` with `hasStaleDecision = true`, and clears invalid preferred locations. Outdated client submissions are rejected with `StaleReviewError`.
-- **Out of Scope for Stage 3**:
-  - Vault storage initialization, verified copying, and manifests are deferred to Stage 4.
-  - Source file deletion and catalog-index removal are distinct operations and are not implemented.
-  - Photo grid thumbnails, virtualized browsing, ratings, and visual similarity review are deferred to Stage 5.
-  - OCR, semantic search, and document classification are deferred to Stage 6 and Stage 7.
-- **Source Preservation Invariance**: Originals remain strictly read-only. Personal Vault performs no file moves, writes, edits, or deletes on source roots.
-
----
-
-## 5. Immediate Recommended Next Task
-
-Stage 3 is complete and independently accepted (`79bbf44`). The next scheduled stage is **Stage 4: Verified Vault Copying and Portable Metadata**. Do not push, merge, or begin Stage 4 without user authorization.
+- **Scope Exclusions**: No source or vault deletion, OCR, semantic search, visual similarity review, photo grid/thumbnails, or cloud uploads.
+- **Stage 4 Status**: Implemented and awaiting independent review. Do NOT push, merge, or begin Stage 5 until independent review is complete.

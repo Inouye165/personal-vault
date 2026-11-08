@@ -228,20 +228,32 @@ async function main() {
     if (!bridge.hasApi) fail('window.api is missing')
     else {
       const expectMethods = [
+        'cancelImport',
         'cancelScan',
         'dismissScanJob',
+        'getActiveImportJob',
         'getActiveScanJob',
+        'getActiveVault',
         'getAppInfo',
         'getDuplicateGroupMembers',
         'getDuplicateGroups',
+        'getImportCandidates',
+        'getLatestImportJob',
         'getLatestScanJob',
         'getVaultStatus',
+        'initializeVault',
+        'onImportProgress',
         'onScanProgress',
+        'pauseImport',
         'pauseScan',
+        'resumeImport',
         'resumeScan',
         'selectRoots',
+        'selectVaultDirectory',
+        'setActiveVault',
         'setDuplicateReview',
         'setTab',
+        'startImport',
         'startScan'
       ]
       if (JSON.stringify(bridge.methods) !== JSON.stringify(expectMethods)) {

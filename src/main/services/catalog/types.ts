@@ -287,3 +287,124 @@ export interface CatalogStats {
   readonly hashedFiles: number
   readonly unhashedFiles: number
 }
+
+// Stage 4: Vault & Verified Import Types
+
+export interface RegisterVaultInput {
+  readonly vaultId: string
+  readonly vaultPath: string
+  readonly name: string
+  readonly createdAtMs: number
+}
+
+export interface CatalogVaultRecord {
+  readonly id: number
+  readonly vaultId: string
+  readonly vaultPath: string
+  readonly normalizedVaultPath: string
+  readonly name: string
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+  readonly isActive: boolean
+}
+
+export interface RecordVaultCopyInput {
+  readonly vaultId: string
+  readonly sha256: string
+  readonly byteSize: number
+  readonly relativePath: string
+  readonly manifestRelativePath: string
+  readonly verifiedAtMs: number
+}
+
+export interface CatalogVaultCopyRecord {
+  readonly id: number
+  readonly vaultId: string
+  readonly sha256: string
+  readonly byteSize: number
+  readonly relativePath: string
+  readonly manifestRelativePath: string
+  readonly verifiedAtMs: number
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export interface CreateVaultImportItemInput {
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly hashObservationId?: number | null
+  readonly sha256: string
+  readonly byteSize: number
+}
+
+export interface CreateVaultImportJobInput {
+  readonly jobId: string
+  readonly vaultId: string
+  readonly totalFiles: number
+  readonly totalBytes: number
+  readonly items: readonly CreateVaultImportItemInput[]
+}
+
+export interface CatalogVaultImportJobRecord {
+  readonly id: string
+  readonly vaultId: string
+  readonly status: 'running' | 'paused' | 'cancelled' | 'interrupted' | 'failed' | 'completed'
+  readonly totalFiles: number
+  readonly totalBytes: number
+  readonly copiedFiles: number
+  readonly copiedBytes: number
+  readonly verifiedFiles: number
+  readonly failedFiles: number
+  readonly startedAtMs: number
+  readonly completedAtMs: number | null
+  readonly errorMessage: string | null
+}
+
+export interface UpdateVaultImportProgressInput {
+  readonly jobId: string
+  readonly copiedFiles: number
+  readonly copiedBytes: number
+  readonly verifiedFiles: number
+  readonly failedFiles: number
+  readonly status?: 'running' | 'paused' | 'cancelled' | 'interrupted' | 'failed' | 'completed'
+  readonly errorMessage?: string | null
+  readonly completedAtMs?: number | null
+}
+
+export interface UpdateVaultImportItemInput {
+  readonly jobId: string
+  readonly fileLocationId: number
+  readonly status:
+    'pending' | 'copying' | 'verifying' | 'completed' | 'failed' | 'cancelled' | 'skipped'
+  readonly vaultCopyId?: number | null
+  readonly errorCode?: string | null
+  readonly errorMessage?: string | null
+  readonly completedAtMs?: number | null
+}
+
+export interface GetImportCandidatesOptions extends PaginationOptions {
+  readonly vaultId: string
+  readonly filter?: 'all' | 'unimported' | 'imported'
+  readonly category?: 'photo' | 'document'
+}
+
+export interface ImportCandidateItem {
+  readonly fileLocationId: number
+  readonly sourceId: number
+  readonly originalPath: string
+  readonly fileName: string
+  readonly extension: string
+  readonly category: 'photo' | 'document'
+  readonly byteSize: number
+  readonly filesystemBirthtimeMs: number | null
+  readonly filesystemMtimeMs: number | null
+  readonly inferredCaptureTimeMs: number | null
+  readonly sha256: string
+  readonly discoveryObservationId: number
+  readonly hashObservationId: number
+  readonly vaultStatus: 'not_imported' | 'copied'
+  readonly vaultCopyId: number | null
+  readonly isPreferred?: boolean
+}
+
+export type ImportCandidatesResult = PaginatedResult<ImportCandidateItem>

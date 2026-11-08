@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 5
+export const CURRENT_SCHEMA_VERSION = 6
 
 interface Migration {
   readonly version: number
@@ -313,6 +313,74 @@ const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_duplicate_reviews_hash_size ON duplicate_reviews(sha256, byte_size);
         CREATE INDEX IF NOT EXISTS idx_duplicate_reviews_preferred ON duplicate_reviews(preferred_location_id);
+      `)
+    }
+  },
+  {
+    version: 6,
+    name: 'vault_copies_and_imports',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS vaults (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          vault_id TEXT NOT NULL UNIQUE,
+          vault_path TEXT NOT NULL,
+          normalized_vault_path TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_copies (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          vault_id TEXT NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
+          sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          relative_path TEXT NOT NULL,
+          manifest_relative_path TEXT NOT NULL,
+          verified_at_ms INTEGER NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          UNIQUE(vault_id, sha256, byte_size)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vault_copies_lookup ON vault_copies(vault_id, sha256, byte_size);
+
+        CREATE TABLE IF NOT EXISTS vault_imports (
+          id TEXT PRIMARY KEY,
+          vault_id TEXT NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK (status IN ('running', 'paused', 'cancelled', 'interrupted', 'failed', 'completed')),
+          total_files INTEGER NOT NULL DEFAULT 0,
+          total_bytes INTEGER NOT NULL DEFAULT 0,
+          copied_files INTEGER NOT NULL DEFAULT 0,
+          copied_bytes INTEGER NOT NULL DEFAULT 0,
+          verified_files INTEGER NOT NULL DEFAULT 0,
+          failed_files INTEGER NOT NULL DEFAULT 0,
+          started_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          error_message TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vault_imports_status ON vault_imports(status);
+
+        CREATE TABLE IF NOT EXISTS vault_import_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_id TEXT NOT NULL REFERENCES vault_imports(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          hash_observation_id INTEGER REFERENCES hash_observations(id) ON DELETE SET NULL,
+          sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          vault_copy_id INTEGER REFERENCES vault_copies(id) ON DELETE SET NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'copying', 'verifying', 'completed', 'failed', 'cancelled', 'skipped')),
+          error_code TEXT,
+          error_message TEXT,
+          started_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vault_import_items_lookup ON vault_import_items(import_id, file_location_id);
       `)
     }
   }

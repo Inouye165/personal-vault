@@ -255,3 +255,45 @@ src/
       - Filter consistency & page refilling: when a review save modifies status under a filtered view (e.g. marking a group reviewed while viewing Unreviewed), the group is removed from the active view, `totalGroups` is decremented, the page is refilled from the catalog up to `groupsLimit`, and the user's active navigation is preserved.
       - Accessible member errors with retry; obsolete member data cleared on selection/failure; changed/unavailable notice when a group falls below two verified members with review controls safely disabled.
       - Truthful empty filter states with permanent filter controls (`All`, `Unreviewed`, `Reviewed`).
+
+11. **Verified Vault Copying & Portable Metadata (Stage 4)**:
+    - **Inviolable Principle — Source Preservation**:
+      - Source files remain strictly read-only throughout discovery, review, and import.
+      - Never move, rename, touch, overwrite, or delete source originals.
+      - Source preservation invariance verified via cryptographic hash and sub-millisecond filesystem timestamp baseline comparison.
+    - **Separation of Source & Vault Storage**:
+      - Strict separation enforced using canonical `realpath` checks.
+      - Symlink and Windows directory junction escapes rejected eagerly with `VaultOverlapError` across all IPC boundaries (`initializeVault`, `setActiveVault`, and `startScan`).
+    - **Identification of Managed Vault Storage**:
+      - Vault directory is explicitly identified by a versioned identity manifest `vault.json` in the root of the vault (`formatVersion: 1`, `vaultId`, `vaultName`, `createdAtMs`, `appVersion`).
+      - Arbitrary existing unmanaged directories or files cannot be treated as vault copies.
+    - **Content-Addressed Vault Storage & Collision Avoidance**:
+      - Managed copies are stored content-addressed under `files/<prefix>/<sha256>/<safeName>` with a machine-readable `manifest.json` sidecar alongside.
+      - Repeated imports of identical content share a single verified managed file on disk while preserving differing source locations, filenames, and metadata in the manifest.
+      - Temporary staging files are created strictly inside an app-owned `.vault-temp` staging directory in the vault root, never touching source storage. Temporary staging files use process-unique and job-unique names (`staging_<jobId>_<uuid>.tmp`, `manifest_<jobId>_<uuid>.tmp`).
+      - Publication is atomic: descriptor sync -> rename to final path without overwriting unrelated existing files.
+    - **Verified Copy Pipeline (`copyAndVerifyFileToVault`)**:
+      - Read-only descriptor open on source file.
+      - Pre-copy `fstat` verifies regular file status, byte size match, and modification timestamp consistency against recorded catalog facts.
+      - Chunked streaming copy (constant 64 KiB buffer) computing incremental SHA-256 simultaneously into staging destination.
+      - Post-copy `fstat` verifies source remained stable and unaltered during entire read.
+      - Post-read disk revalidation (`lstat` and `realpath`) ensures candidate path was not swapped or replaced.
+      - Destination staging file descriptor sync (`fdatasync`), independent descriptor reopening and re-read SHA-256 computation to confirm disk bits match expected hash before publication.
+      - Atomic publication via rename into `files/<prefix>/<sha256>/`.
+      - Documented limitations: Narrowed TOCTOU window through descriptor and pathname revalidation; user-space filesystem APIs on POSIX and Win32 lack atomic copy primitives.
+    - **Portable Metadata Manifest (`manifest.json`)**:
+      - Versioned schema (`formatVersion: 1`), fully portable and self-contained without SQLite.
+      - Encodes `vaultId`, `sha256`, `byteSize`, `managedCopy` details, and array of `sources`.
+      - Preserves multi-source provenance: when duplicate source locations share one managed copy, all source paths, differing original filenames, timestamps, and observation IDs are merged and preserved in `sources`.
+      - Strict separation of facts vs inferences: unknown capture times and locations remain explicit `null` (never fabricated).
+      - Audit trail: records `importJobId`, `importedAtMs`, verified SHA-256 and byte size, and source stability stats (`preCopyMtimeMs`, `postCopyMtimeMs`, sizes).
+    - **Catalog Persistence (Migration 6)**:
+      - Adds `vaults`, `vault_copies`, `vault_imports`, and `vault_import_items` tables with foreign keys and indexes.
+      - Tracks job state: `running`, `paused`, `cancelled`, `interrupted`, `failed`, `completed`.
+      - Supports resume, pause, cooperative cancellation via `AbortSignal`, and restart recovery (`markRunningImportJobsAsInterrupted()`).
+      - Cleanup restricted strictly to owned staging temporary files in `.vault-temp/`.
+    - **IPC & Renderer Integration**:
+      - Narrow typed IPC contracts with Zod validation.
+      - Sender-validated handlers for vault selection, initialization, candidate listing, import control, and progress streaming.
+      - UI components in `VaultImportPanel`: setup card, candidate selection table with filters, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, verified success banner, and operations distinction notice.
+      - Clear separation of operations: catalog index removal, vault copy deletion, and source deletion are distinct operations (none implemented).

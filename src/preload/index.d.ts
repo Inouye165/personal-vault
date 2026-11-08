@@ -14,7 +14,21 @@ import type {
   GetDuplicateGroupMembersRequest,
   GetDuplicateGroupMembersResponse,
   SetDuplicateReviewRequest,
-  SetDuplicateReviewResponse
+  SetDuplicateReviewResponse,
+  SelectVaultDirectoryResponse,
+  InitializeVaultRequest,
+  InitializeVaultResponse,
+  GetActiveVaultResponse,
+  SetActiveVaultRequest,
+  SetActiveVaultResponse,
+  GetImportCandidatesRequest,
+  GetImportCandidatesResponse,
+  StartImportRequest,
+  StartImportResponse,
+  VaultImportProgress,
+  GetActiveImportJobResponse,
+  GetLatestImportJobResponse,
+  VaultImportActionResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -35,6 +49,18 @@ export interface VaultApi {
     request: GetDuplicateGroupMembersRequest
   ) => Promise<GetDuplicateGroupMembersResponse>
   setDuplicateReview: (request: SetDuplicateReviewRequest) => Promise<SetDuplicateReviewResponse>
+  selectVaultDirectory: () => Promise<SelectVaultDirectoryResponse>
+  initializeVault: (request: InitializeVaultRequest) => Promise<InitializeVaultResponse>
+  getActiveVault: () => Promise<GetActiveVaultResponse>
+  setActiveVault: (request: SetActiveVaultRequest) => Promise<SetActiveVaultResponse>
+  getImportCandidates: (request: GetImportCandidatesRequest) => Promise<GetImportCandidatesResponse>
+  startImport: (request: StartImportRequest) => Promise<StartImportResponse>
+  pauseImport: () => Promise<VaultImportActionResponse>
+  resumeImport: (jobId?: string) => Promise<VaultImportActionResponse>
+  cancelImport: () => Promise<VaultImportActionResponse>
+  getActiveImportJob: () => Promise<GetActiveImportJobResponse>
+  getLatestImportJob: () => Promise<GetLatestImportJobResponse>
+  onImportProgress: (callback: (progress: VaultImportProgress) => void) => () => void
 }
 
 declare global {

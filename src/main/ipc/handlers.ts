@@ -19,6 +19,20 @@ import {
   GetDuplicateGroupMembersResponseSchema,
   SetDuplicateReviewRequestSchema,
   SetDuplicateReviewResponseSchema,
+  SelectVaultDirectoryResponseSchema,
+  InitializeVaultRequestSchema,
+  InitializeVaultResponseSchema,
+  GetActiveVaultResponseSchema,
+  SetActiveVaultRequestSchema,
+  SetActiveVaultResponseSchema,
+  GetImportCandidatesRequestSchema,
+  GetImportCandidatesResponseSchema,
+  StartImportRequestSchema,
+  StartImportResponseSchema,
+  VaultImportProgressSchema,
+  GetActiveImportJobResponseSchema,
+  GetLatestImportJobResponseSchema,
+  VaultImportActionResponseSchema,
   validatePayload,
   type AppInfo,
   type DismissJobResponse,
@@ -29,26 +43,44 @@ import {
   type VaultStatus,
   type GetDuplicateGroupsResponse,
   type GetDuplicateGroupMembersResponse,
-  type SetDuplicateReviewResponse
+  type SetDuplicateReviewResponse,
+  type SelectVaultDirectoryResponse,
+  type InitializeVaultResponse,
+  type GetActiveVaultResponse,
+  type SetActiveVaultResponse,
+  type GetImportCandidatesResponse,
+  type StartImportResponse,
+  type GetActiveImportJobResponse,
+  type GetLatestImportJobResponse,
+  type VaultImportActionResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
+import {
+  initializeVault,
+  validateVaultSeparation,
+  type VaultImportCoordinator
+} from '../services/vault'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 
 export interface IpcHandlerOptions {
   readonly validateSender: SenderValidator
   readonly catalog?: CatalogDatabase
   readonly coordinator?: ScanJobCoordinator
+  readonly vaultCoordinator?: VaultImportCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
+  readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
 }
 
 export function registerIpcHandlers({
   validateSender,
   catalog,
   coordinator,
+  vaultCoordinator,
   getMainWindow,
-  selectDirectories
+  selectDirectories,
+  selectVaultDirectory
 }: IpcHandlerOptions): void {
   const handle = <Args extends unknown[], Result>(
     channel: string,
@@ -137,6 +169,19 @@ export function registerIpcHandlers({
     }
     if (!coordinator) {
       return formatActionResponse({ success: false, error: 'ScanJobCoordinator not available' })
+    }
+    if (catalog && !catalog.isClosed()) {
+      const activeVault = catalog.getActiveVault()
+      if (activeVault) {
+        try {
+          validateVaultSeparation(activeVault.vaultPath, parsed.data.roots)
+        } catch (err) {
+          return formatActionResponse({
+            success: false,
+            error: err instanceof Error ? err.message : String(err)
+          })
+        }
+      }
     }
     try {
       const job = await coordinator.startScan(parsed.data)
@@ -336,6 +381,227 @@ export function registerIpcHandlers({
   handle(IPC_CHANNELS.SCAN_PROGRESS_EVENT, (): never => {
     throw new Error('Event-only channel cannot be invoked')
   })
+
+  // ==========================================
+  // Stage 4: Vault & Verified Import Handlers
+  // ==========================================
+
+  handle(IPC_CHANNELS.VAULT_SELECT_DIRECTORY, async (): Promise<SelectVaultDirectoryResponse> => {
+    const dialogFn =
+      selectVaultDirectory ||
+      (async () => {
+        const win = getMainWindow ? getMainWindow() : null
+        return win
+          ? dialog.showOpenDialog(win, {
+              title: 'Select Vault Storage Directory',
+              properties: ['openDirectory', 'createDirectory']
+            })
+          : dialog.showOpenDialog({
+              title: 'Select Vault Storage Directory',
+              properties: ['openDirectory', 'createDirectory']
+            })
+      })
+
+    const dialogResult = await dialogFn()
+    const cancelled =
+      'canceled' in dialogResult
+        ? (dialogResult as { canceled: boolean }).canceled
+        : (dialogResult as { cancelled: boolean }).cancelled
+    const filePaths = dialogResult.filePaths
+    const selectedDirectory = !cancelled && filePaths.length > 0 ? filePaths[0] : null
+    const validated = validatePayload(SelectVaultDirectoryResponseSchema, { selectedDirectory })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SelectVaultDirectoryResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_INITIALIZE, (raw: unknown): InitializeVaultResponse => {
+    const parsed = validatePayload(InitializeVaultRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid initializeVault request: ${parsed.error}`)
+    }
+    if (catalog && !catalog.isClosed()) {
+      const sourceRoots = catalog.listSources().items.map((s) => s.rootPath)
+      validateVaultSeparation(parsed.data.vaultPath, sourceRoots)
+    }
+    const identity = initializeVault(parsed.data)
+    if (catalog && !catalog.isClosed()) {
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: parsed.data.vaultPath,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+    }
+    const validated = validatePayload(InitializeVaultResponseSchema, { vault: identity })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing InitializeVaultResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_GET_ACTIVE, (): GetActiveVaultResponse => {
+    if (!catalog || catalog.isClosed()) {
+      return { vault: null }
+    }
+    const active = catalog.getActiveVault()
+    const validated = validatePayload(GetActiveVaultResponseSchema, {
+      vault: active
+        ? {
+            vaultId: active.vaultId,
+            vaultPath: active.vaultPath,
+            name: active.name,
+            createdAtMs: active.createdAtMs
+          }
+        : null
+    })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetActiveVaultResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_SET_ACTIVE, (raw: unknown): SetActiveVaultResponse => {
+    const parsed = validatePayload(SetActiveVaultRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid setActiveVault request: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog database is not available')
+    }
+    const sourceRoots = catalog.listSources().items.map((s) => s.rootPath)
+    validateVaultSeparation(parsed.data.vaultPath, sourceRoots)
+    const record = catalog.setActiveVault(parsed.data.vaultPath)
+    const validated = validatePayload(SetActiveVaultResponseSchema, {
+      vault: {
+        vaultId: record.vaultId,
+        vaultPath: record.vaultPath,
+        name: record.name,
+        createdAtMs: record.createdAtMs
+      }
+    })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SetActiveVaultResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_GET_IMPORT_CANDIDATES, (raw: unknown): GetImportCandidatesResponse => {
+    const parsed = validatePayload(GetImportCandidatesRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid getImportCandidates request: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog database is not available')
+    }
+    const result = catalog.getImportCandidates(parsed.data)
+    const validated = validatePayload(GetImportCandidatesResponseSchema, result)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetImportCandidatesResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_START_IMPORT, async (raw: unknown): Promise<StartImportResponse> => {
+    const parsed = validatePayload(StartImportRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid startImport request: ${parsed.error}`)
+    }
+    if (!vaultCoordinator) {
+      throw new Error('Vault import coordinator is not available')
+    }
+    const job = await vaultCoordinator.startImport(parsed.data)
+    const validated = validatePayload(StartImportResponseSchema, { job })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing StartImportResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_PAUSE_IMPORT, async (): Promise<VaultImportActionResponse> => {
+    if (!vaultCoordinator) {
+      throw new Error('Vault import coordinator is not available')
+    }
+    const job = await vaultCoordinator.pauseImport()
+    const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(
+    IPC_CHANNELS.VAULT_RESUME_IMPORT,
+    async (raw: unknown): Promise<VaultImportActionResponse> => {
+      if (!vaultCoordinator) {
+        throw new Error('Vault import coordinator is not available')
+      }
+      const jobId = (raw as { jobId?: string })?.jobId
+      const job = await vaultCoordinator.resumeImport(jobId)
+      const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(IPC_CHANNELS.VAULT_CANCEL_IMPORT, async (): Promise<VaultImportActionResponse> => {
+    if (!vaultCoordinator) {
+      throw new Error('Vault import coordinator is not available')
+    }
+    const job = await vaultCoordinator.cancelImport()
+    const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_GET_ACTIVE_IMPORT, (): GetActiveImportJobResponse => {
+    if (!vaultCoordinator) {
+      return { job: null }
+    }
+    const job = vaultCoordinator.getActiveImportJob()
+    const validated = validatePayload(GetActiveImportJobResponseSchema, { job })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetActiveImportJobResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_GET_LATEST_IMPORT, (): GetLatestImportJobResponse => {
+    if (!vaultCoordinator) {
+      return { job: null }
+    }
+    const job = vaultCoordinator.getLatestImportJob()
+    const validated = validatePayload(GetLatestImportJobResponseSchema, { job })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetLatestImportJobResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.VAULT_PROGRESS_EVENT, (): never => {
+    throw new Error('Event-only channel cannot be invoked')
+  })
+
+  if (vaultCoordinator && getMainWindow) {
+    vaultCoordinator.onProgress((progress) => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) {
+        const validated = validatePayload(VaultImportProgressSchema, progress)
+        if (validated.success) {
+          win.webContents.send(IPC_CHANNELS.VAULT_PROGRESS_EVENT, validated.data)
+        } else {
+          console.error(
+            `Invalid outgoing VaultImportProgress event payload in main: ${validated.error}`
+          )
+        }
+      }
+    })
+  }
 
   if (coordinator && getMainWindow) {
     coordinator.onProgress((progress) => {

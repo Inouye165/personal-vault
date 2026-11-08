@@ -54,7 +54,19 @@ describe('preload bridge', () => {
         'onScanProgress',
         'getDuplicateGroups',
         'getDuplicateGroupMembers',
-        'setDuplicateReview'
+        'setDuplicateReview',
+        'selectVaultDirectory',
+        'initializeVault',
+        'getActiveVault',
+        'setActiveVault',
+        'getImportCandidates',
+        'startImport',
+        'pauseImport',
+        'resumeImport',
+        'cancelImport',
+        'getActiveImportJob',
+        'getLatestImportJob',
+        'onImportProgress'
       ].sort()
     )
   })

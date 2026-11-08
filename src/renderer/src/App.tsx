@@ -4,6 +4,7 @@ import { EmptyState } from './components/EmptyState'
 import { Header } from './components/Header'
 import { ScanJobsPanel } from './components/ScanJobsPanel'
 import { Sidebar } from './components/Sidebar'
+import { VaultImportPanel } from './components/VaultImportPanel'
 import { useScanJobs } from './hooks/useScanJobs'
 import { useVaultApi } from './hooks/useVaultApi'
 import type { NavigationTab } from '../../shared/validation/ipc-schemas'
@@ -69,7 +70,11 @@ export function App() {
             currentTab === 'duplicates' && <DuplicateReviewPanel />}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
-            currentTab !== 'duplicates' && (
+            currentTab === 'review' && <VaultImportPanel />}
+          {state.phase === 'ready' &&
+            state.vaultStatus.sourceCount > 0 &&
+            currentTab !== 'duplicates' &&
+            currentTab !== 'review' && (
               <div className="catalog-populated-view">
                 <ScanJobsPanel {...scanPanelProps} />
                 <div className="populated-summary-card">

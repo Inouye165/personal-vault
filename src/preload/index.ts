@@ -20,6 +20,20 @@ import {
   GetDuplicateGroupMembersResponseSchema,
   SetDuplicateReviewRequestSchema,
   SetDuplicateReviewResponseSchema,
+  SelectVaultDirectoryResponseSchema,
+  InitializeVaultRequestSchema,
+  InitializeVaultResponseSchema,
+  GetActiveVaultResponseSchema,
+  SetActiveVaultRequestSchema,
+  SetActiveVaultResponseSchema,
+  GetImportCandidatesRequestSchema,
+  GetImportCandidatesResponseSchema,
+  StartImportRequestSchema,
+  StartImportResponseSchema,
+  VaultImportProgressSchema,
+  GetActiveImportJobResponseSchema,
+  GetLatestImportJobResponseSchema,
+  VaultImportActionResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -36,7 +50,21 @@ import {
   type GetDuplicateGroupMembersRequest,
   type GetDuplicateGroupMembersResponse,
   type SetDuplicateReviewRequest,
-  type SetDuplicateReviewResponse
+  type SetDuplicateReviewResponse,
+  type SelectVaultDirectoryResponse,
+  type InitializeVaultRequest,
+  type InitializeVaultResponse,
+  type GetActiveVaultResponse,
+  type SetActiveVaultRequest,
+  type SetActiveVaultResponse,
+  type GetImportCandidatesRequest,
+  type GetImportCandidatesResponse,
+  type StartImportRequest,
+  type StartImportResponse,
+  type VaultImportProgress,
+  type GetActiveImportJobResponse,
+  type GetLatestImportJobResponse,
+  type VaultImportActionResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -222,6 +250,138 @@ const api: VaultApi = {
       throw new Error(`Invalid setDuplicateReview response from main: ${result.error}`)
     }
     return result.data
+  },
+
+  async selectVaultDirectory(): Promise<SelectVaultDirectoryResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_SELECT_DIRECTORY)
+    const result = validatePayload(SelectVaultDirectoryResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid selectVaultDirectory response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async initializeVault(request: InitializeVaultRequest): Promise<InitializeVaultResponse> {
+    const parsed = validatePayload(InitializeVaultRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid initializeVault request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_INITIALIZE, parsed.data)
+    const result = validatePayload(InitializeVaultResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid initializeVault response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getActiveVault(): Promise<GetActiveVaultResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_GET_ACTIVE)
+    const result = validatePayload(GetActiveVaultResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getActiveVault response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async setActiveVault(request: SetActiveVaultRequest): Promise<SetActiveVaultResponse> {
+    const parsed = validatePayload(SetActiveVaultRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid setActiveVault request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_SET_ACTIVE, parsed.data)
+    const result = validatePayload(SetActiveVaultResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid setActiveVault response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getImportCandidates(
+    request: GetImportCandidatesRequest
+  ): Promise<GetImportCandidatesResponse> {
+    const parsed = validatePayload(GetImportCandidatesRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getImportCandidates request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_GET_IMPORT_CANDIDATES, parsed.data)
+    const result = validatePayload(GetImportCandidatesResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getImportCandidates response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startImport(request: StartImportRequest): Promise<StartImportResponse> {
+    const parsed = validatePayload(StartImportRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid startImport request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_START_IMPORT, parsed.data)
+    const result = validatePayload(StartImportResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startImport response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseImport(): Promise<VaultImportActionResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_PAUSE_IMPORT)
+    const result = validatePayload(VaultImportActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseImport response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeImport(jobId?: string): Promise<VaultImportActionResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_RESUME_IMPORT, { jobId })
+    const result = validatePayload(VaultImportActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeImport response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelImport(): Promise<VaultImportActionResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_CANCEL_IMPORT)
+    const result = validatePayload(VaultImportActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelImport response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getActiveImportJob(): Promise<GetActiveImportJobResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_GET_ACTIVE_IMPORT)
+    const result = validatePayload(GetActiveImportJobResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getActiveImportJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getLatestImportJob(): Promise<GetLatestImportJobResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_GET_LATEST_IMPORT)
+    const result = validatePayload(GetLatestImportJobResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getLatestImportJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onImportProgress(callback: (progress: VaultImportProgress) => void): () => void {
+    const listener = (_event: unknown, raw: unknown): void => {
+      const result = validatePayload(VaultImportProgressSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      } else {
+        console.error(`Invalid VaultImportProgress event payload from main: ${result.error}`)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.VAULT_PROGRESS_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.VAULT_PROGRESS_EVENT, listener)
+    }
   }
 }
 

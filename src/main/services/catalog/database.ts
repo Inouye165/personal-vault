@@ -52,7 +52,18 @@ import type {
   UnhashedCountResult,
   UnhashedFileRecord,
   UnhashedFilesOptions,
-  UpdateScanJobProgressInput
+  UpdateScanJobProgressInput,
+  RegisterVaultInput,
+  CatalogVaultRecord,
+  RecordVaultCopyInput,
+  CatalogVaultCopyRecord,
+  CreateVaultImportJobInput,
+  CatalogVaultImportJobRecord,
+  UpdateVaultImportProgressInput,
+  UpdateVaultImportItemInput,
+  GetImportCandidatesOptions,
+  ImportCandidateItem,
+  ImportCandidatesResult
 } from './types'
 
 interface RawFileRow {
@@ -123,6 +134,63 @@ interface RawScanJobRow {
   updated_at_ms: number
   started_at_ms: number
   completed_at_ms: number | null
+}
+
+interface RawVaultRow {
+  id: number
+  vault_id: string
+  vault_path: string
+  normalized_vault_path: string
+  name: string
+  created_at_ms: number
+  updated_at_ms: number
+  is_active: number
+}
+
+interface RawVaultCopyRow {
+  id: number
+  vault_id: string
+  sha256: string
+  byte_size: number
+  relative_path: string
+  manifest_relative_path: string
+  verified_at_ms: number
+  created_at_ms: number
+  updated_at_ms: number
+}
+
+interface RawVaultImportRow {
+  id: string
+  vault_id: string
+  status: 'running' | 'paused' | 'cancelled' | 'interrupted' | 'failed' | 'completed'
+  total_files: number
+  total_bytes: number
+  copied_files: number
+  copied_bytes: number
+  verified_files: number
+  failed_files: number
+  started_at_ms: number
+  completed_at_ms: number | null
+  error_message: string | null
+}
+
+interface RawImportCandidateRow {
+  file_location_id: number
+  source_id: number
+  original_path: string
+  file_name: string
+  extension: string
+  category: 'photo' | 'document'
+  byte_size: number
+  filesystem_birthtime_ms: number | null
+  filesystem_mtime_ms: number | null
+  inferred_capture_time_ms: number | null
+  sha256: string
+  discovery_observation_id: number
+  hash_observation_id: number
+  vault_copy_id: number | null
+  vault_status: 'not_imported' | 'copied'
+  is_preferred: number
 }
 
 interface RawScanJobErrorRow {
@@ -2045,5 +2113,507 @@ export class CatalogDatabase {
     `
     const row = this.db.prepare(sql).get(originalPath) as unknown as RawFileRow | undefined
     return row ? this.mapFileRow(row) : null
+  }
+
+  // ==========================================
+  // Stage 4: Vault & Verified Import Methods
+  // ==========================================
+
+  public registerVault(input: RegisterVaultInput): CatalogVaultRecord {
+    this.assertOpen()
+    if (!input.vaultId || typeof input.vaultId !== 'string') {
+      throw new TypeError('vaultId must be a non-empty string')
+    }
+    if (!input.vaultPath || typeof input.vaultPath !== 'string') {
+      throw new TypeError('vaultPath must be a non-empty string')
+    }
+    const normalizedVaultPath = normalizePathForLookup(input.vaultPath)
+    const now = Date.now()
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      // Deactivate any currently active vaults
+      this.db.prepare('UPDATE vaults SET is_active = 0;').run()
+
+      // Upsert the vault record
+      const stmt = this.db.prepare(`
+        INSERT INTO vaults (vault_id, vault_path, normalized_vault_path, name, created_at_ms, updated_at_ms, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(vault_id) DO UPDATE SET
+          vault_path = excluded.vault_path,
+          normalized_vault_path = excluded.normalized_vault_path,
+          name = excluded.name,
+          updated_at_ms = excluded.updated_at_ms,
+          is_active = 1;
+      `)
+      stmt.run(
+        input.vaultId,
+        input.vaultPath,
+        normalizedVaultPath,
+        input.name,
+        input.createdAtMs,
+        now
+      )
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // Ignore rollback failure
+      }
+      throw err
+    }
+
+    const row = this.db
+      .prepare('SELECT * FROM vaults WHERE vault_id = ?;')
+      .get(input.vaultId) as unknown as RawVaultRow
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      vaultPath: row.vault_path,
+      normalizedVaultPath: row.normalized_vault_path,
+      name: row.name,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      isActive: row.is_active === 1
+    }
+  }
+
+  public getActiveVault(): CatalogVaultRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare('SELECT * FROM vaults WHERE is_active = 1 ORDER BY updated_at_ms DESC LIMIT 1;')
+      .get() as unknown as RawVaultRow | undefined
+    if (!row) return null
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      vaultPath: row.vault_path,
+      normalizedVaultPath: row.normalized_vault_path,
+      name: row.name,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      isActive: true
+    }
+  }
+
+  public setActiveVault(vaultPath: string): CatalogVaultRecord {
+    this.assertOpen()
+    const normalized = normalizePathForLookup(vaultPath)
+    const row = this.db
+      .prepare('SELECT * FROM vaults WHERE normalized_vault_path = ?;')
+      .get(normalized) as unknown as RawVaultRow | undefined
+    if (!row) {
+      throw new Error(`Vault at path "${vaultPath}" is not registered in catalog`)
+    }
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db.prepare('UPDATE vaults SET is_active = 0;').run()
+      this.db
+        .prepare('UPDATE vaults SET is_active = 1, updated_at_ms = ? WHERE id = ?;')
+        .run(Date.now(), row.id)
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // Ignore rollback failure
+      }
+      throw err
+    }
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      vaultPath: row.vault_path,
+      normalizedVaultPath: row.normalized_vault_path,
+      name: row.name,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: Date.now(),
+      isActive: true
+    }
+  }
+
+  public recordVaultCopy(input: RecordVaultCopyInput): CatalogVaultCopyRecord {
+    this.assertOpen()
+    const now = Date.now()
+    const stmt = this.db.prepare(`
+      INSERT INTO vault_copies (
+        vault_id, sha256, byte_size, relative_path, manifest_relative_path,
+        verified_at_ms, created_at_ms, updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(vault_id, sha256, byte_size) DO UPDATE SET
+        relative_path = excluded.relative_path,
+        manifest_relative_path = excluded.manifest_relative_path,
+        verified_at_ms = excluded.verified_at_ms,
+        updated_at_ms = excluded.updated_at_ms;
+    `)
+    stmt.run(
+      input.vaultId,
+      input.sha256,
+      input.byteSize,
+      input.relativePath,
+      input.manifestRelativePath,
+      input.verifiedAtMs,
+      now,
+      now
+    )
+
+    const row = this.db
+      .prepare('SELECT * FROM vault_copies WHERE vault_id = ? AND sha256 = ? AND byte_size = ?;')
+      .get(input.vaultId, input.sha256, input.byteSize) as unknown as RawVaultCopyRow
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      sha256: row.sha256,
+      byteSize: row.byte_size,
+      relativePath: row.relative_path,
+      manifestRelativePath: row.manifest_relative_path,
+      verifiedAtMs: row.verified_at_ms,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms
+    }
+  }
+
+  public getVaultCopiesForVault(vaultId: string): CatalogVaultCopyRecord[] {
+    this.assertOpen()
+    const rows = this.db
+      .prepare('SELECT * FROM vault_copies WHERE vault_id = ? ORDER BY id ASC;')
+      .all(vaultId) as unknown as RawVaultCopyRow[]
+    return rows.map((r) => ({
+      id: r.id,
+      vaultId: r.vault_id,
+      sha256: r.sha256,
+      byteSize: r.byte_size,
+      relativePath: r.relative_path,
+      manifestRelativePath: r.manifest_relative_path,
+      verifiedAtMs: r.verified_at_ms,
+      createdAtMs: r.created_at_ms,
+      updatedAtMs: r.updated_at_ms
+    }))
+  }
+
+  public getVaultCopy(
+    vaultId: string,
+    sha256: string,
+    byteSize: number
+  ): CatalogVaultCopyRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare('SELECT * FROM vault_copies WHERE vault_id = ? AND sha256 = ? AND byte_size = ?;')
+      .get(vaultId, sha256, byteSize) as unknown as RawVaultCopyRow | undefined
+    if (!row) return null
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      sha256: row.sha256,
+      byteSize: row.byte_size,
+      relativePath: row.relative_path,
+      manifestRelativePath: row.manifest_relative_path,
+      verifiedAtMs: row.verified_at_ms,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms
+    }
+  }
+
+  public createVaultImportJob(input: CreateVaultImportJobInput): CatalogVaultImportJobRecord {
+    this.assertOpen()
+    const now = Date.now()
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          INSERT INTO vault_imports (
+            id, vault_id, status, total_files, total_bytes, copied_files,
+            copied_bytes, verified_files, failed_files, started_at_ms
+          ) VALUES (?, ?, 'running', ?, ?, 0, 0, 0, 0, ?);
+        `
+        )
+        .run(input.jobId, input.vaultId, input.totalFiles, input.totalBytes, now)
+
+      const itemStmt = this.db.prepare(`
+        INSERT INTO vault_import_items (
+          import_id, file_location_id, discovery_observation_id, hash_observation_id,
+          sha256, byte_size, status, started_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?);
+      `)
+
+      for (const item of input.items) {
+        itemStmt.run(
+          input.jobId,
+          item.fileLocationId,
+          item.discoveryObservationId,
+          item.hashObservationId ?? null,
+          item.sha256,
+          item.byteSize,
+          now
+        )
+      }
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // Ignore rollback failure
+      }
+      throw err
+    }
+
+    const job = this.getVaultImportJob(input.jobId)
+    if (!job) throw new Error('Failed to create vault import job')
+    return job
+  }
+
+  public getVaultImportJob(jobId: string): CatalogVaultImportJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare('SELECT * FROM vault_imports WHERE id = ?;')
+      .get(jobId) as unknown as RawVaultImportRow | undefined
+    if (!row) return null
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      status: row.status,
+      totalFiles: row.total_files,
+      totalBytes: row.total_bytes,
+      copiedFiles: row.copied_files,
+      copiedBytes: row.copied_bytes,
+      verifiedFiles: row.verified_files,
+      failedFiles: row.failed_files,
+      startedAtMs: row.started_at_ms,
+      completedAtMs: row.completed_at_ms,
+      errorMessage: row.error_message
+    }
+  }
+
+  public getActiveVaultImportJob(): CatalogVaultImportJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        "SELECT * FROM vault_imports WHERE status IN ('running', 'paused', 'interrupted') ORDER BY started_at_ms DESC LIMIT 1;"
+      )
+      .get() as unknown as RawVaultImportRow | undefined
+    if (!row) return null
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      status: row.status,
+      totalFiles: row.total_files,
+      totalBytes: row.total_bytes,
+      copiedFiles: row.copied_files,
+      copiedBytes: row.copied_bytes,
+      verifiedFiles: row.verified_files,
+      failedFiles: row.failed_files,
+      startedAtMs: row.started_at_ms,
+      completedAtMs: row.completed_at_ms,
+      errorMessage: row.error_message
+    }
+  }
+
+  public getLatestVaultImportJob(): CatalogVaultImportJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare('SELECT * FROM vault_imports ORDER BY started_at_ms DESC LIMIT 1;')
+      .get() as unknown as RawVaultImportRow | undefined
+    if (!row) return null
+    return {
+      id: row.id,
+      vaultId: row.vault_id,
+      status: row.status,
+      totalFiles: row.total_files,
+      totalBytes: row.total_bytes,
+      copiedFiles: row.copied_files,
+      copiedBytes: row.copied_bytes,
+      verifiedFiles: row.verified_files,
+      failedFiles: row.failed_files,
+      startedAtMs: row.started_at_ms,
+      completedAtMs: row.completed_at_ms,
+      errorMessage: row.error_message
+    }
+  }
+
+  public updateVaultImportProgress(input: UpdateVaultImportProgressInput): void {
+    this.assertOpen()
+    let sql = `
+      UPDATE vault_imports SET
+        copied_files = ?,
+        copied_bytes = ?,
+        verified_files = ?,
+        failed_files = ?
+    `
+    const params: SQLInputValue[] = [
+      input.copiedFiles,
+      input.copiedBytes,
+      input.verifiedFiles,
+      input.failedFiles
+    ]
+    if (input.status !== undefined) {
+      sql += ', status = ?'
+      params.push(input.status)
+    }
+    if (input.errorMessage !== undefined) {
+      sql += ', error_message = ?'
+      params.push(input.errorMessage)
+    }
+    if (input.completedAtMs !== undefined) {
+      sql += ', completed_at_ms = ?'
+      params.push(input.completedAtMs)
+    }
+    sql += ' WHERE id = ?;'
+    params.push(input.jobId)
+
+    this.db.prepare(sql).run(...params)
+  }
+
+  public updateVaultImportStatus(
+    jobId: string,
+    status: 'running' | 'paused' | 'cancelled' | 'interrupted' | 'failed' | 'completed',
+    errorMessage?: string | null,
+    completedAtMs?: number | null
+  ): void {
+    this.assertOpen()
+    let sql = 'UPDATE vault_imports SET status = ?'
+    const params: SQLInputValue[] = [status]
+    if (errorMessage !== undefined) {
+      sql += ', error_message = ?'
+      params.push(errorMessage)
+    }
+    if (completedAtMs !== undefined) {
+      sql += ', completed_at_ms = ?'
+      params.push(completedAtMs)
+    }
+    sql += ' WHERE id = ?;'
+    params.push(jobId)
+    this.db.prepare(sql).run(...params)
+  }
+
+  public updateVaultImportItem(input: UpdateVaultImportItemInput): void {
+    this.assertOpen()
+    let sql = 'UPDATE vault_import_items SET status = ?'
+    const params: SQLInputValue[] = [input.status]
+    if (input.vaultCopyId !== undefined) {
+      sql += ', vault_copy_id = ?'
+      params.push(input.vaultCopyId)
+    }
+    if (input.errorCode !== undefined) {
+      sql += ', error_code = ?'
+      params.push(input.errorCode)
+    }
+    if (input.errorMessage !== undefined) {
+      sql += ', error_message = ?'
+      params.push(input.errorMessage)
+    }
+    if (input.completedAtMs !== undefined) {
+      sql += ', completed_at_ms = ?'
+      params.push(input.completedAtMs)
+    }
+    sql += ' WHERE import_id = ? AND file_location_id = ?;'
+    params.push(input.jobId, input.fileLocationId)
+
+    this.db.prepare(sql).run(...params)
+  }
+
+  public markRunningImportJobsAsInterrupted(): number {
+    this.assertOpen()
+    const result = this.db
+      .prepare(
+        "UPDATE vault_imports SET status = 'interrupted' WHERE status IN ('running', 'paused');"
+      )
+      .run()
+    return Number(result.changes)
+  }
+
+  public getImportCandidates(options: GetImportCandidatesOptions): ImportCandidatesResult {
+    this.assertOpen()
+    const limit = options.limit ?? 50
+    const offset = options.offset ?? 0
+    const filter = options.filter ?? 'all'
+
+    let whereClause = `
+      WHERE d.is_current = 1
+        AND h.is_active = 1
+        AND h.observed_byte_size = d.byte_size
+    `
+    const countParams: SQLInputValue[] = [options.vaultId]
+
+    if (options.category) {
+      whereClause += ' AND fl.category = ?'
+      countParams.push(options.category)
+    }
+
+    if (filter === 'unimported') {
+      whereClause += ' AND vc.id IS NULL'
+    } else if (filter === 'imported') {
+      whereClause += ' AND vc.id IS NOT NULL'
+    }
+
+    const countSql = `
+      SELECT COUNT(*) as total
+      FROM file_locations fl
+      JOIN discovery_observations d ON d.file_location_id = fl.id
+      JOIN hash_observations h ON h.discovery_observation_id = d.id
+      LEFT JOIN vault_copies vc ON vc.vault_id = ? AND vc.sha256 = h.sha256 AND vc.byte_size = d.byte_size
+      ${whereClause};
+    `
+    const countRow = this.db.prepare(countSql).get(...countParams) as { total: number }
+    const totalCount = countRow ? countRow.total : 0
+
+    const querySql = `
+      SELECT
+        fl.id as file_location_id,
+        fl.source_id,
+        fl.original_path,
+        fl.file_name,
+        fl.extension,
+        fl.category,
+        d.byte_size,
+        d.filesystem_birthtime_ms,
+        d.filesystem_mtime_ms,
+        d.inferred_capture_time_ms,
+        h.sha256,
+        d.id as discovery_observation_id,
+        h.id as hash_observation_id,
+        vc.id as vault_copy_id,
+        CASE WHEN vc.id IS NOT NULL THEN 'copied' ELSE 'not_imported' END as vault_status,
+        CASE WHEN dr.preferred_location_id = fl.id THEN 1 ELSE 0 END as is_preferred
+      FROM file_locations fl
+      JOIN discovery_observations d ON d.file_location_id = fl.id
+      JOIN hash_observations h ON h.discovery_observation_id = d.id
+      LEFT JOIN vault_copies vc ON vc.vault_id = ? AND vc.sha256 = h.sha256 AND vc.byte_size = d.byte_size
+      LEFT JOIN duplicate_reviews dr ON dr.sha256 = h.sha256 AND dr.byte_size = d.byte_size
+      ${whereClause}
+      ORDER BY fl.id ASC
+      LIMIT ? OFFSET ?;
+    `
+    const queryParams: SQLInputValue[] = [...countParams, limit, offset]
+    const rows = this.db.prepare(querySql).all(...queryParams) as unknown as RawImportCandidateRow[]
+
+    const items: ImportCandidateItem[] = rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      sourceId: r.source_id,
+      originalPath: r.original_path,
+      fileName: r.file_name,
+      extension: r.extension,
+      category: r.category,
+      byteSize: r.byte_size,
+      filesystemBirthtimeMs: r.filesystem_birthtime_ms,
+      filesystemMtimeMs: r.filesystem_mtime_ms,
+      inferredCaptureTimeMs: r.inferred_capture_time_ms,
+      sha256: r.sha256,
+      discoveryObservationId: r.discovery_observation_id,
+      hashObservationId: r.hash_observation_id,
+      vaultStatus: r.vault_status,
+      vaultCopyId: r.vault_copy_id,
+      isPreferred: r.is_preferred === 1
+    }))
+
+    return {
+      items,
+      totalCount,
+      offset,
+      limit,
+      hasMore: offset + items.length < totalCount
+    }
   }
 }
