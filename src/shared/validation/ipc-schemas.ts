@@ -408,6 +408,92 @@ export const VaultImportActionResponseSchema = z.object({
 })
 export type VaultImportActionResponse = z.infer<typeof VaultImportActionResponseSchema>
 
+// --- Stage 5A: Photos & Thumbnails ---
+
+export const PhotoItemSchema = z.object({
+  id: z.number().int().positive(),
+  sourceId: z.number().int().positive(),
+  originalPath: z.string().min(1),
+  fileName: z.string().min(1),
+  extension: z.string().min(1),
+  category: z.literal('photo'),
+  discoveryObservationId: z.number().int().positive(),
+  byteSize: z.number().int().nonnegative(),
+  filesystemBirthtimeMs: z.number().nullable(),
+  filesystemMtimeMs: z.number().nullable(),
+  inferredCaptureTimeMs: z.number().nullable(),
+  firstDiscoveredAtMs: z.number(),
+  lastSeenAtMs: z.number(),
+  activeHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i)
+    .nullable(),
+  activeHashVerifiedAtMs: z.number().nullable()
+})
+export type PhotoItem = z.infer<typeof PhotoItemSchema>
+
+export const GetPhotosPageRequestSchema = z.object({
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive().max(200)
+})
+export type GetPhotosPageRequest = z.infer<typeof GetPhotosPageRequestSchema>
+
+export const GetPhotosPageResponseSchema = z.object({
+  items: z.array(PhotoItemSchema),
+  totalCount: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  hasMore: z.boolean()
+})
+export type GetPhotosPageResponse = z.infer<typeof GetPhotosPageResponseSchema>
+
+export const GetThumbnailRequestSchema = z.object({
+  locationId: z.number().int().positive(),
+  expectedByteSize: z.number().int().nonnegative().optional(),
+  expectedMtimeMs: z.number().nullable().optional(),
+  priority: z.enum(['high', 'normal', 'low']).optional()
+})
+export type GetThumbnailRequest = z.infer<typeof GetThumbnailRequestSchema>
+
+export const ThumbnailReadySchema = z.object({
+  status: z.literal('ready'),
+  locationId: z.number().int().positive(),
+  dataUrl: z
+    .string()
+    .regex(/^data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/)
+    .max(2 * 1024 * 1024),
+  mimeType: z.string().min(1),
+  width: z.number().int().positive(),
+  height: z.number().int().positive()
+})
+
+export const ThumbnailUnsupportedSchema = z.object({
+  status: z.literal('unsupported'),
+  locationId: z.number().int().positive(),
+  reason: z.string().min(1)
+})
+
+export const ThumbnailErrorSchema = z.object({
+  status: z.literal('error'),
+  locationId: z.number().int().positive(),
+  code: z.string().min(1),
+  message: z.string().min(1)
+})
+
+export const ThumbnailMissingSchema = z.object({
+  status: z.literal('missing'),
+  locationId: z.number().int().positive(),
+  reason: z.string().min(1)
+})
+
+export const ThumbnailResultSchema = z.discriminatedUnion('status', [
+  ThumbnailReadySchema,
+  ThumbnailUnsupportedSchema,
+  ThumbnailErrorSchema,
+  ThumbnailMissingSchema
+])
+export type ThumbnailResult = z.infer<typeof ThumbnailResultSchema>
+
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,
   data: unknown

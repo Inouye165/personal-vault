@@ -45,7 +45,8 @@ export default defineConfig({
         input: {
           index: resolve('src/main/index.ts'),
           catalog: resolve('src/main/services/catalog/index.ts'),
-          jobs: resolve('src/main/services/jobs/index.ts')
+          jobs: resolve('src/main/services/jobs/index.ts'),
+          thumbnails: resolve('src/main/services/thumbnails/index.ts')
         }
       }
     }

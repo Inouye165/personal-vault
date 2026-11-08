@@ -37,6 +37,10 @@ import {
   PauseImportRequestSchema,
   ResumeImportRequestSchema,
   CancelImportRequestSchema,
+  GetPhotosPageRequestSchema,
+  GetPhotosPageResponseSchema,
+  GetThumbnailRequestSchema,
+  ThumbnailResultSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -70,7 +74,11 @@ import {
   type VaultImportActionResponse,
   type PauseImportRequest,
   type ResumeImportRequest,
-  type CancelImportRequest
+  type CancelImportRequest,
+  type GetPhotosPageRequest,
+  type GetPhotosPageResponse,
+  type GetThumbnailRequest,
+  type ThumbnailResult
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -401,6 +409,32 @@ const api: VaultApi = {
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.VAULT_PROGRESS_EVENT, listener)
     }
+  },
+
+  async getPhotosPage(request: GetPhotosPageRequest): Promise<GetPhotosPageResponse> {
+    const parsed = validatePayload(GetPhotosPageRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getPhotosPage request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_GET_PAGE, parsed.data)
+    const result = validatePayload(GetPhotosPageResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotosPage response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getThumbnail(request: GetThumbnailRequest): Promise<ThumbnailResult> {
+    const parsed = validatePayload(GetThumbnailRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getThumbnail request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_GET_THUMBNAIL, parsed.data)
+    const result = validatePayload(ThumbnailResultSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getThumbnail response from main: ${result.error}`)
+    }
+    return result.data
   }
 }
 

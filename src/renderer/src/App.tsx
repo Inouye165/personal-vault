@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { DuplicateReviewPanel } from './components/DuplicateReviewPanel'
 import { EmptyState } from './components/EmptyState'
 import { Header } from './components/Header'
+import { PhotosPanel } from './components/PhotosPanel'
 import { ScanJobsPanel } from './components/ScanJobsPanel'
 import { Sidebar } from './components/Sidebar'
 import { VaultImportPanel } from './components/VaultImportPanel'
@@ -49,7 +50,12 @@ export function App() {
         appVersion={state.phase === 'ready' ? state.appInfo.version : undefined}
       />
       <main className="main-wrapper">
-        <Header searchQuery={searchQuery} onSearchChange={setSearchQuery} state={state} />
+        <Header
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          state={state}
+          currentTab={currentTab}
+        />
         <div className="content-area">
           {state.phase === 'loading' && (
             <div className="notice" role="status">
@@ -67,12 +73,16 @@ export function App() {
           )}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
+            currentTab === 'photos' && <PhotosPanel />}
+          {state.phase === 'ready' &&
+            state.vaultStatus.sourceCount > 0 &&
             currentTab === 'duplicates' && <DuplicateReviewPanel />}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
             currentTab === 'review' && <VaultImportPanel />}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
+            currentTab !== 'photos' &&
             currentTab !== 'duplicates' &&
             currentTab !== 'review' && (
               <div className="catalog-populated-view">

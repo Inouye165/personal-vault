@@ -8,6 +8,7 @@ import { setupSecurityPolicies } from './security'
 import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
 import { VaultImportCoordinator } from './services/vault'
+import { ThumbnailCoordinator } from './services/thumbnails'
 
 function logStartup(message: string): void {
   try {
@@ -41,6 +42,7 @@ let mainWindow: BrowserWindow | null = null
 let catalog: CatalogDatabase | null = null
 let coordinator: ScanJobCoordinator | null = null
 let vaultCoordinator: VaultImportCoordinator | null = null
+let thumbnailCoordinator: ThumbnailCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -147,6 +149,14 @@ if (!app.requestSingleInstanceLock()) {
       await vaultCoordinator.initialize()
       logStartup('vaultCoordinator.initialize completed')
 
+      const cacheDir = join(app.getPath('userData'), 'thumbnails')
+      thumbnailCoordinator = new ThumbnailCoordinator({
+        cacheDir,
+        approvedRoots: () =>
+          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : []
+      })
+      logStartup('thumbnailCoordinator initialized')
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -155,6 +165,7 @@ if (!app.requestSingleInstanceLock()) {
         catalog,
         coordinator,
         vaultCoordinator,
+        thumbnailCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -190,6 +201,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down vault coordinator')
             await vaultCoordinator.shutdown()
             logStartup('vault coordinator shutdown done')
+          }
+          if (thumbnailCoordinator) {
+            logStartup('shutting down thumbnail coordinator')
+            await thumbnailCoordinator.shutdown()
+            logStartup('thumbnail coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

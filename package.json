@@ -20,6 +20,8 @@
     "verify:duplicates:unpacked": "node scripts/verify-electron-duplicate-review.mjs --mode=unpacked",
     "verify:vault": "node scripts/verify-electron-vault-import.mjs",
     "verify:vault:unpacked": "node scripts/verify-electron-vault-import.mjs --mode=unpacked",
+    "verify:photos": "node scripts/verify-electron-photos.mjs",
+    "verify:photos:unpacked": "node scripts/verify-electron-photos.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -32,6 +34,7 @@
     "lucide-react": "^1.16.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "sharp": "^0.35.5",
     "zod": "^4.6.7"
   },
   "devDependencies": {

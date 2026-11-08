@@ -311,3 +311,44 @@ src/
       - Sender-validated handlers for vault selection, initialization, candidate listing, import control, and progress streaming.
       - UI components in `VaultImportPanel`: functional "Change Vault", candidate selection table with filters, pagination beyond 100 items with monotonic request token protection, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, truth-aligned banners (no "Verified Success" for failures), and operations distinction notice.
       - Clear separation of operations: catalog index removal, vault copy deletion, and source deletion are distinct operations (none implemented).
+
+12. **Bounded Thumbnail Generation, Disposable Cache & Virtualized Photo Browsing (Stage 5A)**:
+    - **Inviolable Principles & Source Preservation**:
+      - Source files are strictly read-only: opened via read-only descriptors (`open(path, 'r')`).
+      - Never modify, touch, overwrite, or delete originals during thumbnail generation or cache maintenance.
+      - All original source timestamps, byte sizes, and SHA-256 hashes are verified before decoding and invariant across application execution.
+    - **Decoder & Format Support (Sharp / libvips)**:
+      - Maintained offline decoder: `sharp@0.35.5` with prebuilt `@img/sharp-win32-x64` (libvips 8.18.7), packaged into `app.asar.unpacked`.
+      - Concurrency & event loop isolation: decoding runs in dedicated Node worker threads (`src/main/services/thumbnails/worker.ts`), preventing main process event loop stalls.
+      - Supported formats: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF.
+      - Orientation preservation: Sharp `.rotate()` automatically applies EXIF orientation metadata to render photographs upright.
+      - Honest placeholders: Apple HEIC/HEIF (libheif in prebuilt libvips only bundles AV1 decoder without patent-encumbered HEVC decoders), camera RAW, SVG, corrupted or oversized files return honest unsupported/error states without crashes or external toolchains.
+    - **Resource Limits & Bounded Execution**:
+      - Thumbnail longest edge: 512 pixels, preserving aspect ratio, encoded as WebP (recipe version: `v1_512_webp`).
+      - Maximum active decode jobs: 2 concurrent workers.
+      - Maximum queued decode jobs: 64 jobs with visible cells prioritized; excess requests rejected.
+      - Maximum source file size: 128 MiB (`MAX_SOURCE_SIZE_BYTES`).
+      - Maximum input pixel limit: 100 megapixels (`MAX_INPUT_PIXELS`).
+      - Per-job execution timeout: 15 seconds with worker termination on timeout or crash.
+      - Disposable disk cache budget: 1 GiB (`DISK_CACHE_BUDGET_BYTES`).
+      - Renderer metadata cache: at most 2,000 records.
+      - Mounted photo cells: at most 200 for supported window sizes.
+    - **Secure Disposable Disk Cache**:
+      - Located in `<userData>/thumbnails/` (outside source roots and vault storage).
+      - Cache key derivation: deterministic 64-hex SHA-256 of `sha256:recipeVersion:statMtimeMs:byteSize`.
+      - Atomic staging: written to `.thumb_tmp_<pid>_<uuid>` with `wx` exclusive flag before atomic `renameSync` to `<key>.thumb`.
+      - LRU eviction: strictly targets owned `.thumb` files in the thumbnails directory. Never deletes or traverses outside files.
+      - Staging cleanup: cleans owned `.thumb_tmp_*` files older than 1 hour on startup and maintenance.
+      - Residual out-of-band source modification detection: fast `statSync` check on source file prior to returning cached thumbnail ensures modified sources return `SOURCE_MODIFIED` rather than serving stale images.
+    - **IPC & Process Security**:
+      - Narrow typed IPC channels: `photos:get-page` and `photos:get-thumbnail`.
+      - Bidirectional Zod schema validation: `GetPhotosPageRequestSchema`, `GetPhotosPageResponseSchema`, `GetThumbnailRequestSchema`, `ThumbnailResultSchema`.
+      - Top-level sender validation on all handlers.
+      - Data URL transport (`data:image/webp;base64,...`) compliant with CSP (`img-src 'self' data:`), without exposing file URLs or filesystem protocols.
+    - **Renderer Presentation & Virtualized Browsing**:
+      - Responsive CSS grid adhering to dark theme token system.
+      - Deterministic ordering by catalog location ID (`file_locations.id ASC`).
+      - Virtual windowing with at most 200 mounted DOM cells.
+      - Pure React state updaters and monotonic request tokens protecting against stale async responses on navigation or unmount.
+      - Selection state and compact metadata details panel reporting recorded facts (filename, absolute source path, byte size, filesystem times, hash provenance) and explicit "Unknown" for absent capture dates/locations.
+      - Header search disabled with clear Stage 6 availability label.

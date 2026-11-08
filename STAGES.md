@@ -12,16 +12,16 @@ Stage 1, Stage 2, Stage 3, and Stage 4 are complete (independently accepted at `
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status   | Acceptance |
-| ----- | -------------------------------------------------------------- | -------- | ---------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete | `070e3cb`  |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete | `71e1af7`  |
-| 3     | Exact duplicate grouping and review                            | Complete | `79bbf44`  |
-| 4     | Verified vault copying and portable metadata                   | Complete | `1a1fb69`  |
-| 5     | Fast photo browsing, ratings, and similarity review            | Planned  | Pending    |
-| 6     | Semantic photo search and metadata filters                     | Planned  | Pending    |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned  | Pending    |
-| 8     | Export, recovery, release validation, beta, and public release | Planned  | Pending    |
+| Stage | Deliverable                                                    | Status      | Acceptance                  |
+| ----- | -------------------------------------------------------------- | ----------- | --------------------------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                   |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                   |
+| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                   |
+| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                   |
+| 5     | Fast photo browsing, ratings, and similarity review            | In progress | Substage 5A awaiting review |
+| 6     | Semantic photo search and metadata filters                     | Planned     | Pending                     |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                     |
+| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                     |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -93,14 +93,32 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 ## Stage 5 - Photo browsing and review
 
-**Planned.**
+**In progress; Substage 5A awaiting review.**
 
-- [ ] Add bounded thumbnail generation and a secure cache.
-- [ ] Provide smooth, virtualized browsing for large collections.
-- [ ] Add ratings, flags, and collections.
-- [ ] Add similarity review that distinguishes edited copies from similar photographs.
+| Substage | Deliverable                                                               | Status          | Submission reference | Acceptance reference |
+| -------- | ------------------------------------------------------------------------- | --------------- | -------------------- | -------------------- |
+| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Awaiting review | (this commit)        | Pending              |
+| 5B       | User review tools: ratings, flags, and custom collections                 | Planned         | Pending              | Pending              |
+| 5C       | Perceptual hashing and visual similarity review                           | Planned         | Pending              | Pending              |
 
-Exit: realistic collections remain responsive; similarity suggestions stay separate from exact-duplicate facts.
+### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
+
+**Awaiting review.**
+
+- [x] Responsive virtualized photo thumbnail grid adhering to dark theme token system with stable deterministic ordering by catalog location ID (`file_locations.id ASC`).
+- [x] Pure SQL pagination (`LIMIT ? OFFSET ?`) for photo catalog records without full-table materialization in memory.
+- [x] Sharp 0.35.5 decoder executing inside Node worker thread with bounded concurrency (max 2 active jobs, max 64 queued jobs, 15-second per-job timeout, max 128 MiB source size, max 100 megapixels input limit).
+- [x] Format support matrix tested and verified: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF with automatic EXIF orientation preservation (`.rotate()`).
+- [x] Honest placeholders: Apple HEIC/HEIF (due to prebuilt libvips libheif lacking unbundled HEVC decoders), camera RAW, SVG, corrupted or oversized inputs return honest unsupported/error status cards without crashes or external toolchains.
+- [x] Secure disposable disk cache in `<userData>/thumbnails/` with bounded 64-hex SHA-256 keys, atomic staging (`.thumb_tmp_*`), 1 GiB LRU budget eviction strictly targeting owned `.thumb` files, orphan staging cleanup, and zero source or vault modification.
+- [x] Residual out-of-band source modification detection (`statSync` check on cache hits) preventing stale image display.
+- [x] Narrow typed IPC channels (`photos:get-page`, `photos:get-thumbnail`) with bidirectional Zod validation and top-level sender authorization.
+- [x] Compact metadata details panel displaying filename, absolute source path, recorded byte size, recorded filesystem timestamps, and observation provenance, with explicit "Unknown" for absent capture dates/locations (no fabricated dates).
+- [x] Header search input disabled with clear Stage 6 availability label in Photos tab.
+- [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 10,000-photo scale test (warm reversal p95 <= 33 ms).
+- [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched.
+
+Exit: users can browse discovered photographs smoothly with bounded memory and secure thumbnails, with ratings and similarity deferred to 5B and 5C.
 
 ## Stage 6 - Semantic photo search
 

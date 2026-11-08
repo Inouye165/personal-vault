@@ -55,7 +55,13 @@ import {
   type StartImportResponse,
   type GetActiveImportJobResponse,
   type GetLatestImportJobResponse,
-  type VaultImportActionResponse
+  type VaultImportActionResponse,
+  GetPhotosPageRequestSchema,
+  GetPhotosPageResponseSchema,
+  GetThumbnailRequestSchema,
+  ThumbnailResultSchema,
+  type GetPhotosPageResponse,
+  type ThumbnailResult
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -64,6 +70,7 @@ import {
   validateVaultSeparation,
   type VaultImportCoordinator
 } from '../services/vault'
+import type { ThumbnailCoordinator } from '../services/thumbnails'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 
 export interface IpcHandlerOptions {
@@ -71,6 +78,7 @@ export interface IpcHandlerOptions {
   readonly catalog?: CatalogDatabase
   readonly coordinator?: ScanJobCoordinator
   readonly vaultCoordinator?: VaultImportCoordinator
+  readonly thumbnailCoordinator?: ThumbnailCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
@@ -81,6 +89,7 @@ export function registerIpcHandlers({
   catalog,
   coordinator,
   vaultCoordinator,
+  thumbnailCoordinator,
   getMainWindow,
   selectDirectories,
   selectVaultDirectory
@@ -605,6 +614,72 @@ export function registerIpcHandlers({
 
   handle(IPC_CHANNELS.VAULT_PROGRESS_EVENT, (): never => {
     throw new Error('Event-only channel cannot be invoked')
+  })
+
+  handle(IPC_CHANNELS.PHOTOS_GET_PAGE, (raw: unknown): GetPhotosPageResponse => {
+    const parsed = validatePayload(GetPhotosPageRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming GetPhotosPageRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      return {
+        items: [],
+        totalCount: 0,
+        offset: parsed.data.offset,
+        limit: parsed.data.limit,
+        hasMore: false
+      }
+    }
+    const res = catalog.queryFileLocations({
+      category: 'photo',
+      offset: parsed.data.offset,
+      limit: parsed.data.limit
+    })
+    const validated = validatePayload(GetPhotosPageResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetPhotosPageResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.PHOTOS_GET_THUMBNAIL, async (raw: unknown): Promise<ThumbnailResult> => {
+    const parsed = validatePayload(GetThumbnailRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming GetThumbnailRequest in main: ${parsed.error}`)
+    }
+    const { locationId, expectedByteSize, expectedMtimeMs, priority } = parsed.data
+    if (!thumbnailCoordinator || !catalog) {
+      return {
+        status: 'missing',
+        locationId,
+        reason: 'Thumbnail coordinator or catalog unavailable'
+      }
+    }
+
+    const fileRecord = catalog.getFileLocationById(locationId)
+    if (!fileRecord || fileRecord.category !== 'photo') {
+      return {
+        status: 'missing',
+        locationId,
+        reason: `Photograph location ID ${locationId} not found in catalog`
+      }
+    }
+
+    const res = await thumbnailCoordinator.requestThumbnail({
+      locationId,
+      sourcePath: fileRecord.originalPath,
+      expectedByteSize: expectedByteSize ?? fileRecord.byteSize,
+      expectedMtimeMs:
+        expectedMtimeMs !== undefined ? expectedMtimeMs : fileRecord.filesystemMtimeMs,
+      expectedSha256: fileRecord.activeHash,
+      priority
+    })
+
+    const validated = validatePayload(ThumbnailResultSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing ThumbnailResult in main: ${validated.error}`)
+    }
+    return validated.data
   })
 
   if (vaultCoordinator && getMainWindow) {

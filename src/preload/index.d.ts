@@ -31,7 +31,11 @@ import type {
   VaultImportActionResponse,
   PauseImportRequest,
   ResumeImportRequest,
-  CancelImportRequest
+  CancelImportRequest,
+  GetPhotosPageRequest,
+  GetPhotosPageResponse,
+  GetThumbnailRequest,
+  ThumbnailResult
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -64,6 +68,8 @@ export interface VaultApi {
   getActiveImportJob: () => Promise<GetActiveImportJobResponse>
   getLatestImportJob: () => Promise<GetLatestImportJobResponse>
   onImportProgress: (callback: (progress: VaultImportProgress) => void) => () => void
+  getPhotosPage: (request: GetPhotosPageRequest) => Promise<GetPhotosPageResponse>
+  getThumbnail: (request: GetThumbnailRequest) => Promise<ThumbnailResult>
 }
 
 declare global {

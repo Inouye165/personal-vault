@@ -240,6 +240,8 @@ async function main() {
         'getImportCandidates',
         'getLatestImportJob',
         'getLatestScanJob',
+        'getPhotosPage',
+        'getThumbnail',
         'getVaultStatus',
         'initializeVault',
         'onImportProgress',

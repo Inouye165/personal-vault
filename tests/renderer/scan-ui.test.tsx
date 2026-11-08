@@ -117,7 +117,19 @@ describe('Stage 2D — Scan Job UI Integration', () => {
     cancelImport: vi.fn(async () => ({ success: true })),
     getActiveImportJob: vi.fn(async () => ({ job: null })),
     getLatestImportJob: vi.fn(async () => ({ job: null })),
-    onImportProgress: vi.fn(() => () => {})
+    onImportProgress: vi.fn(() => () => {}),
+    getPhotosPage: vi.fn(async () => ({
+      items: [],
+      totalCount: 0,
+      offset: 0,
+      limit: 50,
+      hasMore: false
+    })),
+    getThumbnail: vi.fn(async () => ({
+      status: 'missing' as const,
+      locationId: 1,
+      reason: 'mock'
+    }))
   })
 
   beforeEach(() => {

@@ -92,11 +92,32 @@ Verification: implementation host & independent review verification **421 passed
 
 ## Stage 5: Cached, Virtualized Photo Browsing; Ratings and Similarity Review
 
-Status: **planned; not started.**
+Status: **in progress; Substage 5A awaiting review.**
 
-- [ ] Virtualized grid browsing capable of rendering large collections smoothly.
-- [ ] Thumbnail generation and secure local disk cache.
+Verification (Substage 5A): implementation host **467 passed, 0 skipped** across all 30 test files (exit code 0), strict typecheck across Node and Web targets (exit code 0), ESLint clean pass (exit code 0), Prettier formatting clean pass (exit code 0), production bundle build (exit code 0), unpacked binary build (exit code 0), real Electron photo verification suite in built and unpacked modes (`verify:photos`, `verify:photos:unpacked` — 15/15 checks passed each, exit code 0, 10,000-photo scale test with warm reversal <= 4 ms vs. 33 ms bound), real Electron duplicate review (`verify:duplicates` — 18/18 checks passed, exit code 0), scan workflow (`verify:scan` — 14/14 checks passed, exit code 0), verified vault import in built and unpacked modes (`verify:vault`, `verify:vault:unpacked` — 11/11 checks passed each, exit code 0), SQLite catalog repository (`verify:sqlite` — 8/8 checks passed, exit code 0), real Electron smoke checks in built and unpacked modes (`smoke:built`, `smoke:unpacked` — passed, exit code 0), and source preservation invariance confirmed across all operations.
+
+### Substage 5A: Bounded Thumbnail Generation, Disposable Cache, and Virtualized Photo Browsing
+
+- [x] Responsive virtualized photo thumbnail grid adhering to dark theme token system with stable deterministic ordering by catalog location ID (`file_locations.id ASC`).
+- [x] Pure SQL pagination (`LIMIT ? OFFSET ?`) for photo catalog records without full-table materialization in memory.
+- [x] Offline image decoding with Sharp 0.35.5 (libvips 8.18.7) isolated in Node worker thread outside main event loop with worker crash recovery.
+- [x] Concurrency and resource bounds strictly enforced: max 2 active jobs, max 64 queued jobs with priority for visible cells, 15-second per-job timeout, max 128 MiB source size, max 100 megapixels input limit.
+- [x] Format support matrix verified: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF with automatic EXIF orientation preservation (`.rotate()`).
+- [x] Honest placeholders: Apple HEIC/HEIF (due to prebuilt libvips libheif lacking unbundled HEVC decoders), camera RAW, SVG, corrupted or oversized inputs return honest unsupported/error status cards without crashes or external toolchains.
+- [x] Secure disposable disk cache in `<userData>/thumbnails/` with bounded 64-hex SHA-256 keys, atomic staging (`.thumb_tmp_*`), 1 GiB LRU budget eviction strictly targeting owned `.thumb` files, orphan staging cleanup, and zero source or vault modification.
+- [x] Residual out-of-band source modification detection (`statSync` check on cache hits) preventing stale image display.
+- [x] Narrow typed IPC channels (`photos:get-page`, `photos:get-thumbnail`) with bidirectional Zod validation and top-level sender authorization.
+- [x] Compact metadata details panel displaying filename, absolute source path, recorded byte size, recorded filesystem timestamps, and observation provenance, with explicit "Unknown" for absent capture dates/locations (no fabricated dates).
+- [x] Header search input disabled with clear Stage 6 availability label in Photos tab.
+- [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 10,000-photo scale test (warm reversal p95 <= 33 ms).
+- [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched.
+
+### Substage 5B: Ratings, Flags, and Custom Collections (Planned)
+
 - [ ] User review tools: flags, 1–5 star ratings, and custom collections.
+
+### Substage 5C: Visual Similarity Review (Planned)
+
 - [ ] Perceptual hashing and visual similarity review (distinguishing edited copies from similar photos).
 
 ---

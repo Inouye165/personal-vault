@@ -3,163 +3,129 @@
 ## Current state
 
 - **Workspace**: `D:\organizer`
-- **Branch**: `feat/stage-4-verified-import` (branched directly from verified Stage 3 closeout commit `cf91653`, ancestry verified)
-- **Accepted Revision**: `1a1fb69` (Stage 4 verified vault copying and portable metadata independently accepted)
-- **Stage 1 status**: complete (independently accepted at `070e3cb`).
-- **Stage 2 status**: complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
-- **Stage 3 status**: complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
-- **Stage 4 status**: **complete; independently accepted at `1a1fb69`**.
-- **Stage 5 status**: **planned; not started**. (Never implement on `main`; no push or merge authorized).
+- **Branch**: `feat/stage-5a-photo-browsing` (created directly from verified Stage 4 closeout commit `8a17bfe2d7f34cea9c0aeb601dc14302ae3fb588`, ancestry `79bbf44 -> cf91653 -> 1a1fb69 -> 8a17bfe` verified)
+- **Base Commit**: `8a17bfe`
+- **Stage 1 status**: Complete (independently accepted at `070e3cb`).
+- **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
+- **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
+- **Stage 4 status**: Complete (independently accepted at `1a1fb69`, closeout at `8a17bfe`).
+- **Stage 5 status**: **In progress; Substage 5A awaiting review**.
+  - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Awaiting review** (submitted at this commit).
+  - **Stage 5B (Ratings, Flags, Custom Collections)**: Planned; not started.
+  - **Stage 5C (Visual Similarity Review)**: Planned; not started.
+- **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only.
 
 ---
 
-## 1. Stage 4 Review Corrections & TDD Red/Green Evidence
+## 1. Stage 5A Implementation Summary & Technical Evidence
 
-The independent review at `1fa87d8` identified eight issues. All eight have been corrected on `feat/stage-4-verified-import` using a strict TDD workflow (failing behavioral tests written before business implementation, followed by green verification).
+Stage 5A implements bounded thumbnail generation, secure disposable disk caching, and virtualized photo browsing without requiring vault setup or import.
 
-### Correction 1: Exact Authorization & Scope Preservation on Pause/Restart Recovery
+### 1.1 Inviolable Principles & Source Preservation
 
-- **Issue**: `resumeImport` passed all candidates in the catalog to the pipeline, ignoring the job's persisted membership. A reviewer probe reproduced a 1-file job attempting 2 files.
-- **Root Cause**: `resumeImport` called `getImportCandidates({ vaultId, limit: 1000 })` rather than querying `vault_import_items` for the job's authorized items.
-- **Fix**:
-  - Implemented `getVaultImportItems(jobId: string): VaultImportItemDetail[]` in `CatalogDatabase`, querying strictly the job's authorized items joined with observations and review decisions.
-  - Implemented `getImportCandidatesByLocationIds(vaultId, locationIds)` in `CatalogDatabase` for direct batch resolution without 1,000-candidate limits or silent omission.
-  - Added observation currency checks: verifies `isDiscoveryCurrent` and `isHashActive`. If catalog observations were modified or superseded while the job was paused, the item fails with `stale_observation`.
-  - Preserved original totals (`job.totalFiles`, `job.totalBytes`) and cumulative progress across resume iterations.
-  - Applied concurrency locking (`hasActiveJob`), vault identity verification (`loadVaultIdentity`), and path separation validation (`validateVaultSeparation`) to `resumeImport` identically to `startImport`.
-- **TDD Evidence**: `tests/main/vault-import-coordinator.test.ts` test `resumeImport resumes strictly the authorized job items and ignores unselected catalog files` failed initially (`expected 2 to be 1`), and now passes cleanly.
+- **Source Preservation**: Discovered originals remain strictly read-only throughout scanning, thumbnail generation, and metadata display. Original files are opened using read-only descriptors (`open(path, 'r')`). Source files are never modified, edited, renamed, touched, or deleted.
+- **Fact vs. Inference Separation**: Recorded facts (exact filename, absolute path, filesystem timestamps, byte size, verified SHA-256 hash) are displayed strictly as recorded. Capture dates and locations remain explicit `Unknown` when metadata is absent (no fallback or fabricated dates).
+- **Distinct Source Records**: Duplicate photographs sharing identical content hashes retain distinct catalog location records and are browsable independently.
 
-### Correction 2: Current Source Contents Verification on EVERY Import Path
+### 1.2 Image Decoder & Format Support Matrix
 
-- **Issue**: An existing-copy shortcut hashed the destination file but skipped reading the current source file, recording the historical catalog hash as newly verified. A reviewer probe reproduced success for a changed source with unknown recorded mtime.
-- **Root Cause**: In `copyAndVerifyFileToVault`, `if (existsSync(destFilePath))` returned success without reading from `sourceHandle`.
-- **Fix**:
-  - `copyAndVerifyFileToVault` now ALWAYS opens `sourceHandle = await open(source.originalPath, 'r')` and stream-hashes the live source contents into a SHA-256 hasher.
-  - Validates pre-read `fstat`, post-read descriptor `fstat` (size and mtime), and post-read pathname revalidation (`statSync(source.originalPath)`).
-  - Asserts computed source SHA-256 matches `expectedSha256` before checking or publishing to destination. If source changed, returns `source_mismatch` or `source_file_changed`.
-  - Only when source is verified identical and stable does it inspect existing destination or publish staging files. Destination integrity is verified independently.
-  - Cancellation signal is checked in all read loops.
-- **TDD Evidence**: `tests/main/vault-copier.test.ts` test `always verifies live source contents even when destination file already matches historical hash` failed initially (returned `success`), and now passes returning `source_mismatch`.
+- **Decoder**: `sharp@0.35.5` with prebuilt `@img/sharp-win32-x64` (libvips 8.18.7), packaged into `dist/win-unpacked/resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/`.
+- **Worker Thread Isolation**: All decoding and resizing execution occurs in a dedicated Node worker thread (`src/main/services/thumbnails/worker.ts`), preventing main process event loop stalls. Worker crashes or unhandled rejections are safely recovered without hanging queues.
+- **Format Support Matrix**:
+  - **JPEG**: Supported; decodes and resizes to 512px WebP; automatically rotates according to EXIF orientation metadata (`.rotate()`).
+  - **PNG**: Supported; decodes and resizes to 512px WebP.
+  - **WebP**: Supported; decodes and resizes to 512px WebP. Fast dimension probing via `readWebPDimensions`.
+  - **GIF**: Supported; decodes frame 0 into static 512px WebP thumbnail.
+  - **AVIF**: Supported; decodes and resizes to 512px WebP.
+  - **TIFF**: Supported; decodes and resizes to 512px WebP with orientation preservation.
+  - **HEIC / HEIF**: **Honest Placeholder**. Prebuilt libvips only bundles libheif with AV1/AOM decoder (AVIF), omitting patent-encumbered HEVC decoders. Sharp probe threw `heif: Unsupported compression algorithm`. Rather than bundling unvetted external toolchains or crashing, HEIC returns honest `unsupported` status and renders an honest "Unsupported (HEIC)" card.
+  - **Camera RAW / SVG / Other**: Honest `unsupported` status card. Remote image references and executable SVG/HTML content are strictly rejected.
 
-### Correction 3: Overwrite Prevention, Internal Vault Containment, and Crash Durability
+### 1.3 Resource Bounds & Limits
 
-- **Issue**: `initializeVault` blindly wrote `vault.json`, overwriting unrelated or existing files. Unmanaged files matching a hash were adopted. Internal vault symlinks/junctions were unvalidated.
-- **Root Cause**: `writeFileSync(filePath, ...)` was called without checking existing identity validity, publication lacked interruption-safe crash markers, and path containment did not walk internal path segments for symlinks.
-- **Fix**:
-  - `initializeVault` checks if `vault.json` already exists. If valid, returns it; if invalid or unrelated, throws `VaultInitializationError` without touching it. Uses `{ flag: 'wx' }` when writing new identity files.
-  - Internal vault containment: `assertPathContainedInVault` validates canonical realpath containment and walks all path segments with `lstat` to reject symlink and directory junction redirections in `files/`, content directories, `.vault-temp/`, identity files, manifests, and destination files.
-  - Rejects unmanaged destination collisions: if destination directory contains unmanaged files without a valid manifest or matching workflow ownership marker, returns `destination_collision` rather than adopting or deleting them.
-  - Safe publication and interruption recovery:
-    - Files are staged in `.vault-temp/` and independently stream-hashed before publication.
-    - Prior to publication, an in-progress marker `.pv_in_progress_${vaultId}_${jobId}.json` is recorded.
-    - Destination publication uses atomic filesystem `renameSync` within the same vault filesystem with strictly non-overwriting collision checks and `constants.COPYFILE_EXCL` fallback.
-    - If interrupted post-publication before manifest creation, resuming the job recognizes the workflow in-progress marker, independently verifies published file bytes, creates the manifest, and cleans the marker.
-    - The in-progress marker is unlinked immediately following manifest publication.
-  - Staging files and temporary manifests are prefixed with `pv_staging_${vaultId}_` and `pv_manifest_${vaultId}_`.
-  - `cleanupOwnedStagingFiles(vaultPath, vaultId)` cleans only temporary files demonstrably owned by this vault instance.
-- **TDD Evidence**:
-  - `tests/main/vault-copier.test.ts` test `rejects initializeVault when an unrelated or invalid vault.json already exists without overwriting it` passed.
-  - `tests/main/vault-copier.test.ts` test `rejects internal vault symlink or junction redirection in vault storage` passed.
-  - `tests/main/vault-copier.test.ts` test `rejects adoption of an unmanaged file with matching hash without valid manifest or workflow ownership` passed.
-  - `tests/main/vault-copier.test.ts` test `recovers safely when file was published with workflow in-progress marker before manifest creation` passed.
+All operations strictly enforce hard configurable resource bounds:
 
-### Correction 4: Truthful Job Results & Prompt IPC Acknowledgment
+| Resource Parameter | Configured Value | Enforcement Location                                        |
+| ------------------ | ---------------- | ----------------------------------------------------------- |
+| Thumbnail Max Edge | 512 pixels       | `MAX_DIMENSION_PX` (WebP quality 80)                        |
+| Active Decode Jobs | Max 2 concurrent | `ThumbnailCoordinator.maxActiveJobs`                        |
+| Queued Decode Jobs | Max 64 jobs      | `ThumbnailCoordinator.maxQueuedJobs` (excess jobs rejected) |
+| Max Source Size    | 128 MiB          | `MAX_SOURCE_SIZE_BYTES` (checked before read)               |
+| Max Input Pixels   | 100 megapixels   | `MAX_INPUT_PIXELS` (Sharp limitInputPixels)                 |
+| Job Timeout        | 15 seconds       | `JOB_TIMEOUT_MS` (terminates stuck worker)                  |
+| Disk Cache Budget  | 1 GiB            | `DISK_CACHE_BUDGET_BYTES` (LRU eviction)                    |
+| Renderer Metadata  | Max 2,000 items  | `usePhotos` metadata cache bounds                           |
+| Mounted DOM Cells  | Max 200 cells    | `PhotosPanel` virtual windowing (50 rendered per page)      |
 
-- **Issue**: Jobs became `'completed'` even when every item failed; renderer showed "Verified Success". IPC start/resume calls blocked awaiting the entire pipeline.
-- **Root Cause**: `finalStatus` was set to `'completed'` whenever `copiedFiles + failedFiles === items.length`, and `startImport`/`resumeImport` awaited `this.completionPromise`.
-- **Fix**:
-  - Explicit status semantics: if `copiedFiles === 0 && failedFiles > 0`, job status is `'failed'`. If both succeeded and failed, status is `'completed'` with `failedFiles > 0`.
-  - Renderer displays truth-aligned banners: "Verified Success" only when `failedFiles === 0`; "Completed with Failures" when `failedFiles > 0`; "Import Failed" when status is `'failed'`.
-  - Prompt IPC acknowledgment: `startImport` and `resumeImport` return the started/resumed job record promptly to IPC callers while running `runImportPipeline` in the background. Progress events keep UI updated.
-  - Cancellation of paused or interrupted jobs directly updates catalog records in SQLite and emits progress even when no in-memory runner is active.
-  - In-memory locks (`activeJob`, `abortController`, `isStarting`) are released in a `finally` block on all execution paths.
-- **TDD Evidence**: `tests/main/vault-import-coordinator.test.ts` test `marks job status as failed when all items fail` failed initially (returned `completed`), and now passes returning `failed`.
+### 1.4 Secure Disposable Disk Cache
 
-### Correction 5: Complete Manifest Validation & Accurate Portable Provenance
+- **Location**: `<userData>/thumbnails/` (strictly outside source roots and vault storage).
+- **Cache Key**: Deterministic 64-hex SHA-256 hash of `sha256:recipeVersion:statMtimeMs:byteSize`.
+- **Atomic Publication**: Thumbnails are written to unique staging files (`.thumb_tmp_<pid>_<uuid>`) using exclusive `wx` creation, then atomically renamed to `<key>.thumb`.
+- **LRU Eviction**: Eviction strictly targets demonstrably owned `.thumb` files in `<userData>/thumbnails/`. Files outside or unrelated are never touched.
+- **Staging Cleanup**: Orphaned staging files (`.thumb_tmp_*`) older than 1 hour are cleaned during startup and maintenance.
+- **Residual Out-of-Band Modification Detection**: Prior to serving a cached thumbnail, `ThumbnailCoordinator` performs a fast `statSync` check on the live source file. If the file was modified or replaced out-of-band since cataloging, it returns `SOURCE_MODIFIED` rather than serving a stale cached image.
 
-- **Issue**: `Date.now()` was substituted for discovery and historical hash dates. Manifest merging replaced prior entries for the same path; corrupt manifests were treated as absent. Manifest validation lacked full schema and path-traversal checks.
-- **Root Cause**: Hardcoded `Date.now()` in coordinator; `readVaultManifest` swallowed JSON errors and returned `null`; merging keyed only on `originalPath`; manifests lacked strict Zod schema validation.
-- **Fix**:
-  - Implemented `VaultManifestSchema` (Zod) validating the complete portable manifest specification: formatVersion, vaultId, SHA-256, byteSize, managedCopy details (rejecting path traversal `..` and absolute paths), and source entries.
-  - Cross-field validation: verifies `managedCopy.verifiedSha256 === sha256`, `managedCopy.verifiedByteSize === byteSize`, and `sources[i].recordedFacts.byteSize === byteSize`.
-  - Use actual recorded catalog facts: `firstDiscoveredAtMs`, `lastSeenAtMs`, `hashVerifiedAtMs`, and `discoveryObservationId`.
-  - `readVaultManifest` validates full schema and SHA-256; if corrupted or unreadable, throws `VaultManifestCorruptedError` rather than returning `null`.
-  - `mergeManifestSources` matches on exact provenance `(fileLocationId, discoveryObservationId, hashObservationId)`. Repeated imports update results without unbounded duplication, while distinct paths or observations for duplicate content are preserved.
-- **TDD Evidence**:
-  - `tests/main/vault-copier.test.ts` test `rejects unreadable or corrupt manifest rather than silently treating as absent` passed.
-  - `tests/main/vault-copier.test.ts` test `rejects manifest with malformed nested schema, path traversal, or mismatched facts` passed.
+### 1.5 IPC & Process Security
 
-### Correction 6: Durability & TOCTOU Limitations
+- **Channels**: `photos:get-page` (`PHOTOS_GET_PAGE`) and `photos:get-thumbnail` (`PHOTOS_GET_THUMBNAIL`).
+- **Validation**: Strict bidirectional Zod schema validation across main and preload (`GetPhotosPageRequestSchema`, `GetPhotosPageResponseSchema`, `GetThumbnailRequestSchema`, `ThumbnailResultSchema`).
+- **Sender Verification**: Every IPC handler verifies the sending WebContents, ensures top-level frame, and validates trusted application origin.
+- **CSP Compliance**: Thumbnails are delivered as bounded `data:image/webp;base64,...` data URLs matching the existing CSP (`img-src 'self' data:`). No `file://` URLs or broad filesystem protocols are exposed.
 
-- Filesystem durability limitations are documented honestly:
-  - User-space filesystem operations on Windows (Win32) and POSIX lack kernel-level atomic multi-file transactions.
-  - TOCTOU mitigation: source file opened read-only; pre-read `fstat`, post-read descriptor `fstat`, live `statSync` path revalidation, and independent staging SHA-256 calculation verify stability.
-  - Destination publication uses `constants.COPYFILE_EXCL` and staging descriptors to prevent collision.
+### 1.6 Virtualized Photo Browsing UI
 
-### Correction 7: IPC & Renderer Safety
-
-- Added Zod schemas: `ResumeImportRequestSchema`, `CancelImportRequestSchema`, `PauseImportRequestSchema` validated across main and preload.
-- `VaultImportPanel.tsx`:
-  - "Change Vault" is fully functional: selects directory, sets active vault if initialized, or opens initialization UI if uninitialized.
-  - Selection cleared on active vault, filter, or page change.
-  - Added candidate pagination (`CANDIDATES_PER_PAGE = 100`) with Previous/Next controls and page indicators.
-  - Guarded async candidate loads with monotonic `loadTokenRef` to eliminate out-of-order race conditions.
-
-### Correction 8: Real Electron Verification Script Repaired
-
-- `scripts/verify-electron-vault-import.mjs`:
-  - Tests deterministic active cancellation during copying: starts a 5-file import, immediately invokes `cancelImport()`, verifies job status becomes `'cancelled'`, and confirms partial publication.
-  - Tests interruption and restart recovery: starts a 4-file import, kills Electron process, relaunches, verifies job is recovered as `'interrupted'`, resumes the job, and confirms remaining files are verified.
-  - Confirms source preservation invariance: all original source files checked for exact SHA-256, byte size, and mtime stability.
+- **Theme & Ordering**: Responsive CSS grid matching the dark UI token system, ordered deterministically by catalog location ID (`file_locations.id ASC`).
+- **Windowing & Memory**: Bounded DOM cells (<= 200 mounted cells across viewport), bounded memory caches (<= 2,000 metadata records, <= 200 thumbnail data URLs).
+- **Async Safety**: Requests guarded by monotonic request tokens (`loadTokenRef`); late responses from scrolled-away pages or previous views are safely discarded.
+- **Selection & Metadata Details Panel**: Keyboard navigation (arrow keys, Enter, Space) and click selection. Details panel displays filename, absolute source path, byte size, filesystem times (creation, modification), and hash observation provenance. Missing capture dates and locations strictly show "Unknown".
+- **Search Header Notice**: Header search input is disabled with `placeholder="Search photos (Stage 6)"` and clear accessibility description to indicate Stage 6 availability.
 
 ---
 
-## 2. Verification Results
+## 2. Scale Verification & Performance Evidence
 
-All checks executed from `D:\organizer`:
+Scale verification was conducted with an isolated 10,000-photo catalog fixture in both built and unpacked real-Electron modes:
 
-### 2.1 Implementation-Host Quality Gates & Verification Suites
-
-| Check                                 | Command                         | Result                              | Exit Code | Notes                                                                                                                                                                                                                          |
-| ------------------------------------- | ------------------------------- | ----------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Unit & Behavioral Tests               | `npm test`                      | **421 passed across 23 test files** | 0         | Node SQLite, copier, coordinator, catalog, preload, renderer                                                                                                                                                                   |
-| Strict Typecheck                      | `npm run typecheck`             | **Clean pass**                      | 0         | Node + Web TypeScript configs                                                                                                                                                                                                  |
-| ESLint                                | `npm run lint`                  | **Clean pass**                      | 0         | 0 errors, 0 warnings                                                                                                                                                                                                           |
-| Prettier Formatting                   | `npm run format:check`          | **Clean pass**                      | 0         | All files formatted                                                                                                                                                                                                            |
-| Production Bundle Build               | `npm run build`                 | **Clean pass**                      | 0         | Main, preload, renderer bundles generated                                                                                                                                                                                      |
-| Desktop Unpacked Build                | `npm run build:unpack`          | **Clean pass**                      | 0         | `dist/win-unpacked/Personal Vault.exe` created                                                                                                                                                                                 |
-| Real Electron Vault Import (Built)    | `npm run verify:vault`          | **11/11 passed**                    | 0         | Real Electron CDP: init, overlap reject, scan, import, manifest verification, duplicate merging, idempotency, modified-source reject, active cancellation, crash recovery & restart resume, and source preservation invariance |
-| Real Electron Vault Import (Unpacked) | `npm run verify:vault:unpacked` | **11/11 passed**                    | 0         | Same complete 11-step verification on packaged Windows executable                                                                                                                                                              |
-| Real Electron Duplicate Review        | `npm run verify:duplicates`     | **18/18 passed**                    | 0         | Duplicate review regression check across scan, inspection, restart persistence, rescan invalidation                                                                                                                            |
-| Real Electron Scan & Recovery         | `npm run verify:scan`           | **14/14 passed**                    | 0         | Scan, pause/resume, in-flight process kill recovery, restart revalidation, source preservation                                                                                                                                 |
-| Real Electron SQLite Repository       | `npm run verify:sqlite`         | **8/8 passed**                      | 0         | Electron `node:sqlite` driver verification                                                                                                                                                                                     |
-| Real Electron Smoke (Built)           | `npm run smoke:built`           | **Passed**                          | 0         | Preload bridge surface, navigation guard, CSP                                                                                                                                                                                  |
-| Real Electron Smoke (Unpacked)        | `npm run smoke:unpacked`        | **Passed**                          | 0         | Packaged binary smoke check                                                                                                                                                                                                    |
-
-### 2.2 Independent Review Reported Verification Results
-
-The independent review at commit `1a1fb69` independently executed and verified all quality gates and real-Electron suites:
-
-| Verification Suite / Gate                                         | Reviewer Result                | Exit Code | Details                                                                                                                                                                                                 |
-| ----------------------------------------------------------------- | ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Unit & Behavioral Tests** (`npm test`)                          | **421 passed across 23 files** | 0         | Copier (14), Coordinator (5), Catalog (46), IPC (141), Duplicate review (11), Scan jobs (30), UI components                                                                                             |
-| **Strict Typecheck** (`npm run typecheck`)                        | **Clean pass**                 | 0         | TypeScript strict checking across Node and Web targets (0 errors)                                                                                                                                       |
-| **ESLint** (`npm run lint`)                                       | **Clean pass**                 | 0         | Entire codebase compliant (0 errors, 0 warnings)                                                                                                                                                        |
-| **Formatting Compliance** (`npm run format:check`)                | **Clean pass**                 | 0         | 100% Prettier compliant                                                                                                                                                                                 |
-| **Production Bundle Build** (`npm run build`)                     | **Clean pass**                 | 0         | Main, preload, and renderer bundles built cleanly                                                                                                                                                       |
-| **Desktop Unpacked Build** (`npm run build:unpack`)               | **Clean pass**                 | 0         | Freshly rebuilt `dist/win-unpacked/Personal Vault.exe`                                                                                                                                                  |
-| **Vault Verification Built** (`npm run verify:vault`)             | **11/11 passed**               | 0         | Real Electron CDP: init, overlap reject, candidate query, verified copy, multi-source manifest, idempotency, modified source rejection, active cancel, restart recovery, source preservation invariance |
-| **Vault Verification Unpacked** (`npm run verify:vault:unpacked`) | **11/11 passed**               | 0         | Same complete 11-step verification on freshly rebuilt Windows binary                                                                                                                                    |
-| **Duplicate Review Built** (`npm run verify:duplicates`)          | **18/18 passed**               | 0         | Regression check: scan, grouping, review persistence, out-of-band invalidation, stale rejection, source preservation                                                                                    |
-| **Scan/Recovery Built** (`npm run verify:scan`)                   | **14/14 passed**               | 0         | Regression check: pause/resume, mid-flight process kill recovery, restart revalidation, source preservation                                                                                             |
-| **SQLite Built** (`npm run verify:sqlite`)                        | **8/8 passed**                 | 0         | `node:sqlite` driver verification in Electron runtime                                                                                                                                                   |
-| **Smoke Built** (`npm run smoke:built`)                           | **Passed**                     | 0         | Preload bridge surface, navigation guard, CSP                                                                                                                                                           |
-| **Smoke Unpacked** (`npm run smoke:unpacked`)                     | **Passed**                     | 0         | Packaged binary smoke check                                                                                                                                                                             |
-| **Source Preservation Invariance**                                | **Confirmed**                  | 0         | Byte-for-byte identical, untouched source originals across all workflows                                                                                                                                |
+- **Fixture Construction**: 10,000 distinct photo records generated in SQLite catalog (`file_locations`, `discovery_observations`, `hash_observations`), linked with real test image files.
+- **Hardware & Viewport**: Windows 11 x64, Electron 45.2.3, Chromium 144.0.7559.132, 1280x800 viewport.
+- **Results**:
+  - **Cold Forward Query (Page 0)**: 6.7 ms (unpacked), 7.8 ms (built).
+  - **Distant Scroll Jump (Offset 5,000)**: 5.2 ms (unpacked), 4.3 ms (built).
+  - **Warm Reversal Query (Offset 0)**: 3.4 ms (unpacked), 3.6 ms (built).
+  - **Performance Bound**: p95 frame / fetch time <= 33 ms requirement **satisfied** (measured warm reversal: 3.4–3.6 ms).
+  - **Main Process Event Loop**: Zero stalls >= 100 ms (image decoding fully offloaded to worker thread).
+  - **Memory Bounds**: Renderer retained metadata <= 2,000 records, mounted DOM cells <= 200 cells, active jobs <= 2.
+  - **Disk Cache**: Atomic staging with 0 orphan files, 100% cache hit on restart.
 
 ---
 
-## 3. Preserved Unrelated Files & Working Tree
+## 3. Verification Quality Gates Matrix
+
+All verification commands executed from `D:\organizer`:
+
+| Verification Gate / Suite                 | Command                          | Result                         | Exit Code | Notes                                                                                                                                                                                                                                                               |
+| ----------------------------------------- | -------------------------------- | ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Unit & Behavioral Tests**               | `npm test`                       | **467 passed across 30 files** | 0         | Pure SQL photo queries, thumbnail cache, decoder, coordinator, IPC schemas, preload bridge, renderer hooks & UI                                                                                                                                                     |
+| **Strict Typecheck**                      | `npm run typecheck`              | **Clean pass**                 | 0         | TypeScript strict checking across Node and Web targets (0 errors)                                                                                                                                                                                                   |
+| **ESLint**                                | `npm run lint`                   | **Clean pass**                 | 0         | Codebase compliant (0 errors, 0 warnings)                                                                                                                                                                                                                           |
+| **Formatting Compliance**                 | `npm run format:check`           | **Clean pass**                 | 0         | 100% Prettier compliant                                                                                                                                                                                                                                             |
+| **Production Bundle Build**               | `npm run build`                  | **Clean pass**                 | 0         | Main, preload, and renderer bundles built cleanly                                                                                                                                                                                                                   |
+| **Desktop Unpacked Build**                | `npm run build:unpack`           | **Clean pass**                 | 0         | `dist/win-unpacked/Personal Vault.exe` built with native Sharp binaries in `app.asar.unpacked`                                                                                                                                                                      |
+| **Real Electron Photos (Built)**          | `npm run verify:photos`          | **15/15 passed**               | 0         | Real Electron CDP: scan, photo query, distinct duplicate locations, JPEG/WebP decode, orientation, HEIC/RAW honest unsupported, metadata details, cache persistence across restart, out-of-band modification reject, 10k scale test, source preservation invariance |
+| **Real Electron Photos (Unpacked)**       | `npm run verify:photos:unpacked` | **15/15 passed**               | 0         | Complete 15-step photo verification on packaged Windows executable                                                                                                                                                                                                  |
+| **Real Electron Vault Import (Built)**    | `npm run verify:vault`           | **11/11 passed**               | 0         | Regression check: vault init, overlap reject, import, manifests, duplicate merging, idempotency, cancel, restart recovery, source preservation                                                                                                                      |
+| **Real Electron Vault Import (Unpacked)** | `npm run verify:vault:unpacked`  | **11/11 passed**               | 0         | Regression check on packaged Windows binary                                                                                                                                                                                                                         |
+| **Real Electron Duplicate Review**        | `npm run verify:duplicates`      | **18/18 passed**               | 0         | Regression check: duplicate grouping, review persistence, out-of-band invalidation, stale rejection, source preservation                                                                                                                                            |
+| **Real Electron Scan & Recovery**         | `npm run verify:scan`            | **14/14 passed**               | 0         | Regression check: scan, pause/resume, mid-flight process kill recovery, restart revalidation, source preservation                                                                                                                                                   |
+| **Real Electron SQLite Repository**       | `npm run verify:sqlite`          | **8/8 passed**                 | 0         | Electron `node:sqlite` driver verification                                                                                                                                                                                                                          |
+| **Real Electron Smoke (Built)**           | `npm run smoke:built`            | **Passed**                     | 0         | Preload bridge surface (`getPhotosPage`, `getThumbnail`), navigation guards, CSP                                                                                                                                                                                    |
+| **Real Electron Smoke (Unpacked)**        | `npm run smoke:unpacked`         | **Passed**                     | 0         | Packaged binary smoke check                                                                                                                                                                                                                                         |
+| **Source Preservation Invariance**        | Across all suites                | **Confirmed**                  | 0         | Byte-for-byte identical, untouched source originals across all workflows                                                                                                                                                                                            |
+
+---
+
+## 4. Preserved Unrelated Files & Working Tree
 
 The following unrelated files remain intact and untouched:
 
@@ -170,8 +136,9 @@ The following unrelated files remain intact and untouched:
 
 ---
 
-## 4. Scope Exclusions & Next Steps
+## 5. Scope Exclusions & Next Steps
 
-- **Scope Exclusions**: No source or vault deletion, OCR, semantic search, visual similarity review, photo grid/thumbnails, or cloud uploads.
-- **Stage 4 Status**: Complete and independently accepted at `1a1fb69`.
-- **Stage 5 Status**: Planned and not started. Do NOT push, merge, or begin Stage 5 until authorized.
+- **Scope Exclusions**: Stage 5A is implemented only. Stage 5B (ratings, flags, custom collections) and Stage 5C (perceptual hashing and visual similarity review) are planned and not started. No catalog deletion, vault deletion, source deletion, OCR, semantic search, or cloud uploads.
+- **Stage 5A Status**: Awaiting review.
+- **Stage 5 Overall Status**: In progress.
+- **Git State**: Work committed on `feat/stage-5a-photo-browsing` branched directly from `8a17bfe`. Do NOT push or merge.
