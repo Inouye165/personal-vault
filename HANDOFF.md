@@ -52,18 +52,19 @@ Catalog database schema updated via Migration 7 (`CURRENT_SCHEMA_VERSION = 7`):
 - Safe EOF truncation: only a torn final record at EOF with no subsequent bytes is safely truncated to `lastValidByteOffset` and synced.
 - Bounded UI pagination: collections and memberships implement windowed 50-item page navigation (`collectionsPage`, `totalCollectionsPages`, `goToNextCollectionsPage`, `goToPrevCollectionsPage`, `membershipsPage`, `totalMembershipsPages`, `goToNextMembershipsPage`, `goToPrevMembershipsPage`). Memory retention is strictly bounded to at most 50 items per list, eliminating unbounded array accumulation.
 
-### 1.5 Strict Containment, Link Protections & Runtime Security (Finding 4)
+### 1.5 Strict Containment, Link Protections & Canonical Overlap
 
-- Security containment: recursive ancestor check detects symlinks and Windows directory junctions in the storage directory path (`lstatSync`), rejecting symlink/junction redirection.
+- Security containment & canonical ancestor policy: recursive ancestor traversal canonicalizes directory paths via `realpath` (`canonicalizeWithAncestorPolicySync` / `canonicalizeWithAncestorPolicyAsync`), resolving symlinks and Windows directory junctions in existing directory paths and safe ancestor chains for non-existent subpaths. Safety checks fail closed (`JournalSecurityError`) if context cannot be verified.
 - Fail-closed security context: `sourceRootsGetter` and `vaultPathGetter` are required to return valid context; if either throws or returns invalid types, the journal immediately throws `JournalSecurityError` and fails closed.
-- Canonical platform-correct overlap check: resolves and normalizes paths, performing platform-specific case-insensitive boundary checks (`===` or prefix with separator).
+- Canonical platform-correct overlap check: resolves and canonicalizes paths, performing platform-specific case-insensitive boundary checks (`===` or prefix with separator) against live source roots and vault storage.
 - Uncapped source inventory: `catalog.getAllSourceRoots()` inspects all registered source roots without arbitrary limits (eliminating earlier 1,000-root truncations).
 - Application startup wiring: `catalog` is opened prior to `journal.initialize()`, ensuring authoritative source roots and active vault context are available before journal repair can mutate storage on startup.
 
-### 1.6 Concurrency, Revisions, and Stale Response Guards (Finding 3)
+### 1.6 Concurrency, Revisions, and Stale Response Guards
 
 - Per-photo mutation sequence guarding: `photoMutationSeqRef` tracks sequential operation tokens per photo. Stale, out-of-order, or superseded save responses never call `updatePhotoLocal` or overwrite newer catalog state.
-- Selection generation & revision guarding: asynchronous saves and membership loads are bound to `targetGen`, `targetPhotoId`, and computed photo revision (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`). If selection changes (A -> B -> A) or photo revision changes, stale responses are dropped.
+- Selection generation & revision guarding: selection generation is keyed by both photo ID and content revision string (`${photo.id}:${computePhotoRevision(photo)}`). Asynchronous saves and membership loads are bound to `targetGen`, `targetPhotoId`, and computed photo revision (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`). If selection changes (A -> B -> A) or photo revision changes (same-ID replacement or rescan), stale in-flight responses are dropped before updating DOM badges, star buttons, or memberships.
+- Accurate pending persistence tracking: unresolved committed operations are tracked in a Map (`pendingOps`) across ratings, flags, collection changes, and memberships. Successful unrelated operations do not clear the shared pending flag; operations remain visibly pending until `window.api.reconcileJournal()` resolves them without duplicate executions.
 - Unmount invalidation: `isMountedRef` guarantees unmounted components discard pending in-flight callbacks.
 - Content change invalidation: when photo content (byte size or hash) changes on rescan, both `photo_annotations` and `collection_memberships` are cleanly invalidated while preserving prior version history in the journal. Stale writes rejected atomically with conflict errors (`STALE_REVISION`, `STALE_ANNOTATION_VERSION`).
 

@@ -17,7 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import * as fsSync from 'node:fs'
-import { dirname, join, normalize, resolve, sep } from 'node:path'
+import { basename, dirname, join, normalize, resolve, sep } from 'node:path'
 import {
   AnnotationJournalEntrySchema,
   CURRENT_JOURNAL_FORMAT_VERSION,
@@ -55,6 +55,70 @@ export interface AnnotationJournalOptions {
 }
 
 export const MAX_JOURNAL_RECORD_BYTES = 64 * 1024
+
+export function canonicalizeWithAncestorPolicySync(targetPath: string): string {
+  const absPath = resolve(normalize(targetPath))
+  const missingSegments: string[] = []
+  let curr = absPath
+
+  while (true) {
+    try {
+      if (fsSync.existsSync(curr)) {
+        const realAncestor = fsSync.realpathSync(curr)
+        return missingSegments.length > 0
+          ? resolve(realAncestor, ...missingSegments.reverse())
+          : realAncestor
+      }
+    } catch (err) {
+      throw new JournalSecurityError(
+        `Failed to establish canonical filesystem security context for path ${targetPath}: ${err}`
+      )
+    }
+
+    const parent = dirname(curr)
+    if (parent === curr) {
+      throw new JournalSecurityError(
+        `Cannot establish filesystem security context for path with no existing ancestor: ${targetPath}`
+      )
+    }
+    missingSegments.push(basename(curr))
+    curr = parent
+  }
+}
+
+export async function canonicalizeWithAncestorPolicyAsync(targetPath: string): Promise<string> {
+  const absPath = resolve(normalize(targetPath))
+  const missingSegments: string[] = []
+  let curr = absPath
+
+  while (true) {
+    try {
+      const exists = await fs
+        .stat(curr)
+        .then(() => true)
+        .catch(() => false)
+      if (exists) {
+        const realAncestor = await fs.realpath(curr)
+        return missingSegments.length > 0
+          ? resolve(realAncestor, ...missingSegments.reverse())
+          : realAncestor
+      }
+    } catch (err) {
+      throw new JournalSecurityError(
+        `Failed to establish canonical filesystem security context for path ${targetPath}: ${err}`
+      )
+    }
+
+    const parent = dirname(curr)
+    if (parent === curr) {
+      throw new JournalSecurityError(
+        `Cannot establish filesystem security context for path with no existing ancestor: ${targetPath}`
+      )
+    }
+    missingSegments.push(basename(curr))
+    curr = parent
+  }
+}
 
 export class AnnotationJournal {
   private readonly storageDir: string
@@ -326,14 +390,13 @@ export class AnnotationJournal {
     }
 
     const isWindows = process.platform === 'win32'
-    const storageNormalized = isWindows
-      ? resolve(normalize(this.storageDir)).toLowerCase()
-      : resolve(normalize(this.storageDir))
+    const canonicalStorage = canonicalizeWithAncestorPolicySync(this.storageDir)
+    const storageNormalized = isWindows ? canonicalStorage.toLowerCase() : canonicalStorage
 
     for (const rawForbidden of allForbidden) {
       if (!rawForbidden || typeof rawForbidden !== 'string') continue
-      const resolvedForbidden = resolve(normalize(rawForbidden))
-      const forbiddenNormalized = isWindows ? resolvedForbidden.toLowerCase() : resolvedForbidden
+      const canonicalForbidden = canonicalizeWithAncestorPolicySync(rawForbidden)
+      const forbiddenNormalized = isWindows ? canonicalForbidden.toLowerCase() : canonicalForbidden
       if (
         storageNormalized === forbiddenNormalized ||
         storageNormalized.startsWith(forbiddenNormalized + sep) ||
@@ -410,14 +473,13 @@ export class AnnotationJournal {
     }
 
     const isWindows = process.platform === 'win32'
-    const storageNormalized = isWindows
-      ? resolve(normalize(this.storageDir)).toLowerCase()
-      : resolve(normalize(this.storageDir))
+    const canonicalStorage = await canonicalizeWithAncestorPolicyAsync(this.storageDir)
+    const storageNormalized = isWindows ? canonicalStorage.toLowerCase() : canonicalStorage
 
     for (const rawForbidden of allForbidden) {
       if (!rawForbidden || typeof rawForbidden !== 'string') continue
-      const resolvedForbidden = resolve(normalize(rawForbidden))
-      const forbiddenNormalized = isWindows ? resolvedForbidden.toLowerCase() : resolvedForbidden
+      const canonicalForbidden = await canonicalizeWithAncestorPolicyAsync(rawForbidden)
+      const forbiddenNormalized = isWindows ? canonicalForbidden.toLowerCase() : canonicalForbidden
       if (
         storageNormalized === forbiddenNormalized ||
         storageNormalized.startsWith(forbiddenNormalized + sep) ||

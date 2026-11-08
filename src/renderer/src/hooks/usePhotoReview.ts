@@ -5,7 +5,7 @@
  * for the currently selected photo, including optimistic updates,
  * conflict detection (stale revision / stale annotation version),
  * asynchronous generation guarding, stale-response prevention,
- * bounded pagination, and honest persistencePending propagation.
+ * bounded pagination, and accurate persistent pending operation tracking.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -62,8 +62,13 @@ export function usePhotoReview({
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [persistencePending, setPersistencePending] = useState(false)
+
+  // Track pending persistence operations accurately across mutations
+  const [pendingOps, setPendingOps] = useState<Map<string, { id: string; error?: string }>>(
+    new Map()
+  )
   const [persistenceError, setPersistenceError] = useState<string | null>(null)
+  const persistencePending = pendingOps.size > 0
 
   const isMountedRef = useRef(true)
   useEffect(() => {
@@ -74,7 +79,7 @@ export function usePhotoReview({
   }, [])
 
   const selectedPhotoRef = useRef<PhotoItem | null>(selectedPhoto)
-  const prevSelectedPhotoIdRef = useRef<number | null>(null)
+  const prevSelectedPhotoKeyRef = useRef<string | null>(null)
   const selectionGenRef = useRef(0)
   const photoMutationSeqRef = useRef<Map<number, number>>(new Map())
   const membershipReqSeqRef = useRef<Map<number, number>>(new Map())
@@ -127,6 +132,9 @@ export function usePhotoReview({
     const reqSeq = (membershipReqSeqRef.current.get(photoId) ?? 0) + 1
     membershipReqSeqRef.current.set(photoId, reqSeq)
     const targetGen = selectionGenRef.current
+    const targetRevision = selectedPhotoRef.current
+      ? computePhotoRevision(selectedPhotoRef.current)
+      : null
 
     try {
       if (typeof window.api?.getPhotoMemberships !== 'function') return
@@ -142,6 +150,11 @@ export function usePhotoReview({
       if (!isMountedRef.current) return
       if (membershipReqSeqRef.current.get(photoId) !== reqSeq) return
       if (selectionGenRef.current !== targetGen || selectedPhotoRef.current?.id !== photoId) return
+      if (
+        selectedPhotoRef.current &&
+        computePhotoRevision(selectedPhotoRef.current) !== targetRevision
+      )
+        return
 
       setMemberships(res.items)
       setMembershipsOffset(offset)
@@ -155,6 +168,11 @@ export function usePhotoReview({
       if (!isMountedRef.current) return
       if (membershipReqSeqRef.current.get(photoId) !== reqSeq) return
       if (selectionGenRef.current !== targetGen || selectedPhotoRef.current?.id !== photoId) return
+      if (
+        selectedPhotoRef.current &&
+        computePhotoRevision(selectedPhotoRef.current) !== targetRevision
+      )
+        return
 
       if (offset === 0) setMemberships([])
       setIsLoadingMemberships(false)
@@ -200,14 +218,17 @@ export function usePhotoReview({
     }
   }, [loadCollections])
 
-  // Handle selection changes: clear stale memberships and reset save states immediately
+  // Handle selection and content revision changes: clear stale memberships and reset save states
+  const selectedPhotoKey = selectedPhoto
+    ? `${selectedPhoto.id}:${computePhotoRevision(selectedPhoto)}`
+    : null
+
   useEffect(() => {
     selectedPhotoRef.current = selectedPhoto
-    const photoId = selectedPhoto?.id ?? null
-    if (photoId === prevSelectedPhotoIdRef.current) {
+    if (selectedPhotoKey === prevSelectedPhotoKeyRef.current) {
       return
     }
-    prevSelectedPhotoIdRef.current = photoId
+    prevSelectedPhotoKeyRef.current = selectedPhotoKey
     const currentGen = ++selectionGenRef.current
 
     setMemberships([])
@@ -224,6 +245,7 @@ export function usePhotoReview({
     }
 
     const currentPhotoId = selectedPhoto.id
+    const currentRevision = computePhotoRevision(selectedPhoto)
     const reqSeq = (membershipReqSeqRef.current.get(currentPhotoId) ?? 0) + 1
     membershipReqSeqRef.current.set(currentPhotoId, reqSeq)
 
@@ -240,7 +262,9 @@ export function usePhotoReview({
           active &&
           isMountedRef.current &&
           selectionGenRef.current === currentGen &&
-          membershipReqSeqRef.current.get(currentPhotoId) === reqSeq
+          membershipReqSeqRef.current.get(currentPhotoId) === reqSeq &&
+          selectedPhotoRef.current?.id === currentPhotoId &&
+          computePhotoRevision(selectedPhotoRef.current) === currentRevision
         ) {
           setMemberships(res.items)
           setMembershipsOffset(0)
@@ -254,7 +278,9 @@ export function usePhotoReview({
           active &&
           isMountedRef.current &&
           selectionGenRef.current === currentGen &&
-          membershipReqSeqRef.current.get(currentPhotoId) === reqSeq
+          membershipReqSeqRef.current.get(currentPhotoId) === reqSeq &&
+          selectedPhotoRef.current?.id === currentPhotoId &&
+          computePhotoRevision(selectedPhotoRef.current) === currentRevision
         ) {
           const message = err instanceof Error ? err.message : String(err)
           setMemberships([])
@@ -268,7 +294,7 @@ export function usePhotoReview({
     return () => {
       active = false
     }
-  }, [selectedPhoto])
+  }, [selectedPhoto, selectedPhotoKey])
 
   // Safe reconciliation for pending journal finalizations without re-mutating database
   const retryReconciliation = useCallback(async () => {
@@ -277,7 +303,7 @@ export function usePhotoReview({
       const res = await window.api.reconcileJournal()
       if (!isMountedRef.current) return
       if (res.success) {
-        setPersistencePending(false)
+        setPendingOps(new Map())
         setPersistenceError(null)
         setSaveStatus('saved')
       }
@@ -288,7 +314,7 @@ export function usePhotoReview({
     }
   }, [])
 
-  // Set rating with request identity and generation guarding
+  // Set rating with request identity, revision, and generation guarding
   const setRating = useCallback(
     async (rating: PhotoRating) => {
       if (!selectedPhoto) return
@@ -296,13 +322,13 @@ export function usePhotoReview({
       const targetPhoto = selectedPhoto
       const targetPhotoId = targetPhoto.id
       const targetGen = selectionGenRef.current
+      const expectedRevision = computePhotoRevision(targetPhoto)
       const targetSeq = (photoMutationSeqRef.current.get(targetPhotoId) ?? 0) + 1
       photoMutationSeqRef.current.set(targetPhotoId, targetSeq)
 
       // Toggle off if same rating clicked
       const newRating = targetPhoto.rating === rating ? null : rating
       const currentFlag = targetPhoto.flag ?? 'none'
-      const expectedRevision = computePhotoRevision(targetPhoto)
       const expectedVersion = targetPhoto.annotationVersion ?? 0
 
       setSaveStatus('saving')
@@ -324,10 +350,12 @@ export function usePhotoReview({
           return
         }
 
-        // Drop completion if selection switched away from this photo
+        // Drop completion if selection switched away or photo revision changed
         if (
           selectionGenRef.current !== targetGen ||
-          selectedPhotoRef.current?.id !== targetPhotoId
+          selectedPhotoRef.current?.id !== targetPhotoId ||
+          !selectedPhotoRef.current ||
+          computePhotoRevision(selectedPhotoRef.current) !== expectedRevision
         ) {
           return
         }
@@ -340,14 +368,15 @@ export function usePhotoReview({
           result.annotation.version
         )
 
-        // Handle persistencePending honestly
+        // Handle persistencePending accurately: do not clear unrelated pending operations
         if (result.persistencePending) {
-          setPersistencePending(true)
+          const opId = `rating:${targetPhotoId}:${targetSeq}`
+          setPendingOps((prev) =>
+            new Map(prev).set(opId, { id: opId, error: result.persistenceError })
+          )
           setPersistenceError(result.persistenceError ?? 'Journal finalization pending')
           setSaveStatus('idle')
         } else {
-          setPersistencePending(false)
-          setPersistenceError(null)
           setSaveStatus('saved')
         }
 
@@ -370,7 +399,9 @@ export function usePhotoReview({
         if (photoMutationSeqRef.current.get(targetPhotoId) !== targetSeq) return
         if (
           selectionGenRef.current === targetGen &&
-          selectedPhotoRef.current?.id === targetPhotoId
+          selectedPhotoRef.current?.id === targetPhotoId &&
+          selectedPhotoRef.current &&
+          computePhotoRevision(selectedPhotoRef.current) === expectedRevision
         ) {
           const message = err instanceof Error ? err.message : String(err)
           if (message.includes('STALE_REVISION') || message.includes('STALE_ANNOTATION_VERSION')) {
@@ -388,7 +419,7 @@ export function usePhotoReview({
     [selectedPhoto, updatePhotoLocal, removePhotoFromFilterView]
   )
 
-  // Set flag with request identity and generation guarding
+  // Set flag with request identity, revision, and generation guarding
   const setFlag = useCallback(
     async (flag: PhotoFlag) => {
       if (!selectedPhoto) return
@@ -396,11 +427,11 @@ export function usePhotoReview({
       const targetPhoto = selectedPhoto
       const targetPhotoId = targetPhoto.id
       const targetGen = selectionGenRef.current
+      const expectedRevision = computePhotoRevision(targetPhoto)
       const targetSeq = (photoMutationSeqRef.current.get(targetPhotoId) ?? 0) + 1
       photoMutationSeqRef.current.set(targetPhotoId, targetSeq)
 
       const currentRating = targetPhoto.rating ?? null
-      const expectedRevision = computePhotoRevision(targetPhoto)
       const expectedVersion = targetPhoto.annotationVersion ?? 0
 
       setSaveStatus('saving')
@@ -422,10 +453,12 @@ export function usePhotoReview({
           return
         }
 
-        // Drop completion if selection switched away from this photo
+        // Drop completion if selection switched away or photo revision changed
         if (
           selectionGenRef.current !== targetGen ||
-          selectedPhotoRef.current?.id !== targetPhotoId
+          selectedPhotoRef.current?.id !== targetPhotoId ||
+          !selectedPhotoRef.current ||
+          computePhotoRevision(selectedPhotoRef.current) !== expectedRevision
         ) {
           return
         }
@@ -438,12 +471,13 @@ export function usePhotoReview({
         )
 
         if (result.persistencePending) {
-          setPersistencePending(true)
+          const opId = `flag:${targetPhotoId}:${targetSeq}`
+          setPendingOps((prev) =>
+            new Map(prev).set(opId, { id: opId, error: result.persistenceError })
+          )
           setPersistenceError(result.persistenceError ?? 'Journal finalization pending')
           setSaveStatus('idle')
         } else {
-          setPersistencePending(false)
-          setPersistenceError(null)
           setSaveStatus('saved')
         }
 
@@ -456,7 +490,9 @@ export function usePhotoReview({
         if (photoMutationSeqRef.current.get(targetPhotoId) !== targetSeq) return
         if (
           selectionGenRef.current === targetGen &&
-          selectedPhotoRef.current?.id === targetPhotoId
+          selectedPhotoRef.current?.id === targetPhotoId &&
+          selectedPhotoRef.current &&
+          computePhotoRevision(selectedPhotoRef.current) === expectedRevision
         ) {
           const message = err instanceof Error ? err.message : String(err)
           if (message.includes('STALE_REVISION') || message.includes('STALE_ANNOTATION_VERSION')) {
@@ -481,11 +517,11 @@ export function usePhotoReview({
         const res = await window.api.createCollection({ name })
         if (!isMountedRef.current) return res.collection
         if (res.persistencePending) {
-          setPersistencePending(true)
+          const opId = `create_col:${res.collection.id}`
+          setPendingOps((prev) =>
+            new Map(prev).set(opId, { id: opId, error: res.persistenceError })
+          )
           setPersistenceError(res.persistenceError ?? 'Journal finalization pending')
-        } else {
-          setPersistencePending(false)
-          setPersistenceError(null)
         }
         await loadCollections(0)
         return res.collection
@@ -506,11 +542,11 @@ export function usePhotoReview({
         const res = await window.api.renameCollection({ collectionId, name })
         if (!isMountedRef.current) return res.collection
         if (res.persistencePending) {
-          setPersistencePending(true)
+          const opId = `rename_col:${collectionId}`
+          setPendingOps((prev) =>
+            new Map(prev).set(opId, { id: opId, error: res.persistenceError })
+          )
           setPersistenceError(res.persistenceError ?? 'Journal finalization pending')
-        } else {
-          setPersistencePending(false)
-          setPersistenceError(null)
         }
         await loadCollections(collectionsOffset)
         if (selectedPhotoRef.current) {
@@ -527,11 +563,12 @@ export function usePhotoReview({
     [loadCollections, loadMemberships, collectionsOffset, membershipsOffset]
   )
 
-  // Add collection member with expectedRevision
+  // Add collection member with expectedRevision and revision guard
   const addCollectionMember = useCallback(
     async (collectionId: number) => {
       if (!selectedPhoto) return
       const targetPhotoId = selectedPhoto.id
+      const targetGen = selectionGenRef.current
       const expectedRevision = computePhotoRevision(selectedPhoto)
 
       try {
@@ -542,13 +579,20 @@ export function usePhotoReview({
         })
         if (!isMountedRef.current) return
         if (res.persistencePending) {
-          setPersistencePending(true)
+          const opId = `add_mem:${collectionId}:${targetPhotoId}`
+          setPendingOps((prev) =>
+            new Map(prev).set(opId, { id: opId, error: res.persistenceError })
+          )
           setPersistenceError(res.persistenceError ?? 'Journal finalization pending')
-        } else {
-          setPersistencePending(false)
-          setPersistenceError(null)
         }
-        if (selectedPhotoRef.current?.id === targetPhotoId) {
+
+        // Verify photo selection and revision did not change mid-flight
+        if (
+          selectionGenRef.current === targetGen &&
+          selectedPhotoRef.current?.id === targetPhotoId &&
+          selectedPhotoRef.current &&
+          computePhotoRevision(selectedPhotoRef.current) === expectedRevision
+        ) {
           await loadMemberships(targetPhotoId, membershipsOffset)
         }
         await loadCollections(collectionsOffset)
@@ -561,11 +605,12 @@ export function usePhotoReview({
     [selectedPhoto, loadMemberships, loadCollections, collectionsOffset, membershipsOffset]
   )
 
-  // Remove collection member with expectedRevision
+  // Remove collection member with expectedRevision and revision guard
   const removeCollectionMember = useCallback(
     async (collectionId: number) => {
       if (!selectedPhoto) return
       const targetPhotoId = selectedPhoto.id
+      const targetGen = selectionGenRef.current
       const expectedRevision = computePhotoRevision(selectedPhoto)
 
       try {
@@ -576,19 +621,29 @@ export function usePhotoReview({
         })
         if (!isMountedRef.current) return
         if (res.persistencePending) {
-          setPersistencePending(true)
+          const opId = `remove_mem:${collectionId}:${targetPhotoId}`
+          setPendingOps((prev) =>
+            new Map(prev).set(opId, { id: opId, error: res.persistenceError })
+          )
           setPersistenceError(res.persistenceError ?? 'Journal finalization pending')
-        } else {
-          setPersistencePending(false)
-          setPersistenceError(null)
         }
-        if (selectedPhotoRef.current?.id === targetPhotoId) {
+
+        if (
+          selectionGenRef.current === targetGen &&
+          selectedPhotoRef.current?.id === targetPhotoId &&
+          selectedPhotoRef.current &&
+          computePhotoRevision(selectedPhotoRef.current) === expectedRevision
+        ) {
           await loadMemberships(targetPhotoId, membershipsOffset)
         }
         await loadCollections(collectionsOffset)
 
         const { collectionIdFilter: currentCollFilter } = currentFiltersRef.current
-        if (currentCollFilter === collectionId && selectedPhotoRef.current?.id === targetPhotoId) {
+        if (
+          currentCollFilter === collectionId &&
+          selectedPhotoRef.current?.id === targetPhotoId &&
+          computePhotoRevision(selectedPhotoRef.current) === expectedRevision
+        ) {
           removePhotoFromFilterView(targetPhotoId)
         }
       } catch (err: unknown) {
