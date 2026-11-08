@@ -9,7 +9,8 @@ import {
   readFileSync,
   existsSync,
   readdirSync,
-  mkdirSync
+  mkdirSync,
+  promises as fsPromises
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -433,5 +434,115 @@ describe('ThumbnailDiskCache', () => {
     } finally {
       delete process.env.PV_TEST_RECORD_STAGING_USAGE_FILE
     }
+  })
+
+  it('proves event-loop responsiveness during nonblocking publication backoff when rename encounters transient failures', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 10, g: 20, b: 30 } }
+    })
+      .webp()
+      .toBuffer()
+
+    let attemptCount = 0
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: 1024 * 1024,
+      maxRetryAttempts: 4,
+      retryBaseDelayMs: 30,
+      renameFile: async (temp, target) => {
+        attemptCount++
+        if (attemptCount <= 2) {
+          const err = new Error(`EPERM: operation not permitted, rename '${temp}' -> '${target}'`)
+          ;(err as NodeJS.ErrnoException).code = 'EPERM'
+          throw err
+        }
+        await fsPromises.rename(temp, target)
+      }
+    })
+
+    let probeTicks = 0
+    const probeTimer = setInterval(() => {
+      probeTicks++
+    }, 10)
+
+    const key = 'a'.repeat(64)
+    try {
+      await cache.put(key, validWebp)
+      // With nonblocking backoff (30ms + 60ms = 90ms wait), probe ticks must increment while put() is in progress
+      expect(probeTicks).toBeGreaterThanOrEqual(2)
+      expect(attemptCount).toBe(3)
+      expect(await cache.get(key)).not.toBeNull()
+    } finally {
+      clearInterval(probeTimer)
+    }
+  })
+
+  it('truthfully fails and cleans up temporary staging files when rename retries are exhausted', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 10, g: 20, b: 30 } }
+    })
+      .webp()
+      .toBuffer()
+
+    let attemptCount = 0
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: 1024 * 1024,
+      maxRetryAttempts: 3,
+      retryBaseDelayMs: 10,
+      renameFile: async (temp, target) => {
+        attemptCount++
+        const err = new Error(`EPERM: operation not permitted, rename '${temp}' -> '${target}'`)
+        ;(err as NodeJS.ErrnoException).code = 'EPERM'
+        throw err
+      }
+    })
+
+    const key = 'b'.repeat(64)
+    await expect(cache.put(key, validWebp)).rejects.toThrow(/EPERM/)
+    expect(attemptCount).toBe(3)
+
+    // Verify target not created and no orphan staging files remain
+    expect(existsSync(join(cacheDir, `${key}.thumb`))).toBe(false)
+    const files = readdirSync(cacheDir)
+    expect(files.filter((f) => f.startsWith('.thumb_tmp_'))).toHaveLength(0)
+  })
+
+  it('aborts pending publication retry immediately upon shutdown or abort without waiting out remaining delays', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 10, g: 20, b: 30 } }
+    })
+      .webp()
+      .toBuffer()
+
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: 1024 * 1024,
+      maxRetryAttempts: 5,
+      retryBaseDelayMs: 500, // Long delay
+      renameFile: async (temp, target) => {
+        const err = new Error(`EPERM: operation not permitted, rename '${temp}' -> '${target}'`)
+        ;(err as NodeJS.ErrnoException).code = 'EPERM'
+        throw err
+      }
+    })
+
+    const key = 'c'.repeat(64)
+    const startTime = Date.now()
+    const putPromise = cache.put(key, validWebp)
+
+    // Abort after 20ms while in backoff delay
+    setTimeout(() => {
+      cache.abort()
+    }, 20)
+
+    await expect(putPromise).rejects.toThrow(/aborted/i)
+    const elapsed = Date.now() - startTime
+    // Must abort promptly well under the 500ms backoff time
+    expect(elapsed).toBeLessThan(300)
+
+    // Staging file must be cleaned up
+    const files = readdirSync(cacheDir)
+    expect(files.filter((f) => f.startsWith('.thumb_tmp_'))).toHaveLength(0)
   })
 })

@@ -36,6 +36,9 @@ export interface ThumbnailDiskCacheOptions {
         | { width: number; height: number }
         | null)
     | false
+  readonly renameFile?: (tempPath: string, targetPath: string) => Promise<void>
+  readonly maxRetryAttempts?: number
+  readonly retryBaseDelayMs?: number
 }
 
 export interface ThumbnailDiagnostics {

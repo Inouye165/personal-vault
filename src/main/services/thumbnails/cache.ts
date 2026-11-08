@@ -11,13 +11,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  renameSync,
   statSync,
   lstatSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
-  realpathSync
+  realpathSync,
+  promises as fsPromises
 } from 'node:fs'
 import { join, resolve, dirname, parse, relative, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -187,6 +187,11 @@ export class ThumbnailDiskCache {
         | { width: number; height: number }
         | null)
     | false
+  private readonly customRenameFile?: (tempPath: string, targetPath: string) => Promise<void>
+  private readonly maxRetryAttempts: number
+  private readonly retryBaseDelayMs: number
+  private isAborted = false
+  private readonly activeAbortCallbacks = new Set<() => void>()
   private putQueue: Promise<void> = Promise.resolve()
 
   constructor(options: ThumbnailDiskCacheOptions) {
@@ -200,12 +205,23 @@ export class ThumbnailDiskCache {
     this.sourceRoots = options.sourceRoots
     this.vaultPath = options.vaultPath
     this.customValidator = options.validateBuffer
+    this.customRenameFile = options.renameFile
+    this.maxRetryAttempts = options.maxRetryAttempts ?? 5
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 15
 
     this.assertSeparationAndContainment()
 
     if (!existsSync(this.cacheDir)) {
       mkdirSync(this.cacheDir, { recursive: true })
     }
+  }
+
+  public abort(): void {
+    this.isAborted = true
+    for (const cb of this.activeAbortCallbacks) {
+      cb()
+    }
+    this.activeAbortCallbacks.clear()
   }
 
   private async validateIntegrity(
@@ -353,6 +369,9 @@ export class ThumbnailDiskCache {
   }
 
   private async executePut(key: string, buffer: Buffer): Promise<void> {
+    if (this.isAborted) {
+      throw new Error('Thumbnail cache operation aborted')
+    }
     this.assertValidKey(key)
     this.assertSeparationAndContainment()
     if (!buffer || buffer.length === 0) {
@@ -379,11 +398,11 @@ export class ThumbnailDiskCache {
     const targetPath = join(this.cacheDir, `${key}.thumb`)
 
     try {
-      // Exclusive creation to prevent collisions
-      writeFileSync(tempPath, buffer, { flag: 'wx' })
+      // Exclusive creation to prevent collisions (asynchronous write)
+      await fsPromises.writeFile(tempPath, buffer, { flag: 'wx' })
 
-      // Verify written size
-      const stat = statSync(tempPath)
+      // Verify written size (asynchronous stat)
+      const stat = await fsPromises.stat(tempPath)
       if (stat.size !== buffer.length) {
         throw new Error('Staging thumbnail write incomplete')
       }
@@ -421,17 +440,17 @@ export class ThumbnailDiskCache {
             if (releaseFile && existsSync(releaseFile)) {
               break
             }
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+            await new Promise((r) => setTimeout(r, 50))
           }
         }
       }
 
-      // Atomic publication with Windows retry for delete-pending / handle-release latency
-      this.publishFile(tempPath, targetPath)
+      // Atomic publication with asynchronous operations & nonblocking backoff retry
+      await this.publishFile(tempPath, targetPath)
     } catch (err) {
       try {
         if (existsSync(tempPath)) {
-          unlinkSync(tempPath)
+          await fsPromises.unlink(tempPath).catch(() => {})
         }
       } catch {
         // ignore
@@ -440,24 +459,63 @@ export class ThumbnailDiskCache {
     }
   }
 
-  private publishFile(tempPath: string, targetPath: string): void {
+  private async publishFile(tempPath: string, targetPath: string): Promise<void> {
     const isWindows = process.platform === 'win32'
-    const maxAttempts = isWindows ? 8 : 1
+    const shouldRetry =
+      isWindows ||
+      this.customRenameFile !== undefined ||
+      process.env.PV_TEST_RENAME_EPERM_COUNT !== undefined
+    const maxAttempts = shouldRetry ? this.maxRetryAttempts : 1
     let lastErr: unknown
 
+    const doRename = this.customRenameFile ?? ((temp, target) => fsPromises.rename(temp, target))
+
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (this.isAborted) {
+        throw new Error('Thumbnail cache operation aborted during publication')
+      }
+
       try {
-        renameSync(tempPath, targetPath)
+        if (process.env.PV_TEST_RENAME_EPERM_COUNT !== undefined) {
+          const count = parseInt(process.env.PV_TEST_RENAME_EPERM_COUNT, 10)
+          if (attempt < count) {
+            const err = new Error(
+              `EPERM: operation not permitted, rename '${tempPath}' -> '${targetPath}'`
+            )
+            ;(err as NodeJS.ErrnoException).code = 'EPERM'
+            throw err
+          }
+        }
+
+        await doRename(tempPath, targetPath)
         return
       } catch (err: unknown) {
         lastErr = err
         const code = (err as NodeJS.ErrnoException)?.code
-        if (
-          isWindows &&
-          (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') &&
-          attempt < maxAttempts - 1
-        ) {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * (attempt + 1))
+        const isTransient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
+        if (shouldRetry && isTransient && attempt < maxAttempts - 1) {
+          const delay = this.retryBaseDelayMs * (attempt + 1)
+          await new Promise<void>((resolve, reject) => {
+            let timer: NodeJS.Timeout | null = null
+            const onAbort = (): void => {
+              if (timer) clearTimeout(timer)
+              this.activeAbortCallbacks.delete(onAbort)
+              reject(new Error('Thumbnail cache operation aborted during retry wait'))
+            }
+            this.activeAbortCallbacks.add(onAbort)
+
+            timer = setTimeout(() => {
+              this.activeAbortCallbacks.delete(onAbort)
+              if (this.isAborted) {
+                reject(new Error('Thumbnail cache operation aborted during retry wait'))
+              } else {
+                resolve()
+              }
+            }, delay)
+          })
+          if (this.isAborted) {
+            throw new Error('Thumbnail cache operation aborted during publication', { cause: err })
+          }
           continue
         }
         throw err

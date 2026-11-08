@@ -2,7 +2,7 @@
  * @vitest-environment node
  */
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, statSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, statSync, mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -614,17 +614,40 @@ describe('ThumbnailCoordinator', () => {
     })
     expect(warmup.status).toBe('ready')
 
-    // Simulate stuck validation in worker
+    // Strengthened precondition 1: Assert warmup actually published a cache entry on disk (> 0 bytes)
+    const cacheKey = stuckCoord.getCache().computeCacheKey({
+      locationId: 777,
+      sourcePath: p,
+      sha256: null,
+      byteSize: st.size,
+      mtimeMs: Math.round(st.mtimeMs)
+    })
+    const cacheFile = join(cacheDir, `${cacheKey}.thumb`)
+    expect(existsSync(cacheFile)).toBe(true)
+    expect(statSync(cacheFile).size).toBeGreaterThan(0)
+
+    // Strengthened precondition 2: Assert next request enters validate_cache
     process.env.PV_TEST_STUCK_VALIDATION = '1'
     try {
-      const res = await stuckCoord.requestThumbnail({
+      const pReq = stuckCoord.requestThumbnail({
         locationId: 777,
         sourcePath: p,
         expectedByteSize: st.size,
         expectedMtimeMs: Math.round(st.mtimeMs),
         expectedSha256: null
       })
+
+      await new Promise((r) => setTimeout(r, 20))
+      const entries = stuckCoord.getActiveWorkerEntries()
+      const activeJob = entries.find((e) => e.locationId === 777)
+      expect(activeJob).toBeDefined()
+      expect(activeJob?.item?.action).toBe('validate_cache')
+
+      const res = await pReq
       expect(res.status).toBe('error')
+      if (res.status === 'error') {
+        expect(res.code).toBe('TIMEOUT')
+      }
 
       const diag = stuckCoord.getDiagnostics()
       expect(diag.activeWorkers).toBe(0)

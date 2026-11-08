@@ -673,6 +673,7 @@ export class ThumbnailCoordinator {
 
   public async shutdown(): Promise<void> {
     this.isShuttingDown = true
+    this.cache.abort()
     try {
       this.eventLoopMonitor.disable()
     } catch {
