@@ -9,8 +9,8 @@
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
 - **Stage 4 status**: Complete (independently accepted at `1a1fb69`, closeout at `8a17bfe`).
-- **Stage 5 status**: **In progress; Substage 5A awaiting review**.
-  - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Awaiting review** (corrected following independent review findings).
+- **Stage 5 status**: **In progress; Substage 5A Complete (independently accepted at `951fd25`)**.
+  - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Complete** (independently accepted at `951fd25`).
   - **Stage 5B (Ratings, Flags, Custom Collections)**: Planned; not started.
   - **Stage 5C (Visual Similarity Review)**: Planned; not started.
 - **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only.
@@ -129,12 +129,12 @@ Scale verification was conducted with an isolated 10,000-photo catalog fixture b
     - Atomic publication: exclusive `wx` staging write $\to$ stat check $\to$ atomic rename.
     - Source preservation invariance: source files strictly read-only.
   - **Sampled Workload Maxima & Measurements (10,000 Photos)**:
-    - Frame intervals sampled: 786 frames (built) / 768 frames (unpacked) recorded via `requestAnimationFrame` loop.
+    - Frame intervals sampled: 584 frames (built) / 599 frames (unpacked) recorded via `requestAnimationFrame` loop.
     - Frame interval p95: **4.30 ms** (satisfies $\le 33$ ms requirement; max frame interval: 16.60–16.70 ms).
-    - Main process event loop delay (measured inside main via Node `monitorEventLoopDelay`): p95 = **57.38 ms** (built) / **52.20 ms** (unpacked), max = 71.89 ms (built) / 85.33 ms (unpacked), mean = 20.35 ms (built) / 20.09 ms (unpacked), satisfying the $< 100$ ms responsiveness bound with zero main process event loop stalls.
-    - Renderer-to-main IPC round-trip latency: p95 = **70.38 ms** (built) / **64.32 ms** (unpacked), max = 71.32 ms (built) / 69.28 ms (unpacked), mean = 26.21 ms (built) / 25.18 ms (unpacked).
+    - Main process event loop delay (measured inside main via Node `monitorEventLoopDelay`): p95 = **45.38 ms** (built) / **44.40 ms** (unpacked), max = 73.66 ms (built) / 72.42 ms (unpacked), mean = 18.33 ms (built) / 18.18 ms (unpacked), satisfying the $< 100$ ms responsiveness bound with zero main process event loop stalls.
+    - Renderer-to-main IPC round-trip latency: p95 = **28.39 ms** (built) / **61.78 ms** (unpacked), max = 28.94 ms (built) / 64.35 ms (unpacked), mean = 16.75 ms (built) / 22.53 ms (unpacked).
     - Peak worker threads observed: live = 2 ($\le 2$ bound), active = 2, terminating = 0.
-    - Peak queued decode jobs: 4 ($\le 64$ bound).
+    - Peak queued decode jobs: 18 ($\le 64$ bound).
     - Peak mounted DOM cells: 20 ($\le 200$ bound).
     - Peak renderer JS heap: 9.54 MiB.
     - Disk cache usage: final = 0.00 MiB, sampled peak = 0.00 MiB / 1,024 MiB (0 orphan temporary files at rest, sampled peak active staging files = 0).
@@ -183,6 +183,7 @@ The following unrelated files remain intact and untouched:
 ## 5. Scope Exclusions & Next Steps
 
 - **Scope Exclusions**: Stage 5A is implemented only. Stage 5B (ratings, flags, custom collections) and Stage 5C (perceptual hashing and visual similarity review) are planned and not started. No catalog deletion, vault deletion, source deletion, OCR, semantic search, or cloud uploads.
-- **Stage 5A Status**: Awaiting review.
+- **Stage 5A Status**: Complete (independently accepted at `951fd25`).
 - **Stage 5 Overall Status**: In progress.
+- **Stage 5B and 5C Status**: Planned; not started.
 - **Git State**: Work committed on `feat/stage-5a-photo-browsing` branched directly from `8a17bfe`. Do NOT push or merge.

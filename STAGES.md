@@ -93,17 +93,17 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 ## Stage 5 - Photo browsing and review
 
-**In progress; Substage 5A awaiting review.**
+**In progress; Substage 5A complete; independently accepted at `951fd25`.**
 
-| Substage | Deliverable                                                               | Status          | Submission reference | Acceptance reference |
-| -------- | ------------------------------------------------------------------------- | --------------- | -------------------- | -------------------- |
-| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Awaiting review | (this commit)        | Pending              |
-| 5B       | User review tools: ratings, flags, and custom collections                 | Planned         | Pending              | Pending              |
-| 5C       | Perceptual hashing and visual similarity review                           | Planned         | Pending              | Pending              |
+| Substage | Deliverable                                                               | Status   | Submission reference | Acceptance reference |
+| -------- | ------------------------------------------------------------------------- | -------- | -------------------- | -------------------- |
+| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete | `5258b0a`            | `951fd25`            |
+| 5B       | User review tools: ratings, flags, and custom collections                 | Planned  | Pending              | Pending              |
+| 5C       | Perceptual hashing and visual similarity review                           | Planned  | Pending              | Pending              |
 
 ### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
 
-**Awaiting review (corrected following review findings).**
+**Complete; independently accepted at `951fd25`.**
 
 - [x] Responsive virtualized photo thumbnail grid adhering to dark theme token system with stable deterministic ordering by catalog location ID (`file_locations.id ASC`).
 - [x] Pure SQL pagination (`LIMIT ? OFFSET ?`) for photo catalog records without full-table materialization in memory.
@@ -111,13 +111,14 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 - [x] Large-collection browsing: virtual grid retains absolute collection scroll extent (`totalCount`) and positions, with sliding LRU page cache bounded to 2,000 records (40 pages of 50 items), mounted DOM cells bounded to <= 200, allowing distant jumps (e.g. to photo 7,500) and return to evicted pages without duplicates, gaps, or scroll jumps.
 - [x] Format support matrix tested and verified: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF with automatic EXIF orientation preservation (`.rotate()`).
 - [x] Honest placeholders: Apple HEIC/HEIF (due to prebuilt libvips libheif lacking unbundled HEVC decoders), camera RAW, SVG, corrupted or oversized inputs return honest unsupported/error status cards without crashes or external toolchains.
-- [x] Secure disposable disk cache in `<userData>/thumbnails/`: cache key bound to source identity (`locationId`/`normalizedPath`) for unhashed files so files with identical size/mtime never collide; canonical separation rejecting overlap with source roots or active vault; symlink/junction redirection rejected; malformed nonempty cache entries rejected and unlinked; abandoned staging cleanup on startup and shutdown; source byte cap enforced during reading.
+- [x] Secure disposable disk cache in `<userData>/thumbnails/`: cache key bound to source identity (`locationId`/`normalizedPath`) for unhashed files so files with identical size/mtime never collide; canonical separation rejecting overlap with source roots or active vault; symlink/junction redirection rejected; WebP header and image decode integrity validated via `validateWebPIntegrity` in worker threads (corrupt pseudo-WebP headers rejected, unlinked, and regenerated); oversized entries rejected before reading or allocating contents; pre-allocation capacity reservation before staging/publication (`reserveCapacity`) accounting for existing target and staging bytes during replacement writes; put operations serialized to eliminate concurrent write budget races; atomic publication with asynchronous operations, nonblocking backoff retry, and immediate abort on shutdown; abandoned staging cleanup on startup and shutdown; source byte cap enforced during reading.
 - [x] Residual out-of-band source modification detection (`statSync` check on cache hits) preventing stale image display.
 - [x] Stale renderer response protection: monotonic generation counter incremented on refresh and unmount; revision-bound in-flight request tracking ensuring older delayed completions cannot overwrite newer cells or delete newer request bookkeeping.
 - [x] Narrow typed IPC channels (`photos:get-page`, `photos:get-thumbnail`, `photos:cancel-thumbnail`, `photos:get-diagnostics`) with bidirectional Zod validation and top-level sender authorization.
 - [x] Compact metadata details panel displaying filename, absolute source path, recorded byte size, recorded filesystem timestamps, and observation provenance, with explicit "Unknown" for absent capture dates/locations (no fabricated dates).
 - [x] Header search input disabled with clear Stage 6 availability label in Photos tab.
-- [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 19/19 checks passed: 10,000-photo scale test exercising actual Photos UI with real decodable image files with actual recorded filesystem timestamps, cold scrolling, warm reversal, distant jumps, return to evicted pages with verified image loading and expected photo identity at all checkpoints (zero error cards), continuous `requestAnimationFrame` frame interval p95 measurement (4.30 ms <= 33 ms target), continuous main thread delay sampling (p95 = 50.91–77.74 ms, max < 100 ms limit), real observed request cancellation with worker termination and capacity recovery, interrupted real publication restart cleanup & regeneration, and 0 re-decodes on cache reuse proven via diagnostics.
+- [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 19/19 checks passed: 10,000-photo scale test exercising actual Photos UI with real decodable image files with actual recorded filesystem timestamps, cold scrolling, warm reversal, distant jumps, return to evicted pages with verified image loading and expected photo identity at all checkpoints (zero error cards), continuous `requestAnimationFrame` frame interval p95 measurement (4.30 ms <= 33 ms target), continuous main thread delay sampling (p95 = 35.91–46.37 ms, max < 100 ms limit), real observed request cancellation with worker termination and capacity recovery, interrupted real publication restart cleanup & regeneration, and 0 re-decodes on cache reuse proven via diagnostics.
+- [x] Independent review verification passed at `951fd25`: 503 tests passed across 31 test files (exit 0); all 15 required verification commands exit 0; typecheck, lint, formatting, production build, and unpacked build clean pass (exit 0); real-Electron photo verification (built & unpacked) 19/19 passed each (exit 0); duplicate review 18/18 passed (exit 0); scan workflow 14/14 passed (exit 0); vault import (built & unpacked) 11/11 passed each (exit 0); SQLite 8/8 passed (exit 0); smoke checks (built & unpacked) passed (exit 0); source preservation invariance confirmed.
 - [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched across all tests.
 
 Exit: users can browse discovered photographs smoothly with bounded memory and secure thumbnails, with ratings and similarity deferred to 5B and 5C.
