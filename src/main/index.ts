@@ -138,7 +138,12 @@ if (!app.requestSingleInstanceLock()) {
       logStartup('setupSecurityPolicies completed')
 
       const annotationsDir = join(app.getPath('userData'), 'annotations')
-      const journal = new AnnotationJournal({ storageDir: annotationsDir })
+      const journal = new AnnotationJournal({
+        storageDir: annotationsDir,
+        sourceRoots: () =>
+          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : [],
+        vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
+      })
       await journal.initialize()
       logStartup('journal.initialize completed')
 

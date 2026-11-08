@@ -2891,39 +2891,54 @@ export class CatalogDatabase {
         .run(Date.now())
     }
 
-    const entries = this.journal.readEntriesSync()
-    const committedRows = this.db
-      .prepare("SELECT op_id FROM journal_operations WHERE status = 'committed';")
-      .all() as Array<{ op_id: string }>
-    const committedOpIds = new Set(committedRows.map((r) => r.op_id))
+    // Use a temp table to avoid accumulating journal entries in Node heap.
+    this.db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS temp_journal_scan (
+        op_id TEXT PRIMARY KEY,
+        entry_seq INTEGER NOT NULL,
+        is_terminal INTEGER NOT NULL
+      );
+      DELETE FROM temp_journal_scan;
+    `)
 
-    const opEntries = new Map<
-      string,
-      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry
-    >()
-    const terminalOps = new Set<string>()
+    const insertScanStmt = this.db.prepare(`
+      INSERT INTO temp_journal_scan (op_id, entry_seq, is_terminal)
+      VALUES (?, ?, ?)
+      ON CONFLICT(op_id) DO UPDATE SET
+        entry_seq = excluded.entry_seq,
+        is_terminal = CASE WHEN excluded.is_terminal = 1 THEN 1 ELSE temp_journal_scan.is_terminal END;
+    `)
 
-    for (const entry of entries) {
-      if (entry.kind === 'op_committed' || entry.kind === 'op_aborted') {
-        terminalOps.add(entry.opId)
+    for (const entry of this.journal.iterateEntriesSync()) {
+      const isTerminal = entry.kind === 'op_committed' || entry.kind === 'op_aborted' ? 1 : 0
+      insertScanStmt.run(entry.opId, entry.entrySeq, isTerminal)
+    }
+
+    // Query unterminated operations joining indexed journal_operations table
+    const unterminatedRows = this.db
+      .prepare(
+        `
+        SELECT t.op_id, t.entry_seq, jo.status
+        FROM temp_journal_scan t
+        LEFT JOIN journal_operations jo ON jo.op_id = t.op_id
+        WHERE t.is_terminal = 0;
+      `
+      )
+      .all() as Array<{ op_id: string; entry_seq: number; status: string | null }>
+
+    for (const row of unterminatedRows) {
+      if (row.status === 'committed') {
+        this.journal.appendCommitRecordSync({ opId: row.op_id, targetSeq: row.entry_seq })
       } else {
-        opEntries.set(entry.opId, entry)
+        this.journal.appendAbortRecordSync({
+          opId: row.op_id,
+          targetSeq: row.entry_seq,
+          reason: 'Startup reconciliation: uncommitted transaction aborted'
+        })
       }
     }
 
-    for (const [opId, entry] of opEntries.entries()) {
-      if (!terminalOps.has(opId)) {
-        if (committedOpIds.has(opId)) {
-          this.journal.appendCommitRecordSync({ opId, targetSeq: entry.entrySeq })
-        } else {
-          this.journal.appendAbortRecordSync({
-            opId,
-            targetSeq: entry.entrySeq,
-            reason: 'Startup reconciliation: uncommitted transaction aborted'
-          })
-        }
-      }
-    }
+    this.db.exec('DROP TABLE IF EXISTS temp_journal_scan;')
 
     const latestSeq = this.journal.getLatestSeq()
     this.db
@@ -2949,6 +2964,7 @@ export class CatalogDatabase {
     const opId = randomUUID()
     let journalEntry:
       import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
+    let isCommitted = false
 
     this.db.exec('BEGIN IMMEDIATE;')
     try {
@@ -2983,12 +2999,20 @@ export class CatalogDatabase {
         .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
 
       this.db.exec('COMMIT;')
+      isCommitted = true
 
+      let persistencePending = false
+      let persistenceError: string | undefined
       if (this.journal && journalEntry) {
-        this.journal.appendCommitRecordSync({
-          opId,
-          targetSeq: journalEntry.entrySeq
-        })
+        try {
+          this.journal.appendCommitRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq
+          })
+        } catch (commitErr) {
+          persistencePending = true
+          persistenceError = commitErr instanceof Error ? commitErr.message : String(commitErr)
+        }
       }
 
       return {
@@ -2997,9 +3021,14 @@ export class CatalogDatabase {
         normalizedName: row.normalized_name,
         createdAtMs: row.created_at_ms,
         updatedAtMs: row.updated_at_ms,
-        photoCount: 0
+        photoCount: 0,
+        ...(persistencePending ? { persistencePending } : {}),
+        ...(persistenceError ? { persistenceError } : {})
       }
     } catch (err) {
+      if (isCommitted) {
+        throw err
+      }
       try {
         this.db.exec('ROLLBACK;')
       } catch {
@@ -3046,6 +3075,7 @@ export class CatalogDatabase {
     const opId = randomUUID()
     let journalEntry:
       import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
+    let isCommitted = false
 
     this.db.exec('BEGIN IMMEDIATE;')
     try {
@@ -3082,12 +3112,20 @@ export class CatalogDatabase {
         .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
 
       this.db.exec('COMMIT;')
+      isCommitted = true
 
+      let persistencePending = false
+      let persistenceError: string | undefined
       if (this.journal && journalEntry) {
-        this.journal.appendCommitRecordSync({
-          opId,
-          targetSeq: journalEntry.entrySeq
-        })
+        try {
+          this.journal.appendCommitRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq
+          })
+        } catch (commitErr) {
+          persistencePending = true
+          persistenceError = commitErr instanceof Error ? commitErr.message : String(commitErr)
+        }
       }
 
       return {
@@ -3095,9 +3133,14 @@ export class CatalogDatabase {
         name: row.name,
         normalizedName: row.normalized_name,
         createdAtMs: row.created_at_ms,
-        updatedAtMs: row.updated_at_ms
+        updatedAtMs: row.updated_at_ms,
+        ...(persistencePending ? { persistencePending } : {}),
+        ...(persistenceError ? { persistenceError } : {})
       }
     } catch (err) {
+      if (isCommitted) {
+        throw err
+      }
       try {
         this.db.exec('ROLLBACK;')
       } catch {
@@ -3219,6 +3262,8 @@ export class CatalogDatabase {
   public addCollectionMember(input: AddCollectionMemberInput): {
     success: boolean
     isNew: boolean
+    persistencePending?: boolean
+    persistenceError?: string
   } {
     this.assertOpen()
     if (!input.collectionId || input.collectionId <= 0) {
@@ -3282,6 +3327,7 @@ export class CatalogDatabase {
     let journalEntry:
       import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
     const now = Date.now()
+    let isCommitted = false
 
     this.db.exec('BEGIN IMMEDIATE;')
     try {
@@ -3318,16 +3364,32 @@ export class CatalogDatabase {
         .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
 
       this.db.exec('COMMIT;')
+      isCommitted = true
 
+      let persistencePending = false
+      let persistenceError: string | undefined
       if (this.journal && journalEntry) {
-        this.journal.appendCommitRecordSync({
-          opId,
-          targetSeq: journalEntry.entrySeq
-        })
+        try {
+          this.journal.appendCommitRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq
+          })
+        } catch (commitErr) {
+          persistencePending = true
+          persistenceError = commitErr instanceof Error ? commitErr.message : String(commitErr)
+        }
       }
 
-      return { success: true, isNew: true }
+      return {
+        success: true,
+        isNew: true,
+        ...(persistencePending ? { persistencePending } : {}),
+        ...(persistenceError ? { persistenceError } : {})
+      }
     } catch (err) {
+      if (isCommitted) {
+        throw err
+      }
       try {
         this.db.exec('ROLLBACK;')
       } catch {
@@ -3348,7 +3410,11 @@ export class CatalogDatabase {
     }
   }
 
-  public removeCollectionMember(input: RemoveCollectionMemberInput): { success: boolean } {
+  public removeCollectionMember(input: RemoveCollectionMemberInput): {
+    success: boolean
+    persistencePending?: boolean
+    persistenceError?: string
+  } {
     this.assertOpen()
     if (!input.expectedRevision || typeof input.expectedRevision !== 'string') {
       throw new TypeError('expectedRevision must be a non-empty string')
@@ -3374,6 +3440,7 @@ export class CatalogDatabase {
     let journalEntry:
       import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
     const now = Date.now()
+    let isCommitted = false
 
     this.db.exec('BEGIN IMMEDIATE;')
     try {
@@ -3407,16 +3474,31 @@ export class CatalogDatabase {
         .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
 
       this.db.exec('COMMIT;')
+      isCommitted = true
 
+      let persistencePending = false
+      let persistenceError: string | undefined
       if (this.journal && journalEntry) {
-        this.journal.appendCommitRecordSync({
-          opId,
-          targetSeq: journalEntry.entrySeq
-        })
+        try {
+          this.journal.appendCommitRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq
+          })
+        } catch (commitErr) {
+          persistencePending = true
+          persistenceError = commitErr instanceof Error ? commitErr.message : String(commitErr)
+        }
       }
 
-      return { success: true }
+      return {
+        success: true,
+        ...(persistencePending ? { persistencePending } : {}),
+        ...(persistenceError ? { persistenceError } : {})
+      }
     } catch (err) {
+      if (isCommitted) {
+        throw err
+      }
       try {
         this.db.exec('ROLLBACK;')
       } catch {
@@ -3743,6 +3825,7 @@ export class CatalogDatabase {
     let journalEntry:
       import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
     const now = Date.now()
+    let isCommitted = false
 
     this.db.exec('BEGIN IMMEDIATE;')
     try {
@@ -3809,12 +3892,20 @@ export class CatalogDatabase {
         .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
 
       this.db.exec('COMMIT;')
+      isCommitted = true
 
+      let persistencePending = false
+      let persistenceError: string | undefined
       if (this.journal && journalEntry) {
-        this.journal.appendCommitRecordSync({
-          opId,
-          targetSeq: journalEntry.entrySeq
-        })
+        try {
+          this.journal.appendCommitRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq
+          })
+        } catch (commitErr) {
+          persistencePending = true
+          persistenceError = commitErr instanceof Error ? commitErr.message : String(commitErr)
+        }
       }
 
       return {
@@ -3827,9 +3918,14 @@ export class CatalogDatabase {
         version: row.version,
         isCurrent: row.is_current === 1,
         createdAtMs: row.created_at_ms,
-        updatedAtMs: row.updated_at_ms
+        updatedAtMs: row.updated_at_ms,
+        ...(persistencePending ? { persistencePending } : {}),
+        ...(persistenceError ? { persistenceError } : {})
       }
     } catch (err) {
+      if (isCommitted) {
+        throw err
+      }
       try {
         this.db.exec('ROLLBACK;')
       } catch {

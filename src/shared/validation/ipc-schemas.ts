@@ -546,7 +546,9 @@ export const PhotoAnnotationSchema = z.object({
   version: z.number().int().positive(),
   isCurrent: z.boolean(),
   createdAtMs: z.number().int().positive(),
-  updatedAtMs: z.number().int().positive()
+  updatedAtMs: z.number().int().positive(),
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type PhotoAnnotation = z.infer<typeof PhotoAnnotationSchema>
 
@@ -599,7 +601,9 @@ export const CollectionItemSchema = z.object({
   normalizedName: z.string().min(1),
   createdAtMs: z.number().int().positive(),
   updatedAtMs: z.number().int().positive(),
-  photoCount: z.number().int().nonnegative().optional()
+  photoCount: z.number().int().nonnegative().optional(),
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type CollectionItem = z.infer<typeof CollectionItemSchema>
 
@@ -648,7 +652,9 @@ export type AddCollectionMemberRequest = z.infer<typeof AddCollectionMemberReque
 
 export const AddCollectionMemberResponseSchema = z.object({
   success: z.boolean(),
-  isNew: z.boolean()
+  isNew: z.boolean(),
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type AddCollectionMemberResponse = z.infer<typeof AddCollectionMemberResponseSchema>
 
@@ -660,7 +666,9 @@ export const RemoveCollectionMemberRequestSchema = z.object({
 export type RemoveCollectionMemberRequest = z.infer<typeof RemoveCollectionMemberRequestSchema>
 
 export const RemoveCollectionMemberResponseSchema = z.object({
-  success: z.boolean()
+  success: z.boolean(),
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type RemoveCollectionMemberResponse = z.infer<typeof RemoveCollectionMemberResponseSchema>
 

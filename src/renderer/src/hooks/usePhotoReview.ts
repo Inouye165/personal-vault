@@ -55,6 +55,7 @@ export function usePhotoReview({
   const [totalMemberships, setTotalMemberships] = useState(0)
   const [hasMoreMemberships, setHasMoreMemberships] = useState(false)
   const [isLoadingMemberships, setIsLoadingMemberships] = useState(false)
+  const [membershipError, setMembershipError] = useState<string | null>(null)
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
@@ -63,10 +64,20 @@ export function usePhotoReview({
   const prevSelectedPhotoIdRef = useRef<number | null>(null)
   const selectionGenRef = useRef(0)
 
+  const currentFiltersRef = useRef({ ratingFilter, flagFilter, collectionIdFilter })
+  useEffect(() => {
+    currentFiltersRef.current = { ratingFilter, flagFilter, collectionIdFilter }
+  }, [ratingFilter, flagFilter, collectionIdFilter])
+
+  const isLoadingCollectionsRef = useRef(false)
+  const isLoadingMembershipsRef = useRef(false)
+
   // Load initial collections
   const loadCollections = useCallback(async (offset = 0) => {
+    if (isLoadingCollectionsRef.current) return
     try {
       if (typeof window.api?.listCollections !== 'function') return
+      isLoadingCollectionsRef.current = true
       const res = await window.api.listCollections({ offset, limit: 50 })
       if (offset === 0) {
         setCollections(res.items)
@@ -77,19 +88,24 @@ export function usePhotoReview({
       setHasMoreCollections(res.hasMore)
     } catch (err) {
       console.error('Failed to list collections:', err)
+    } finally {
+      isLoadingCollectionsRef.current = false
     }
   }, [])
 
   const loadMoreCollections = useCallback(async () => {
-    if (!hasMoreCollections) return
+    if (!hasMoreCollections || isLoadingCollectionsRef.current) return
     await loadCollections(collections.length)
   }, [hasMoreCollections, collections.length, loadCollections])
 
   // Load memberships for current photo
   const loadMemberships = useCallback(async (photoId: number, offset = 0) => {
+    if (isLoadingMembershipsRef.current) return
     try {
       if (typeof window.api?.getPhotoMemberships !== 'function') return
+      isLoadingMembershipsRef.current = true
       setIsLoadingMemberships(true)
+      setMembershipError(null)
       const res = await window.api.getPhotoMemberships({
         fileLocationId: photoId,
         offset,
@@ -104,20 +120,31 @@ export function usePhotoReview({
         setTotalMemberships(res.totalCount)
         setHasMoreMemberships(res.hasMore)
         setIsLoadingMemberships(false)
+        setMembershipError(null)
       }
-    } catch (err) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
       console.error('Failed to get photo memberships:', err)
       if (selectedPhotoRef.current?.id === photoId) {
         if (offset === 0) setMemberships([])
         setIsLoadingMemberships(false)
+        setMembershipError(message)
       }
+    } finally {
+      isLoadingMembershipsRef.current = false
     }
   }, [])
 
   const loadMoreMemberships = useCallback(async () => {
-    if (!hasMoreMemberships || !selectedPhoto) return
+    if (!hasMoreMemberships || !selectedPhoto || isLoadingMembershipsRef.current) return
     await loadMemberships(selectedPhoto.id, memberships.length)
   }, [hasMoreMemberships, selectedPhoto, memberships.length, loadMemberships])
+
+  const retryLoadMemberships = useCallback(async () => {
+    if (!selectedPhotoRef.current) return
+    setMembershipError(null)
+    await loadMemberships(selectedPhotoRef.current.id, 0)
+  }, [loadMemberships])
 
   useEffect(() => {
     let active = true
@@ -143,32 +170,26 @@ export function usePhotoReview({
     prevSelectedPhotoIdRef.current = photoId
     const currentGen = ++selectionGenRef.current
 
+    setMemberships([])
+    setTotalMemberships(0)
+    setHasMoreMemberships(false)
+    setIsLoadingMemberships(selectedPhoto !== null)
+    setMembershipError(null)
+    setSaveStatus('idle')
+    setStatusMessage(null)
+
+    if (!selectedPhoto) {
+      return
+    }
+
+    const currentPhotoId = selectedPhoto.id
+
     let active = true
     const updateSelection = async () => {
-      await Promise.resolve()
-      if (!active) return
-
-      if (!selectedPhoto) {
-        setMemberships([])
-        setTotalMemberships(0)
-        setHasMoreMemberships(false)
-        setIsLoadingMemberships(false)
-        setSaveStatus('idle')
-        setStatusMessage(null)
-        return
-      }
-
-      setMemberships([])
-      setTotalMemberships(0)
-      setHasMoreMemberships(false)
-      setIsLoadingMemberships(true)
-      setSaveStatus('idle')
-      setStatusMessage(null)
-
       if (typeof window.api?.getPhotoMemberships !== 'function') return
       try {
         const res = await window.api.getPhotoMemberships({
-          fileLocationId: photoId,
+          fileLocationId: currentPhotoId,
           offset: 0,
           limit: 50
         })
@@ -177,11 +198,14 @@ export function usePhotoReview({
           setTotalMemberships(res.totalCount)
           setHasMoreMemberships(res.hasMore)
           setIsLoadingMemberships(false)
+          setMembershipError(null)
         }
-      } catch {
+      } catch (err: unknown) {
         if (active && selectionGenRef.current === currentGen) {
+          const message = err instanceof Error ? err.message : String(err)
           setMemberships([])
           setIsLoadingMemberships(false)
+          setMembershipError(message)
         }
       }
     }
@@ -234,13 +258,14 @@ export function usePhotoReview({
         ) {
           setSaveStatus('saved')
 
-          // Check if photo still matches rating filter
-          if (ratingFilter !== 'all') {
+          // Check if photo still matches rating filter using live current filter
+          const { ratingFilter: currentRatingFilter } = currentFiltersRef.current
+          if (currentRatingFilter !== 'all') {
             let matches = true
-            if (ratingFilter === 'unrated') {
+            if (currentRatingFilter === 'unrated') {
               matches = newRating === null
             } else {
-              const minRating = Number.parseInt(ratingFilter, 10)
+              const minRating = Number.parseInt(currentRatingFilter, 10)
               matches = newRating !== null && newRating >= minRating
             }
             if (!matches) {
@@ -266,7 +291,7 @@ export function usePhotoReview({
         }
       }
     },
-    [selectedPhoto, ratingFilter, updatePhotoLocal, removePhotoFromFilterView]
+    [selectedPhoto, updatePhotoLocal, removePhotoFromFilterView]
   )
 
   // Set flag with request identity and generation guarding
@@ -307,7 +332,8 @@ export function usePhotoReview({
         ) {
           setSaveStatus('saved')
 
-          if (flagFilter !== 'all' && flag !== flagFilter) {
+          const { flagFilter: currentFlagFilter } = currentFiltersRef.current
+          if (currentFlagFilter !== 'all' && flag !== currentFlagFilter) {
             removePhotoFromFilterView(targetPhotoId)
           }
         }
@@ -329,7 +355,7 @@ export function usePhotoReview({
         }
       }
     },
-    [selectedPhoto, flagFilter, updatePhotoLocal, removePhotoFromFilterView]
+    [selectedPhoto, updatePhotoLocal, removePhotoFromFilterView]
   )
 
   // Create collection
@@ -410,7 +436,8 @@ export function usePhotoReview({
         }
         await loadCollections(0)
 
-        if (collectionIdFilter === collectionId && selectedPhotoRef.current?.id === targetPhotoId) {
+        const { collectionIdFilter: currentCollFilter } = currentFiltersRef.current
+        if (currentCollFilter === collectionId && selectedPhotoRef.current?.id === targetPhotoId) {
           removePhotoFromFilterView(targetPhotoId)
         }
       } catch (err: unknown) {
@@ -418,7 +445,7 @@ export function usePhotoReview({
         setStatusMessage(message)
       }
     },
-    [selectedPhoto, collectionIdFilter, loadMemberships, loadCollections, removePhotoFromFilterView]
+    [selectedPhoto, loadMemberships, loadCollections, removePhotoFromFilterView]
   )
 
   return {
@@ -431,6 +458,8 @@ export function usePhotoReview({
     hasMoreMemberships,
     loadMoreMemberships,
     isLoadingMemberships,
+    membershipError,
+    retryLoadMemberships,
     saveStatus,
     statusMessage,
     setRating,

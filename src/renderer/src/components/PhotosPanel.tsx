@@ -188,6 +188,8 @@ export function PhotosPanel() {
     hasMoreMemberships,
     loadMoreMemberships,
     isLoadingMemberships,
+    membershipError,
+    retryLoadMemberships,
     saveStatus,
     statusMessage,
     setRating,
@@ -686,6 +688,22 @@ export function PhotosPanel() {
                 <div className="collections-management">
                   {isLoadingMemberships ? (
                     <span className="sub-text loading-memberships">Loading memberships…</span>
+                  ) : membershipError ? (
+                    <div
+                      className="membership-error-container"
+                      style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                    >
+                      <span className="sub-text membership-error-text error-text">
+                        {membershipError}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-xs retry-memberships-btn"
+                        onClick={() => void retryLoadMemberships()}
+                      >
+                        Retry
+                      </button>
+                    </div>
                   ) : memberships.length > 0 ? (
                     <div className="memberships-list">
                       {memberships.map((m) => (

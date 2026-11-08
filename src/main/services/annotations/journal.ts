@@ -48,17 +48,23 @@ export class JournalCorruptionError extends Error {
 export interface AnnotationJournalOptions {
   readonly storageDir: string
   readonly forbiddenOverlapPaths?: string[]
+  readonly sourceRoots?: () => string[]
+  readonly vaultPath?: () => string | null
   readonly customAppender?: (filePath: string, line: string) => Promise<void>
   readonly customAppenderSync?: (filePath: string, line: string) => void
 }
 
+export const MAX_JOURNAL_RECORD_BYTES = 64 * 1024
+
 export class AnnotationJournal {
   private readonly storageDir: string
   private readonly forbiddenOverlapPaths: string[]
+  private readonly sourceRootsGetter?: () => string[]
+  private readonly vaultPathGetter?: () => string | null
   private readonly ownerMarkerPath: string
   private readonly journalPath: string
-  private readonly customAppender?: (filePath: string, line: string) => Promise<void>
-  private readonly customAppenderSync?: (filePath: string, line: string) => void
+  private customAppender?: (filePath: string, line: string) => Promise<void>
+  private customAppenderSync?: (filePath: string, line: string) => void
 
   private writeLockChain: Promise<void> = Promise.resolve()
   private latestSeq = 0
@@ -69,10 +75,24 @@ export class AnnotationJournal {
     this.forbiddenOverlapPaths = (options.forbiddenOverlapPaths ?? []).map((p) =>
       resolve(normalize(p))
     )
+    this.sourceRootsGetter = options.sourceRoots
+    this.vaultPathGetter = options.vaultPath
     this.ownerMarkerPath = join(this.storageDir, '.pv_annotations_owner')
     this.journalPath = join(this.storageDir, 'review-journal.jsonl')
     this.customAppender = options.customAppender
     this.customAppenderSync = options.customAppenderSync
+  }
+
+  public setCustomAppenderSync(
+    appender: ((filePath: string, line: string) => void) | null | undefined
+  ): void {
+    this.customAppenderSync = appender ?? undefined
+  }
+
+  public setCustomAppender(
+    appender: ((filePath: string, line: string) => Promise<void>) | null | undefined
+  ): void {
+    this.customAppender = appender ?? undefined
   }
 
   public getJournalPath(): string {
@@ -256,16 +276,60 @@ export class AnnotationJournal {
       curr = parent
     }
 
+    try {
+      if (
+        fsSync.existsSync(this.ownerMarkerPath) &&
+        fsSync.lstatSync(this.ownerMarkerPath).isSymbolicLink()
+      ) {
+        throw new JournalSecurityError('Ownership marker cannot be a symbolic link')
+      }
+    } catch (err: unknown) {
+      if (err instanceof JournalSecurityError) throw err
+    }
+    try {
+      if (
+        fsSync.existsSync(this.journalPath) &&
+        fsSync.lstatSync(this.journalPath).isSymbolicLink()
+      ) {
+        throw new JournalSecurityError('Journal file cannot be a symbolic link')
+      }
+    } catch (err: unknown) {
+      if (err instanceof JournalSecurityError) throw err
+    }
+
+    const allForbidden = [...this.forbiddenOverlapPaths]
+    if (this.sourceRootsGetter) {
+      try {
+        const roots = this.sourceRootsGetter()
+        if (Array.isArray(roots)) {
+          allForbidden.push(...roots)
+        }
+      } catch {
+        // ignore getter errors
+      }
+    }
+    if (this.vaultPathGetter) {
+      try {
+        const vp = this.vaultPathGetter()
+        if (vp && typeof vp === 'string') {
+          allForbidden.push(vp)
+        }
+      } catch {
+        // ignore getter errors
+      }
+    }
+
     const storageNormalized = this.storageDir.toLowerCase()
-    for (const forbidden of this.forbiddenOverlapPaths) {
-      const forbiddenNormalized = forbidden.toLowerCase()
+    for (const rawForbidden of allForbidden) {
+      if (!rawForbidden || typeof rawForbidden !== 'string') continue
+      const forbiddenNormalized = resolve(normalize(rawForbidden)).toLowerCase()
       if (
         storageNormalized === forbiddenNormalized ||
         storageNormalized.startsWith(forbiddenNormalized + sep) ||
         forbiddenNormalized.startsWith(storageNormalized + sep)
       ) {
         throw new JournalSecurityError(
-          `Journal storage directory overlaps with forbidden path: ${forbidden}`
+          `Journal storage directory overlaps with forbidden path: ${rawForbidden}`
         )
       }
     }
@@ -289,16 +353,56 @@ export class AnnotationJournal {
       curr = parent
     }
 
+    try {
+      const markerStat = await fs.lstat(this.ownerMarkerPath).catch(() => null)
+      if (markerStat?.isSymbolicLink()) {
+        throw new JournalSecurityError('Ownership marker cannot be a symbolic link')
+      }
+    } catch (err: unknown) {
+      if (err instanceof JournalSecurityError) throw err
+    }
+    try {
+      const journalStat = await fs.lstat(this.journalPath).catch(() => null)
+      if (journalStat?.isSymbolicLink()) {
+        throw new JournalSecurityError('Journal file cannot be a symbolic link')
+      }
+    } catch (err: unknown) {
+      if (err instanceof JournalSecurityError) throw err
+    }
+
+    const allForbidden = [...this.forbiddenOverlapPaths]
+    if (this.sourceRootsGetter) {
+      try {
+        const roots = this.sourceRootsGetter()
+        if (Array.isArray(roots)) {
+          allForbidden.push(...roots)
+        }
+      } catch {
+        // ignore getter errors
+      }
+    }
+    if (this.vaultPathGetter) {
+      try {
+        const vp = this.vaultPathGetter()
+        if (vp && typeof vp === 'string') {
+          allForbidden.push(vp)
+        }
+      } catch {
+        // ignore getter errors
+      }
+    }
+
     const storageNormalized = this.storageDir.toLowerCase()
-    for (const forbidden of this.forbiddenOverlapPaths) {
-      const forbiddenNormalized = forbidden.toLowerCase()
+    for (const rawForbidden of allForbidden) {
+      if (!rawForbidden || typeof rawForbidden !== 'string') continue
+      const forbiddenNormalized = resolve(normalize(rawForbidden)).toLowerCase()
       if (
         storageNormalized === forbiddenNormalized ||
         storageNormalized.startsWith(forbiddenNormalized + sep) ||
         forbiddenNormalized.startsWith(storageNormalized + sep)
       ) {
         throw new JournalSecurityError(
-          `Journal storage directory overlaps with forbidden path: ${forbidden}`
+          `Journal storage directory overlaps with forbidden path: ${rawForbidden}`
         )
       }
     }
@@ -364,34 +468,45 @@ export class AnnotationJournal {
       let lastValidByteOffset = 0
       let expectedSeq = 1
       let lineNumber = 0
-      let pendingChunkRemainder = ''
-      let pendingRemainderByteOffset = 0
+      let remainderBuf = Buffer.alloc(0)
+      let remainderStartOffset = 0
 
       while (fileOffset < totalSize) {
         const bytesRead = (await fileHandle.read(buffer, 0, CHUNK_SIZE, fileOffset)).bytesRead
         if (bytesRead === 0) break
 
-        const chunkStr = buffer.toString('utf8', 0, bytesRead)
-        const combined = pendingChunkRemainder + chunkStr
-        const combinedOffset = pendingChunkRemainder ? pendingRemainderByteOffset : fileOffset
+        const chunkBuf = buffer.subarray(0, bytesRead)
+        const combinedBuf =
+          remainderBuf.length > 0 ? Buffer.concat([remainderBuf, chunkBuf]) : chunkBuf
+        const combinedStartOffset = remainderBuf.length > 0 ? remainderStartOffset : fileOffset
 
         let lineStart = 0
         while (true) {
-          const newlineIdx = combined.indexOf('\n', lineStart)
+          const newlineIdx = combinedBuf.indexOf(0x0a, lineStart)
           if (newlineIdx === -1) {
-            pendingChunkRemainder = combined.slice(lineStart)
-            pendingRemainderByteOffset =
-              combinedOffset + Buffer.byteLength(combined.slice(0, lineStart), 'utf8')
+            remainderBuf = Buffer.from(combinedBuf.subarray(lineStart))
+            remainderStartOffset = combinedStartOffset + lineStart
+            if (remainderBuf.length > MAX_JOURNAL_RECORD_BYTES) {
+              throw new JournalCorruptionError(
+                `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+              )
+            }
             break
           }
 
-          const rawLine = combined.slice(lineStart, newlineIdx)
-          const currentLineEndOffset =
-            combinedOffset + Buffer.byteLength(combined.slice(0, newlineIdx + 1), 'utf8')
+          const lineLength = newlineIdx - lineStart
+          if (lineLength > MAX_JOURNAL_RECORD_BYTES) {
+            throw new JournalCorruptionError(
+              `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+            )
+          }
+
+          const lineBytes = combinedBuf.subarray(lineStart, newlineIdx)
+          const currentLineEndOffset = combinedStartOffset + newlineIdx + 1
           lineStart = newlineIdx + 1
 
-          const trimmed = rawLine.trim()
-          if (!trimmed) {
+          const lineStr = lineBytes.toString('utf8').trim()
+          if (!lineStr) {
             lastValidByteOffset = currentLineEndOffset
             continue
           }
@@ -399,26 +514,18 @@ export class AnnotationJournal {
           lineNumber++
           let parsedObj: unknown
           try {
-            parsedObj = JSON.parse(trimmed)
+            parsedObj = JSON.parse(lineStr)
           } catch {
-            if (currentLineEndOffset < totalSize) {
-              throw new JournalCorruptionError(
-                `Interior corruption detected in review journal at line ${lineNumber}. Refusing automatic repair to prevent data loss.`
-              )
-            } else {
-              break
-            }
+            throw new JournalCorruptionError(
+              `Interior corruption detected in review journal at line ${lineNumber}. Refusing automatic repair to prevent data loss.`
+            )
           }
 
           const parseResult = AnnotationJournalEntrySchema.safeParse(parsedObj)
           if (!parseResult.success) {
-            if (currentLineEndOffset < totalSize) {
-              throw new JournalCorruptionError(
-                `Interior corruption detected in review journal at line ${lineNumber} (schema validation failed). Refusing automatic repair to prevent data loss.`
-              )
-            } else {
-              break
-            }
+            throw new JournalCorruptionError(
+              `Interior corruption detected in review journal at line ${lineNumber} (schema validation failed). Refusing automatic repair to prevent data loss.`
+            )
           }
 
           const entry = parseResult.data
@@ -435,7 +542,7 @@ export class AnnotationJournal {
         fileOffset += bytesRead
       }
 
-      if (pendingChunkRemainder.trim().length > 0 || lastValidByteOffset < totalSize) {
+      if (remainderBuf.length > 0 || lastValidByteOffset < totalSize) {
         await fileHandle.truncate(lastValidByteOffset)
         await fileHandle.sync()
       }
@@ -462,34 +569,45 @@ export class AnnotationJournal {
       let lastValidByteOffset = 0
       let expectedSeq = 1
       let lineNumber = 0
-      let pendingChunkRemainder = ''
-      let pendingRemainderByteOffset = 0
+      let remainderBuf = Buffer.alloc(0)
+      let remainderStartOffset = 0
 
       while (fileOffset < totalSize) {
         const bytesRead = fsSync.readSync(fd, buffer, 0, CHUNK_SIZE, fileOffset)
         if (bytesRead === 0) break
 
-        const chunkStr = buffer.toString('utf8', 0, bytesRead)
-        const combined = pendingChunkRemainder + chunkStr
-        const combinedOffset = pendingChunkRemainder ? pendingRemainderByteOffset : fileOffset
+        const chunkBuf = buffer.subarray(0, bytesRead)
+        const combinedBuf =
+          remainderBuf.length > 0 ? Buffer.concat([remainderBuf, chunkBuf]) : chunkBuf
+        const combinedStartOffset = remainderBuf.length > 0 ? remainderStartOffset : fileOffset
 
         let lineStart = 0
         while (true) {
-          const newlineIdx = combined.indexOf('\n', lineStart)
+          const newlineIdx = combinedBuf.indexOf(0x0a, lineStart)
           if (newlineIdx === -1) {
-            pendingChunkRemainder = combined.slice(lineStart)
-            pendingRemainderByteOffset =
-              combinedOffset + Buffer.byteLength(combined.slice(0, lineStart), 'utf8')
+            remainderBuf = Buffer.from(combinedBuf.subarray(lineStart))
+            remainderStartOffset = combinedStartOffset + lineStart
+            if (remainderBuf.length > MAX_JOURNAL_RECORD_BYTES) {
+              throw new JournalCorruptionError(
+                `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+              )
+            }
             break
           }
 
-          const rawLine = combined.slice(lineStart, newlineIdx)
-          const currentLineEndOffset =
-            combinedOffset + Buffer.byteLength(combined.slice(0, newlineIdx + 1), 'utf8')
+          const lineLength = newlineIdx - lineStart
+          if (lineLength > MAX_JOURNAL_RECORD_BYTES) {
+            throw new JournalCorruptionError(
+              `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+            )
+          }
+
+          const lineBytes = combinedBuf.subarray(lineStart, newlineIdx)
+          const currentLineEndOffset = combinedStartOffset + newlineIdx + 1
           lineStart = newlineIdx + 1
 
-          const trimmed = rawLine.trim()
-          if (!trimmed) {
+          const lineStr = lineBytes.toString('utf8').trim()
+          if (!lineStr) {
             lastValidByteOffset = currentLineEndOffset
             continue
           }
@@ -497,26 +615,18 @@ export class AnnotationJournal {
           lineNumber++
           let parsedObj: unknown
           try {
-            parsedObj = JSON.parse(trimmed)
+            parsedObj = JSON.parse(lineStr)
           } catch {
-            if (currentLineEndOffset < totalSize) {
-              throw new JournalCorruptionError(
-                `Interior corruption detected in review journal at line ${lineNumber}. Refusing automatic repair to prevent data loss.`
-              )
-            } else {
-              break
-            }
+            throw new JournalCorruptionError(
+              `Interior corruption detected in review journal at line ${lineNumber}. Refusing automatic repair to prevent data loss.`
+            )
           }
 
           const parseResult = AnnotationJournalEntrySchema.safeParse(parsedObj)
           if (!parseResult.success) {
-            if (currentLineEndOffset < totalSize) {
-              throw new JournalCorruptionError(
-                `Interior corruption detected in review journal at line ${lineNumber} (schema validation failed). Refusing automatic repair to prevent data loss.`
-              )
-            } else {
-              break
-            }
+            throw new JournalCorruptionError(
+              `Interior corruption detected in review journal at line ${lineNumber} (schema validation failed). Refusing automatic repair to prevent data loss.`
+            )
           }
 
           const entry = parseResult.data
@@ -533,7 +643,7 @@ export class AnnotationJournal {
         fileOffset += bytesRead
       }
 
-      if (pendingChunkRemainder.trim().length > 0 || lastValidByteOffset < totalSize) {
+      if (remainderBuf.length > 0 || lastValidByteOffset < totalSize) {
         fsSync.ftruncateSync(fd, lastValidByteOffset)
         fsSync.fsyncSync(fd)
       }
@@ -544,127 +654,182 @@ export class AnnotationJournal {
     }
   }
 
-  public async readEntries(): Promise<AnnotationJournalEntry[]> {
+  public *iterateEntriesSync(): Generator<AnnotationJournalEntry, void, undefined> {
     this.assertInitialized()
-    const entries: AnnotationJournalEntry[] = []
-    const fileHandle = await fs.open(this.journalPath, 'r')
-    try {
-      const stat = await fileHandle.stat()
-      const totalSize = stat.size
-      if (totalSize === 0) return []
-
-      const CHUNK_SIZE = 64 * 1024
-      const buffer = Buffer.alloc(CHUNK_SIZE)
-      let fileOffset = 0
-      let pendingRemainder = ''
-
-      while (fileOffset < totalSize) {
-        const bytesRead = (await fileHandle.read(buffer, 0, CHUNK_SIZE, fileOffset)).bytesRead
-        if (bytesRead === 0) break
-
-        const chunkStr = buffer.toString('utf8', 0, bytesRead)
-        const combined = pendingRemainder + chunkStr
-
-        let lineStart = 0
-        while (true) {
-          const newlineIdx = combined.indexOf('\n', lineStart)
-          if (newlineIdx === -1) {
-            pendingRemainder = combined.slice(lineStart)
-            break
-          }
-          const rawLine = combined.slice(lineStart, newlineIdx)
-          lineStart = newlineIdx + 1
-          const trimmed = rawLine.trim()
-          if (!trimmed) continue
-          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(trimmed))
-          entries.push(parsed)
-        }
-
-        fileOffset += bytesRead
-      }
-
-      if (pendingRemainder.trim()) {
-        const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(pendingRemainder.trim()))
-        entries.push(parsed)
-      }
-    } finally {
-      await fileHandle.close()
-    }
-
-    return entries
-  }
-
-  public readEntriesSync(): AnnotationJournalEntry[] {
-    this.assertInitialized()
-    const entries: AnnotationJournalEntry[] = []
     const fd = fsSync.openSync(this.journalPath, 'r')
     try {
       const stat = fsSync.fstatSync(fd)
       const totalSize = stat.size
-      if (totalSize === 0) return []
+      if (totalSize === 0) return
 
       const CHUNK_SIZE = 64 * 1024
       const buffer = Buffer.alloc(CHUNK_SIZE)
       let fileOffset = 0
-      let pendingRemainder = ''
+      let remainderBuf = Buffer.alloc(0)
 
       while (fileOffset < totalSize) {
         const bytesRead = fsSync.readSync(fd, buffer, 0, CHUNK_SIZE, fileOffset)
         if (bytesRead === 0) break
 
-        const chunkStr = buffer.toString('utf8', 0, bytesRead)
-        const combined = pendingRemainder + chunkStr
+        const chunkBuf = buffer.subarray(0, bytesRead)
+        const combinedBuf =
+          remainderBuf.length > 0 ? Buffer.concat([remainderBuf, chunkBuf]) : chunkBuf
 
         let lineStart = 0
         while (true) {
-          const newlineIdx = combined.indexOf('\n', lineStart)
+          const newlineIdx = combinedBuf.indexOf(0x0a, lineStart)
           if (newlineIdx === -1) {
-            pendingRemainder = combined.slice(lineStart)
+            remainderBuf = Buffer.from(combinedBuf.subarray(lineStart))
+            if (remainderBuf.length > MAX_JOURNAL_RECORD_BYTES) {
+              throw new JournalCorruptionError(
+                `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+              )
+            }
             break
           }
-          const rawLine = combined.slice(lineStart, newlineIdx)
+
+          const lineLength = newlineIdx - lineStart
+          if (lineLength > MAX_JOURNAL_RECORD_BYTES) {
+            throw new JournalCorruptionError(
+              `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+            )
+          }
+
+          const lineBytes = combinedBuf.subarray(lineStart, newlineIdx)
           lineStart = newlineIdx + 1
-          const trimmed = rawLine.trim()
-          if (!trimmed) continue
-          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(trimmed))
-          entries.push(parsed)
+
+          const lineStr = lineBytes.toString('utf8').trim()
+          if (!lineStr) continue
+
+          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(lineStr))
+          yield parsed
         }
 
         fileOffset += bytesRead
       }
 
-      if (pendingRemainder.trim()) {
-        const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(pendingRemainder.trim()))
-        entries.push(parsed)
+      if (remainderBuf.length > 0) {
+        const lineStr = remainderBuf.toString('utf8').trim()
+        if (lineStr) {
+          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(lineStr))
+          yield parsed
+        }
       }
     } finally {
       fsSync.closeSync(fd)
     }
+  }
 
+  public async *iterateEntries(): AsyncGenerator<AnnotationJournalEntry, void, undefined> {
+    this.assertInitialized()
+    const fileHandle = await fs.open(this.journalPath, 'r')
+    try {
+      const stat = await fileHandle.stat()
+      const totalSize = stat.size
+      if (totalSize === 0) return
+
+      const CHUNK_SIZE = 64 * 1024
+      const buffer = Buffer.alloc(CHUNK_SIZE)
+      let fileOffset = 0
+      let remainderBuf = Buffer.alloc(0)
+
+      while (fileOffset < totalSize) {
+        const bytesRead = (await fileHandle.read(buffer, 0, CHUNK_SIZE, fileOffset)).bytesRead
+        if (bytesRead === 0) break
+
+        const chunkBuf = buffer.subarray(0, bytesRead)
+        const combinedBuf =
+          remainderBuf.length > 0 ? Buffer.concat([remainderBuf, chunkBuf]) : chunkBuf
+
+        let lineStart = 0
+        while (true) {
+          const newlineIdx = combinedBuf.indexOf(0x0a, lineStart)
+          if (newlineIdx === -1) {
+            remainderBuf = Buffer.from(combinedBuf.subarray(lineStart))
+            if (remainderBuf.length > MAX_JOURNAL_RECORD_BYTES) {
+              throw new JournalCorruptionError(
+                `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+              )
+            }
+            break
+          }
+
+          const lineLength = newlineIdx - lineStart
+          if (lineLength > MAX_JOURNAL_RECORD_BYTES) {
+            throw new JournalCorruptionError(
+              `Journal record exceeds maximum record length bound of ${MAX_JOURNAL_RECORD_BYTES} bytes`
+            )
+          }
+
+          const lineBytes = combinedBuf.subarray(lineStart, newlineIdx)
+          lineStart = newlineIdx + 1
+
+          const lineStr = lineBytes.toString('utf8').trim()
+          if (!lineStr) continue
+
+          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(lineStr))
+          yield parsed
+        }
+
+        fileOffset += bytesRead
+      }
+
+      if (remainderBuf.length > 0) {
+        const lineStr = remainderBuf.toString('utf8').trim()
+        if (lineStr) {
+          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(lineStr))
+          yield parsed
+        }
+      }
+    } finally {
+      await fileHandle.close()
+    }
+  }
+
+  public async readEntries(): Promise<AnnotationJournalEntry[]> {
+    const entries: AnnotationJournalEntry[] = []
+    for await (const entry of this.iterateEntries()) {
+      entries.push(entry)
+    }
     return entries
+  }
+
+  public readEntriesSync(): AnnotationJournalEntry[] {
+    return Array.from(this.iterateEntriesSync())
   }
 
   public appendEntrySync(
     buildEntry: (nextSeq: number, timestampMs: number) => AnnotationJournalEntry
   ): AnnotationJournalEntry {
     this.assertInitialized()
+    this.validateContainmentAndSecuritySync()
     const nextSeq = this.latestSeq + 1
     const timestampMs = Date.now()
     const entry = buildEntry(nextSeq, timestampMs)
     const line = JSON.stringify(entry) + '\n'
 
-    if (this.customAppenderSync) {
-      this.customAppenderSync(this.journalPath, line)
-    } else if (this.customAppender) {
-      throw new Error('Async custom appender cannot be executed synchronously')
-    } else {
-      const fd = fsSync.openSync(this.journalPath, 'a')
-      try {
-        fsSync.writeSync(fd, line, null, 'utf8')
-        fsSync.fsyncSync(fd)
-      } finally {
-        fsSync.closeSync(fd)
+    const initialSize = fsSync.statSync(this.journalPath).size
+    try {
+      if (this.customAppenderSync) {
+        this.customAppenderSync(this.journalPath, line)
+      } else if (this.customAppender) {
+        throw new Error('Async custom appender cannot be executed synchronously')
+      } else {
+        const fd = fsSync.openSync(this.journalPath, 'a')
+        try {
+          fsSync.writeSync(fd, line, null, 'utf8')
+          fsSync.fsyncSync(fd)
+        } finally {
+          fsSync.closeSync(fd)
+        }
       }
+    } catch (err) {
+      try {
+        fsSync.truncateSync(this.journalPath, initialSize)
+      } catch {
+        // ignore rollback error
+      }
+      throw err
     }
 
     this.latestSeq = nextSeq
@@ -679,21 +844,33 @@ export class AnnotationJournal {
     return new Promise((resolve, reject) => {
       this.writeLockChain = this.writeLockChain
         .then(async () => {
+          await this.validateContainmentAndSecurityAsync()
           const nextSeq = this.latestSeq + 1
           const timestampMs = Date.now()
           const entry = buildEntry(nextSeq, timestampMs)
           const line = JSON.stringify(entry) + '\n'
 
-          if (this.customAppender) {
-            await this.customAppender(this.journalPath, line)
-          } else {
-            const handle = await fs.open(this.journalPath, 'a')
-            try {
-              await handle.writeFile(line, 'utf8')
-              await handle.sync()
-            } finally {
-              await handle.close()
+          const initialStat = await fs.stat(this.journalPath)
+          const initialSize = initialStat.size
+          try {
+            if (this.customAppender) {
+              await this.customAppender(this.journalPath, line)
+            } else {
+              const handle = await fs.open(this.journalPath, 'a')
+              try {
+                await handle.writeFile(line, 'utf8')
+                await handle.sync()
+              } finally {
+                await handle.close()
+              }
             }
+          } catch (err) {
+            try {
+              await fs.truncate(this.journalPath, initialSize)
+            } catch {
+              // ignore rollback error
+            }
+            throw err
           }
 
           this.latestSeq = nextSeq

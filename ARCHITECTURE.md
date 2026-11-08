@@ -369,11 +369,12 @@ src/
       - `journal_checkpoints`: singleton checkpoint tracking last applied journal sequence and operation id.
     - **Two-Phase Recoverable Protocol & Review Journal**:
       - Stored in app-owned storage (`<userData>/annotations/review-journal.jsonl`) with ownership marker (`.pv_annotations_owner`).
-      - Strict containment: recursive ancestor symlink/junction detection, forbidden overlap checking against source and vault paths, and exclusive marker creation with `wx`.
+      - Strict containment: recursive ancestor symlink/junction detection, dynamic getter overlap validation checking against live source and vault paths before mutations, and exclusive marker creation with `wx`.
       - Append-only JSONL format recording all annotation and collection lifecycle events with full provenance and fsync durability.
       - Two-phase protocol: operations are recorded to the journal, staged and committed in SQLite transactions, then marked `op_committed` in the journal.
-      - Startup reconciliation (`reconcileJournalWithDatabase`): reconciles uncommitted operations across SQLite and journal, appending `op_committed` or `op_aborted` appropriately.
-      - Safe, bounded streaming recovery: 64KB chunk buffer reading, strict sequence validation, interior corruption detection preserving file content, and safe truncation of torn final records at EOF with awaited sync.
+      - Post-COMMIT failure handling: tracks actual commit boundary; never records committed database work as aborted. Returns truthful `persistencePending: true` state on post-commit append failure.
+      - Startup reconciliation (`reconcileJournalWithDatabase`): reconciles uncommitted operations across SQLite and journal via bounded streaming passes and indexed queries on `journal_operations`, appending `op_committed` or `op_aborted` appropriately without accumulating the whole journal in Node heap.
+      - Safe, bounded streaming recovery: 64KB chunk buffer reading with multibyte UTF-8 safety across chunk boundaries, strict sequence validation, bounded record length checking (<= 64 KiB), interior corruption detection preserving file content, and safe truncation restricted strictly to torn final records at EOF without trailing newline.
     - **Concurrency & Rescan Reconciliation**:
       - Annotations and memberships bound to location and content revision: `rev:<discoveryId>:<byteSize>:<mtime>:<hash>`.
       - Unchanged rescan: annotations preserved without version change.
@@ -386,4 +387,6 @@ src/
       - Explicit "Reset filters" action returning directly to unfiltered browsing.
     - **Renderer Review Flow & Selection State**:
       - Selection switch concurrency guard (`selectionGenRef`, `prevSelectedPhotoIdRef`) ensuring rapid photo switching does not leak save state, errors, or filter evictions.
-      - Accessible collection rename controls (`Rename collection {name}`, input `New name for collection {name}`, Save, Cancel).
+      - Current filter refs ensure in-flight saves do not evict photos when user switches filters concurrently.
+      - Bounded pagination windows and in-flight request guards for collection and membership queries.
+      - Accessible collection rename controls (`Rename collection {name}`, input `New name for collection {name}`, Save, Cancel) and explicit membership error banner with retry control.

@@ -463,6 +463,8 @@ export interface CatalogCollectionRecord {
   readonly createdAtMs: number
   readonly updatedAtMs: number
   readonly photoCount?: number
+  readonly persistencePending?: boolean
+  readonly persistenceError?: string
 }
 
 export interface AddCollectionMemberInput {
@@ -504,4 +506,6 @@ export interface CatalogPhotoAnnotationRecord {
   readonly isCurrent: boolean
   readonly createdAtMs: number
   readonly updatedAtMs: number
+  readonly persistencePending?: boolean
+  readonly persistenceError?: string
 }

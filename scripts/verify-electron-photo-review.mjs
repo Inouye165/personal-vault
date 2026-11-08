@@ -1287,13 +1287,21 @@ async function main() {
 
     // Verify worker resource bounds
     const diag = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
-    if (diag && diag.activeWorkers > 4) {
-      throw new Error(
-        `Active thumbnail workers (${diag.activeWorkers}) exceeded max concurrency bound of 4`
-      )
+    if (diag) {
+      const liveWorkers = diag.liveWorkers ?? diag.activeWorkers
+      if (liveWorkers > 2) {
+        throw new Error(
+          `Live thumbnail workers (${liveWorkers}) exceeded max concurrency bound of 2`
+        )
+      }
+      if (diag.queuedJobs > 64) {
+        throw new Error(
+          `Queued thumbnail jobs (${diag.queuedJobs}) exceeded max queue capacity of 64`
+        )
+      }
     }
     pass(
-      'Filtered scale browsing beyond 2,000 photos completed: mounted cells <= 200, zero error cards, active workers bounded'
+      'Filtered scale browsing beyond 2,000 photos completed: mounted cells <= 200, zero error cards, workers and queue bounded'
     )
 
     // 9. Strict Source Preservation Invariance

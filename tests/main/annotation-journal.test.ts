@@ -134,9 +134,9 @@ describe('AnnotationJournal Service (Stage 5B Portable Persistence)', () => {
       normalizedName: 'favorites'
     })
 
-    // Simulate interrupted partial write by appending half a JSON record
+    // Simulate interrupted partial write by appending half a JSON record without newline
     const journalFile = join(tempDir, 'review-journal.jsonl')
-    await fs.appendFile(journalFile, '{"entrySeq": 2, "kind": "photo_annotation", "loc\n', 'utf8')
+    await fs.appendFile(journalFile, '{"entrySeq": 2, "kind": "photo_annotation", "loc', 'utf8')
 
     // Reopen journal on restart
     const restartedJournal = new AnnotationJournal({ storageDir: tempDir })
