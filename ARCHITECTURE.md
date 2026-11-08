@@ -365,18 +365,25 @@ src/
       - `photo_annotations`: tracks `file_location_id`, `discovery_observation_id`, `content_sha256`, `rating`, `flag`, monotonic `version`, and `is_current`.
       - `collections`: stores custom named collections with `name`, `normalized_name` (1–80 chars, trimmed, no control characters, case-insensitive unique constraint).
       - `collection_memberships`: records active memberships (`collection_id`, `file_location_id`, `discovery_observation_id`, `content_sha256`, `is_current`).
-    - **Portable Review Journal**:
+      - `journal_operations`: tracks operation id, entry sequence, operation kind, commit status, and timestamps.
+      - `journal_checkpoints`: singleton checkpoint tracking last applied journal sequence and operation id.
+    - **Two-Phase Recoverable Protocol & Review Journal**:
       - Stored in app-owned storage (`<userData>/annotations/review-journal.jsonl`) with ownership marker (`.pv_annotations_owner`).
+      - Strict containment: recursive ancestor symlink/junction detection, forbidden overlap checking against source and vault paths, and exclusive marker creation with `wx`.
       - Append-only JSONL format recording all annotation and collection lifecycle events with full provenance and fsync durability.
-      - Crash recovery: truncates trailing malformed/interrupted lines upon startup.
-      - Atomicity: synchronous SQLite transactions and journal appends execute together in try/catch blocks; if journal write fails (`ENOSPC`), SQLite transaction rolls back completely.
+      - Two-phase protocol: operations are recorded to the journal, staged and committed in SQLite transactions, then marked `op_committed` in the journal.
+      - Startup reconciliation (`reconcileJournalWithDatabase`): reconciles uncommitted operations across SQLite and journal, appending `op_committed` or `op_aborted` appropriately.
+      - Safe, bounded streaming recovery: 64KB chunk buffer reading, strict sequence validation, interior corruption detection preserving file content, and safe truncation of torn final records at EOF with awaited sync.
     - **Concurrency & Rescan Reconciliation**:
-      - Annotations bound to location and content revision: `rev:<discoveryId>:<byteSize>:<mtime>:<hash>`.
+      - Annotations and memberships bound to location and content revision: `rev:<discoveryId>:<byteSize>:<mtime>:<hash>`.
       - Unchanged rescan: annotations preserved without version change.
       - Touched without change: verified content SHA-256 match preserves active annotation across discovery observations.
-      - Changed content: invalidated active annotation presents photo as unreviewed, while preserving historical records.
-      - Optimistic concurrency: `setPhotoAnnotation` verifies expected revision string and expected version; stale requests reject atomically with conflict errors.
+      - Changed content: invalidated active annotation and memberships present photo as unreviewed, while preserving historical records.
+      - Optimistic concurrency: `setPhotoAnnotation`, `addCollectionMember`, and `removeCollectionMember` verify expected revision string and expected version; stale requests reject atomically with conflict errors.
     - **Pure SQL Filtering & Grid Refill**:
       - Rating filter (`all`, `unrated`, `1`..`5` stars), Flag filter (`all`, `none`, `pick`, `reject`), and Collection filter combined with `AND` in SQL before pagination.
       - Out-of-filter edit handling: editing rating or flag under an active filter immediately updates the item, smoothly removes it from the filtered view, clears/updates selection, and refills the page from the next matching database record so the grid remains full.
       - Explicit "Reset filters" action returning directly to unfiltered browsing.
+    - **Renderer Review Flow & Selection State**:
+      - Selection switch concurrency guard (`selectionGenRef`, `prevSelectedPhotoIdRef`) ensuring rapid photo switching does not leak save state, errors, or filter evictions.
+      - Accessible collection rename controls (`Rename collection {name}`, input `New name for collection {name}`, Save, Cancel).

@@ -19,7 +19,8 @@ import {
   Check,
   Ban,
   Plus,
-  FolderPlus
+  FolderPlus,
+  Edit2
 } from 'lucide-react'
 import { usePhotos, PHOTO_BOUNDS } from '../hooks/usePhotos'
 import { usePhotoReview } from '../hooks/usePhotoReview'
@@ -181,12 +182,18 @@ export function PhotosPanel() {
 
   const {
     collections,
+    hasMoreCollections,
+    loadMoreCollections,
     memberships,
+    hasMoreMemberships,
+    loadMoreMemberships,
+    isLoadingMemberships,
     saveStatus,
     statusMessage,
     setRating,
     setFlag,
     createCollection,
+    renameCollection,
     addCollectionMember,
     removeCollectionMember
   } = usePhotoReview({
@@ -199,7 +206,8 @@ export function PhotosPanel() {
   })
 
   const [newCollectionName, setNewCollectionName] = useState('')
-  const [selectedCollectionToAdd, setSelectedCollectionToAdd] = useState<string>('')
+  const [renamingCollectionId, setRenamingCollectionId] = useState<number | null>(null)
+  const [renameInputValue, setRenameInputValue] = useState('')
   const [collectionActionError, setCollectionActionError] = useState<string | null>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -314,20 +322,8 @@ export function PhotosPanel() {
     }
   }
 
-  const handleAddMember = async () => {
-    if (!selectedCollectionToAdd) return
-    setCollectionActionError(null)
-    try {
-      await addCollectionMember(Number(selectedCollectionToAdd))
-      setSelectedCollectionToAdd('')
-    } catch (err: unknown) {
-      setCollectionActionError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  // Filter collections to those that selected photo is NOT yet a member of
+  // Track collection IDs photo belongs to
   const membershipCollectionIds = new Set(memberships.map((m) => m.collectionId))
-  const unjoinedCollections = collections.filter((c) => !membershipCollectionIds.has(c.id))
 
   return (
     <div className="photos-layout">
@@ -585,6 +581,18 @@ export function PhotosPanel() {
             <div className="details-section review-section">
               <h4>Review & Organize</h4>
 
+              {saveStatus === 'saving' && (
+                <div className="status-saving-indicator" role="status">
+                  <span>Saving...</span>
+                </div>
+              )}
+
+              {saveStatus === 'saved' && (
+                <div className="status-saved-indicator" role="status">
+                  <span>Saved</span>
+                </div>
+              )}
+
               {saveStatus === 'conflict' && (
                 <div className="notice notice-error" role="alert">
                   <AlertTriangle size={16} />
@@ -676,7 +684,9 @@ export function PhotosPanel() {
               <div className="review-control-row collections-row">
                 <span className="control-label">Collections:</span>
                 <div className="collections-management">
-                  {memberships.length > 0 ? (
+                  {isLoadingMemberships ? (
+                    <span className="sub-text loading-memberships">Loading memberships…</span>
+                  ) : memberships.length > 0 ? (
                     <div className="memberships-list">
                       {memberships.map((m) => (
                         <span key={m.id} className="membership-tag">
@@ -692,38 +702,121 @@ export function PhotosPanel() {
                           </button>
                         </span>
                       ))}
+                      {hasMoreMemberships && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-xs load-more-btn"
+                          aria-label="Load more memberships"
+                          onClick={loadMoreMemberships}
+                        >
+                          Load more memberships
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <span className="sub-text no-memberships">Not in any collection</span>
                   )}
 
-                  {/* Add to existing collection */}
-                  {unjoinedCollections.length > 0 && (
-                    <div className="add-membership-group">
-                      <select
-                        aria-label="Add to collection"
-                        className="select-collection"
-                        value={selectedCollectionToAdd}
-                        onChange={(e) => setSelectedCollectionToAdd(e.target.value)}
-                      >
-                        <option value="">Select collection…</option>
-                        {unjoinedCollections.map((col) => (
-                          <option key={col.id} value={String(col.id)}>
-                            {col.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-xs"
-                        disabled={!selectedCollectionToAdd}
-                        onClick={handleAddMember}
-                      >
-                        <Plus size={12} />
-                        <span>Add</span>
-                      </button>
-                    </div>
-                  )}
+                  {/* Add to existing collection & Rename controls */}
+                  <div className="collections-action-container">
+                    {collections.length > 0 && (
+                      <div className="collections-list-panel">
+                        {collections.map((col) => {
+                          const isMember = membershipCollectionIds.has(col.id)
+                          const isRenaming = renamingCollectionId === col.id
+
+                          if (isRenaming) {
+                            return (
+                              <form
+                                key={col.id}
+                                className="rename-collection-form"
+                                onSubmit={async (e) => {
+                                  e.preventDefault()
+                                  if (!renameInputValue.trim()) return
+                                  setCollectionActionError(null)
+                                  try {
+                                    await renameCollection(col.id, renameInputValue.trim())
+                                    setRenamingCollectionId(null)
+                                  } catch (err: unknown) {
+                                    setCollectionActionError(
+                                      err instanceof Error ? err.message : String(err)
+                                    )
+                                  }
+                                }}
+                              >
+                                <input
+                                  type="text"
+                                  className="input-collection-name"
+                                  aria-label={`New name for collection ${col.name}`}
+                                  value={renameInputValue}
+                                  onChange={(e) => setRenameInputValue(e.target.value)}
+                                  maxLength={80}
+                                  autoFocus
+                                />
+                                <button
+                                  type="submit"
+                                  className="btn btn-primary btn-xs"
+                                  aria-label="Save collection name"
+                                  disabled={!renameInputValue.trim()}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary btn-xs"
+                                  aria-label="Cancel rename"
+                                  onClick={() => setRenamingCollectionId(null)}
+                                >
+                                  Cancel
+                                </button>
+                              </form>
+                            )
+                          }
+
+                          return (
+                            <div key={col.id} className="collection-item-row">
+                              <span className="collection-item-name">{col.name}</span>
+                              <div className="collection-item-actions">
+                                {!isMember && (
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary btn-xs"
+                                    aria-label={`Add to ${col.name}`}
+                                    onClick={() => void addCollectionMember(col.id)}
+                                  >
+                                    <Plus size={12} />
+                                    <span>Add to {col.name}</span>
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-icon"
+                                  aria-label={`Rename collection ${col.name}`}
+                                  title={`Rename collection ${col.name}`}
+                                  onClick={() => {
+                                    setRenamingCollectionId(col.id)
+                                    setRenameInputValue(col.name)
+                                  }}
+                                >
+                                  <Edit2 size={12} />
+                                </button>
+                              </div>
+                            </div>
+                          )
+                        })}
+                        {hasMoreCollections && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-xs load-more-btn"
+                            aria-label="Load more collections"
+                            onClick={loadMoreCollections}
+                          >
+                            Load more collections
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   {/* Create new collection */}
                   <form onSubmit={handleCreateCollection} className="create-collection-form">

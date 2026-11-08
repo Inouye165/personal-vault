@@ -267,10 +267,12 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
     // Remove from collection
     fireEvent.click(screen.getByRole('button', { name: /Remove from Vacation/i }))
     await waitFor(() => {
-      expect(mockRemoveCollectionMember).toHaveBeenCalledWith({
-        collectionId: 1,
-        fileLocationId: 101
-      })
+      expect(mockRemoveCollectionMember).toHaveBeenCalledWith(
+        expect.objectContaining({
+          collectionId: 1,
+          fileLocationId: 101
+        })
+      )
     })
   })
 

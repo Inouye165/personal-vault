@@ -8,26 +8,53 @@
  * - O(1) bounded writes per user decision (no whole-catalog rewrites).
  * - Full identity and provenance (normalized path, size, mtime, hash, revision, annotation version).
  * - Serialized atomic appends with sync-to-disk before acknowledgment.
- * - Safe crash recovery: truncates malformed trailing partial lines on restart.
+ * - Safe crash recovery: truncates malformed trailing partial lines on restart while preserving interior lines.
+ * - Robust path containment and symlink/junction rejection.
  * - Truthful error reporting on write failure without advancing sequence state.
+ * - Two-phase recoverable operation/commit protocol (prepared operation -> SQLite commit -> op_committed / op_aborted).
  */
 
+import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import * as fsSync from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, normalize, resolve, sep } from 'node:path'
 import {
   AnnotationJournalEntrySchema,
+  CURRENT_JOURNAL_FORMAT_VERSION,
   type AnnotationJournalEntry
 } from '../../../shared/validation/ipc-schemas'
 
+export class JournalOwnershipError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'JournalOwnershipError'
+  }
+}
+
+export class JournalSecurityError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'JournalSecurityError'
+  }
+}
+
+export class JournalCorruptionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'JournalCorruptionError'
+  }
+}
+
 export interface AnnotationJournalOptions {
   readonly storageDir: string
+  readonly forbiddenOverlapPaths?: string[]
   readonly customAppender?: (filePath: string, line: string) => Promise<void>
   readonly customAppenderSync?: (filePath: string, line: string) => void
 }
 
 export class AnnotationJournal {
   private readonly storageDir: string
+  private readonly forbiddenOverlapPaths: string[]
   private readonly ownerMarkerPath: string
   private readonly journalPath: string
   private readonly customAppender?: (filePath: string, line: string) => Promise<void>
@@ -38,7 +65,10 @@ export class AnnotationJournal {
   private isInitialized = false
 
   constructor(options: AnnotationJournalOptions) {
-    this.storageDir = options.storageDir
+    this.storageDir = resolve(normalize(options.storageDir))
+    this.forbiddenOverlapPaths = (options.forbiddenOverlapPaths ?? []).map((p) =>
+      resolve(normalize(p))
+    )
     this.ownerMarkerPath = join(this.storageDir, '.pv_annotations_owner')
     this.journalPath = join(this.storageDir, 'review-journal.jsonl')
     this.customAppender = options.customAppender
@@ -58,35 +88,76 @@ export class AnnotationJournal {
   }
 
   public async initialize(): Promise<void> {
+    await this.validateContainmentAndSecurityAsync()
+
     await fs.mkdir(this.storageDir, { recursive: true })
 
-    // 1. Establish ownership marker if missing
+    // 1. Establish or validate ownership marker
+    let markerExists = false
     try {
-      await fs.stat(this.ownerMarkerPath)
-    } catch {
-      await fs.writeFile(
-        this.ownerMarkerPath,
-        JSON.stringify({
-          app: 'personal-vault',
-          format: 'personal-vault-review-journal',
-          version: '1.0.0',
-          createdAtMs: Date.now()
-        }),
-        'utf8'
-      )
+      const stat = await fs.lstat(this.ownerMarkerPath)
+      if (stat.isSymbolicLink()) {
+        throw new JournalSecurityError('Ownership marker cannot be a symbolic link')
+      }
+      markerExists = true
+    } catch (err: unknown) {
+      if (err instanceof JournalSecurityError) throw err
+    }
+
+    if (markerExists) {
+      await this.validateMarkerContentAsync()
+    } else {
+      // If journal already exists without ownership marker, refuse to adopt foreign file
+      const journalExists = await fs
+        .stat(this.journalPath)
+        .then(() => true)
+        .catch(() => false)
+      if (journalExists) {
+        throw new JournalOwnershipError(
+          'Found existing journal file without valid ownership marker'
+        )
+      }
+
+      try {
+        await fs.writeFile(
+          this.ownerMarkerPath,
+          JSON.stringify(
+            {
+              app: 'personal-vault',
+              format: 'personal-vault-review-journal',
+              version: '1.0.0',
+              createdAtMs: Date.now()
+            },
+            null,
+            2
+          ),
+          { flag: 'wx', encoding: 'utf8' }
+        )
+      } catch (err: unknown) {
+        throw new JournalOwnershipError(`Failed to create ownership marker exclusively: ${err}`)
+      }
     }
 
     // 2. Ensure journal file exists and recover from partial writes
+    let journalExists = false
     try {
-      await fs.stat(this.journalPath)
+      const stat = await fs.lstat(this.journalPath)
+      if (stat.isSymbolicLink()) {
+        throw new JournalSecurityError('Journal file cannot be a symbolic link')
+      }
+      journalExists = true
     } catch {
-      await fs.writeFile(this.journalPath, '', 'utf8')
+      // journal does not exist yet
+    }
+
+    if (!journalExists) {
+      await fs.writeFile(this.journalPath, '', { flag: 'wx', encoding: 'utf8' })
       this.latestSeq = 0
       this.isInitialized = true
       return
     }
 
-    await this.recoverAndReconcile()
+    await this.recoverAndReconcileAsync()
     this.isInitialized = true
   }
 
@@ -94,27 +165,70 @@ export class AnnotationJournal {
    * Synchronous initialization for synchronous catalog startup.
    */
   public initializeSync(): void {
+    this.validateContainmentAndSecuritySync()
+
     fsSync.mkdirSync(this.storageDir, { recursive: true })
 
+    let markerExists = false
     try {
-      fsSync.statSync(this.ownerMarkerPath)
-    } catch {
-      fsSync.writeFileSync(
-        this.ownerMarkerPath,
-        JSON.stringify({
-          app: 'personal-vault',
-          format: 'personal-vault-review-journal',
-          version: '1.0.0',
-          createdAtMs: Date.now()
-        }),
-        'utf8'
-      )
+      const stat = fsSync.lstatSync(this.ownerMarkerPath)
+      if (stat.isSymbolicLink()) {
+        throw new JournalSecurityError('Ownership marker cannot be a symbolic link')
+      }
+      markerExists = true
+    } catch (err: unknown) {
+      if (err instanceof JournalSecurityError) throw err
     }
 
+    if (markerExists) {
+      this.validateMarkerContentSync()
+    } else {
+      let journalExists = false
+      try {
+        fsSync.statSync(this.journalPath)
+        journalExists = true
+      } catch {
+        // journal does not exist yet
+      }
+      if (journalExists) {
+        throw new JournalOwnershipError(
+          'Found existing journal file without valid ownership marker'
+        )
+      }
+
+      try {
+        fsSync.writeFileSync(
+          this.ownerMarkerPath,
+          JSON.stringify(
+            {
+              app: 'personal-vault',
+              format: 'personal-vault-review-journal',
+              version: '1.0.0',
+              createdAtMs: Date.now()
+            },
+            null,
+            2
+          ),
+          { flag: 'wx', encoding: 'utf8' }
+        )
+      } catch (err: unknown) {
+        throw new JournalOwnershipError(`Failed to create ownership marker exclusively: ${err}`)
+      }
+    }
+
+    let journalExists = false
     try {
-      fsSync.statSync(this.journalPath)
+      const stat = fsSync.lstatSync(this.journalPath)
+      if (stat.isSymbolicLink()) {
+        throw new JournalSecurityError('Journal file cannot be a symbolic link')
+      }
+      journalExists = true
     } catch {
-      fsSync.writeFileSync(this.journalPath, '', 'utf8')
+      // journal does not exist yet
+    }
+
+    if (!journalExists) {
+      fsSync.writeFileSync(this.journalPath, '', { flag: 'wx', encoding: 'utf8' })
       this.latestSeq = 0
       this.isInitialized = true
       return
@@ -124,72 +238,357 @@ export class AnnotationJournal {
     this.isInitialized = true
   }
 
+  private validateContainmentAndSecuritySync(): void {
+    let curr = this.storageDir
+    while (true) {
+      try {
+        const stat = fsSync.lstatSync(curr)
+        if (stat.isSymbolicLink()) {
+          throw new JournalSecurityError(
+            `Symbolic link or junction detected in storage path: ${curr}`
+          )
+        }
+      } catch (err: unknown) {
+        if (err instanceof JournalSecurityError) throw err
+      }
+      const parent = dirname(curr)
+      if (parent === curr) break
+      curr = parent
+    }
+
+    const storageNormalized = this.storageDir.toLowerCase()
+    for (const forbidden of this.forbiddenOverlapPaths) {
+      const forbiddenNormalized = forbidden.toLowerCase()
+      if (
+        storageNormalized === forbiddenNormalized ||
+        storageNormalized.startsWith(forbiddenNormalized + sep) ||
+        forbiddenNormalized.startsWith(storageNormalized + sep)
+      ) {
+        throw new JournalSecurityError(
+          `Journal storage directory overlaps with forbidden path: ${forbidden}`
+        )
+      }
+    }
+  }
+
+  private async validateContainmentAndSecurityAsync(): Promise<void> {
+    let curr = this.storageDir
+    while (true) {
+      try {
+        const stat = await fs.lstat(curr)
+        if (stat.isSymbolicLink()) {
+          throw new JournalSecurityError(
+            `Symbolic link or junction detected in storage path: ${curr}`
+          )
+        }
+      } catch (err: unknown) {
+        if (err instanceof JournalSecurityError) throw err
+      }
+      const parent = dirname(curr)
+      if (parent === curr) break
+      curr = parent
+    }
+
+    const storageNormalized = this.storageDir.toLowerCase()
+    for (const forbidden of this.forbiddenOverlapPaths) {
+      const forbiddenNormalized = forbidden.toLowerCase()
+      if (
+        storageNormalized === forbiddenNormalized ||
+        storageNormalized.startsWith(forbiddenNormalized + sep) ||
+        forbiddenNormalized.startsWith(storageNormalized + sep)
+      ) {
+        throw new JournalSecurityError(
+          `Journal storage directory overlaps with forbidden path: ${forbidden}`
+        )
+      }
+    }
+  }
+
+  private validateMarkerContentSync(): void {
+    const raw = fsSync.readFileSync(this.ownerMarkerPath, 'utf8')
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new JournalOwnershipError('Invalid JSON in ownership marker')
+    }
+
+    if (
+      parsed.app !== 'personal-vault' ||
+      parsed.format !== 'personal-vault-review-journal' ||
+      parsed.version !== '1.0.0' ||
+      typeof parsed.createdAtMs !== 'number'
+    ) {
+      throw new JournalOwnershipError('Foreign or conflicting ownership marker detected')
+    }
+  }
+
+  private async validateMarkerContentAsync(): Promise<void> {
+    const raw = await fs.readFile(this.ownerMarkerPath, 'utf8')
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new JournalOwnershipError('Invalid JSON in ownership marker')
+    }
+
+    if (
+      parsed.app !== 'personal-vault' ||
+      parsed.format !== 'personal-vault-review-journal' ||
+      parsed.version !== '1.0.0' ||
+      typeof parsed.createdAtMs !== 'number'
+    ) {
+      throw new JournalOwnershipError('Foreign or conflicting ownership marker detected')
+    }
+  }
+
   /**
-   * Reads existing lines, validates each with Zod, and truncates trailing malformed
-   * lines resulting from mid-flight crashes or power cuts.
+   * Bounded streaming recovery:
+   * Reads the journal in bounded chunks (64KB), parses lines, validates sequence ordering,
+   * detects interior corruption without discarding evidence, and truncates ONLY an incomplete
+   * final record at EOF.
    */
-  private async recoverAndReconcile(): Promise<void> {
-    const raw = await fs.readFile(this.journalPath, 'utf8')
-    this.reconcileRawContent(raw, (clean) => fs.writeFile(this.journalPath, clean, 'utf8'))
+  private async recoverAndReconcileAsync(): Promise<void> {
+    const fileHandle = await fs.open(this.journalPath, 'r+')
+    try {
+      const stat = await fileHandle.stat()
+      const totalSize = stat.size
+      if (totalSize === 0) {
+        this.latestSeq = 0
+        return
+      }
+
+      const CHUNK_SIZE = 64 * 1024
+      const buffer = Buffer.alloc(CHUNK_SIZE)
+      let fileOffset = 0
+      let lastValidByteOffset = 0
+      let expectedSeq = 1
+      let lineNumber = 0
+      let pendingChunkRemainder = ''
+      let pendingRemainderByteOffset = 0
+
+      while (fileOffset < totalSize) {
+        const bytesRead = (await fileHandle.read(buffer, 0, CHUNK_SIZE, fileOffset)).bytesRead
+        if (bytesRead === 0) break
+
+        const chunkStr = buffer.toString('utf8', 0, bytesRead)
+        const combined = pendingChunkRemainder + chunkStr
+        const combinedOffset = pendingChunkRemainder ? pendingRemainderByteOffset : fileOffset
+
+        let lineStart = 0
+        while (true) {
+          const newlineIdx = combined.indexOf('\n', lineStart)
+          if (newlineIdx === -1) {
+            pendingChunkRemainder = combined.slice(lineStart)
+            pendingRemainderByteOffset =
+              combinedOffset + Buffer.byteLength(combined.slice(0, lineStart), 'utf8')
+            break
+          }
+
+          const rawLine = combined.slice(lineStart, newlineIdx)
+          const currentLineEndOffset =
+            combinedOffset + Buffer.byteLength(combined.slice(0, newlineIdx + 1), 'utf8')
+          lineStart = newlineIdx + 1
+
+          const trimmed = rawLine.trim()
+          if (!trimmed) {
+            lastValidByteOffset = currentLineEndOffset
+            continue
+          }
+
+          lineNumber++
+          let parsedObj: unknown
+          try {
+            parsedObj = JSON.parse(trimmed)
+          } catch {
+            if (currentLineEndOffset < totalSize) {
+              throw new JournalCorruptionError(
+                `Interior corruption detected in review journal at line ${lineNumber}. Refusing automatic repair to prevent data loss.`
+              )
+            } else {
+              break
+            }
+          }
+
+          const parseResult = AnnotationJournalEntrySchema.safeParse(parsedObj)
+          if (!parseResult.success) {
+            if (currentLineEndOffset < totalSize) {
+              throw new JournalCorruptionError(
+                `Interior corruption detected in review journal at line ${lineNumber} (schema validation failed). Refusing automatic repair to prevent data loss.`
+              )
+            } else {
+              break
+            }
+          }
+
+          const entry = parseResult.data
+          if (entry.entrySeq !== expectedSeq) {
+            throw new JournalCorruptionError(
+              `Sequence disorder detected in review journal at line ${lineNumber} (expected ${expectedSeq}, got ${entry.entrySeq}).`
+            )
+          }
+
+          expectedSeq++
+          lastValidByteOffset = currentLineEndOffset
+        }
+
+        fileOffset += bytesRead
+      }
+
+      if (pendingChunkRemainder.trim().length > 0 || lastValidByteOffset < totalSize) {
+        await fileHandle.truncate(lastValidByteOffset)
+        await fileHandle.sync()
+      }
+
+      this.latestSeq = expectedSeq - 1
+    } finally {
+      await fileHandle.close()
+    }
   }
 
   private recoverAndReconcileSync(): void {
-    const raw = fsSync.readFileSync(this.journalPath, 'utf8')
-    this.reconcileRawContent(raw, (clean) => fsSync.writeFileSync(this.journalPath, clean, 'utf8'))
-  }
-
-  private reconcileRawContent(
-    raw: string,
-    writeFn: (content: string) => Promise<void> | void
-  ): void {
-    if (raw.length === 0) {
-      this.latestSeq = 0
-      return
-    }
-
-    const lines = raw.split(/\r?\n/)
-    const validLines: string[] = []
-    let maxSeq = 0
-    let hadCorruptTail = false
-
-    for (let i = 0; i < lines.length; i++) {
-      const rawLine = lines[i]
-      if (rawLine === undefined) continue
-      const line = rawLine.trim()
-      if (!line) continue
-
-      try {
-        const obj = JSON.parse(line)
-        const parsed = AnnotationJournalEntrySchema.parse(obj)
-        validLines.push(JSON.stringify(parsed))
-        if (parsed.entrySeq > maxSeq) {
-          maxSeq = parsed.entrySeq
-        }
-      } catch {
-        hadCorruptTail = true
-        break
+    const fd = fsSync.openSync(this.journalPath, 'r+')
+    try {
+      const stat = fsSync.fstatSync(fd)
+      const totalSize = stat.size
+      if (totalSize === 0) {
+        this.latestSeq = 0
+        return
       }
-    }
 
-    if (hadCorruptTail) {
-      const repairedContent = validLines.length > 0 ? validLines.join('\n') + '\n' : ''
-      void writeFn(repairedContent)
-    }
+      const CHUNK_SIZE = 64 * 1024
+      const buffer = Buffer.alloc(CHUNK_SIZE)
+      let fileOffset = 0
+      let lastValidByteOffset = 0
+      let expectedSeq = 1
+      let lineNumber = 0
+      let pendingChunkRemainder = ''
+      let pendingRemainderByteOffset = 0
 
-    this.latestSeq = maxSeq
+      while (fileOffset < totalSize) {
+        const bytesRead = fsSync.readSync(fd, buffer, 0, CHUNK_SIZE, fileOffset)
+        if (bytesRead === 0) break
+
+        const chunkStr = buffer.toString('utf8', 0, bytesRead)
+        const combined = pendingChunkRemainder + chunkStr
+        const combinedOffset = pendingChunkRemainder ? pendingRemainderByteOffset : fileOffset
+
+        let lineStart = 0
+        while (true) {
+          const newlineIdx = combined.indexOf('\n', lineStart)
+          if (newlineIdx === -1) {
+            pendingChunkRemainder = combined.slice(lineStart)
+            pendingRemainderByteOffset =
+              combinedOffset + Buffer.byteLength(combined.slice(0, lineStart), 'utf8')
+            break
+          }
+
+          const rawLine = combined.slice(lineStart, newlineIdx)
+          const currentLineEndOffset =
+            combinedOffset + Buffer.byteLength(combined.slice(0, newlineIdx + 1), 'utf8')
+          lineStart = newlineIdx + 1
+
+          const trimmed = rawLine.trim()
+          if (!trimmed) {
+            lastValidByteOffset = currentLineEndOffset
+            continue
+          }
+
+          lineNumber++
+          let parsedObj: unknown
+          try {
+            parsedObj = JSON.parse(trimmed)
+          } catch {
+            if (currentLineEndOffset < totalSize) {
+              throw new JournalCorruptionError(
+                `Interior corruption detected in review journal at line ${lineNumber}. Refusing automatic repair to prevent data loss.`
+              )
+            } else {
+              break
+            }
+          }
+
+          const parseResult = AnnotationJournalEntrySchema.safeParse(parsedObj)
+          if (!parseResult.success) {
+            if (currentLineEndOffset < totalSize) {
+              throw new JournalCorruptionError(
+                `Interior corruption detected in review journal at line ${lineNumber} (schema validation failed). Refusing automatic repair to prevent data loss.`
+              )
+            } else {
+              break
+            }
+          }
+
+          const entry = parseResult.data
+          if (entry.entrySeq !== expectedSeq) {
+            throw new JournalCorruptionError(
+              `Sequence disorder detected in review journal at line ${lineNumber} (expected ${expectedSeq}, got ${entry.entrySeq}).`
+            )
+          }
+
+          expectedSeq++
+          lastValidByteOffset = currentLineEndOffset
+        }
+
+        fileOffset += bytesRead
+      }
+
+      if (pendingChunkRemainder.trim().length > 0 || lastValidByteOffset < totalSize) {
+        fsSync.ftruncateSync(fd, lastValidByteOffset)
+        fsSync.fsyncSync(fd)
+      }
+
+      this.latestSeq = expectedSeq - 1
+    } finally {
+      fsSync.closeSync(fd)
+    }
   }
 
   public async readEntries(): Promise<AnnotationJournalEntry[]> {
     this.assertInitialized()
-    const raw = await fs.readFile(this.journalPath, 'utf8')
-    const lines = raw.split(/\r?\n/)
     const entries: AnnotationJournalEntry[] = []
+    const fileHandle = await fs.open(this.journalPath, 'r')
+    try {
+      const stat = await fileHandle.stat()
+      const totalSize = stat.size
+      if (totalSize === 0) return []
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(trimmed))
-      entries.push(parsed)
+      const CHUNK_SIZE = 64 * 1024
+      const buffer = Buffer.alloc(CHUNK_SIZE)
+      let fileOffset = 0
+      let pendingRemainder = ''
+
+      while (fileOffset < totalSize) {
+        const bytesRead = (await fileHandle.read(buffer, 0, CHUNK_SIZE, fileOffset)).bytesRead
+        if (bytesRead === 0) break
+
+        const chunkStr = buffer.toString('utf8', 0, bytesRead)
+        const combined = pendingRemainder + chunkStr
+
+        let lineStart = 0
+        while (true) {
+          const newlineIdx = combined.indexOf('\n', lineStart)
+          if (newlineIdx === -1) {
+            pendingRemainder = combined.slice(lineStart)
+            break
+          }
+          const rawLine = combined.slice(lineStart, newlineIdx)
+          lineStart = newlineIdx + 1
+          const trimmed = rawLine.trim()
+          if (!trimmed) continue
+          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(trimmed))
+          entries.push(parsed)
+        }
+
+        fileOffset += bytesRead
+      }
+
+      if (pendingRemainder.trim()) {
+        const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(pendingRemainder.trim()))
+        entries.push(parsed)
+      }
+    } finally {
+      await fileHandle.close()
     }
 
     return entries
@@ -197,15 +596,49 @@ export class AnnotationJournal {
 
   public readEntriesSync(): AnnotationJournalEntry[] {
     this.assertInitialized()
-    const raw = fsSync.readFileSync(this.journalPath, 'utf8')
-    const lines = raw.split(/\r?\n/)
     const entries: AnnotationJournalEntry[] = []
+    const fd = fsSync.openSync(this.journalPath, 'r')
+    try {
+      const stat = fsSync.fstatSync(fd)
+      const totalSize = stat.size
+      if (totalSize === 0) return []
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(trimmed))
-      entries.push(parsed)
+      const CHUNK_SIZE = 64 * 1024
+      const buffer = Buffer.alloc(CHUNK_SIZE)
+      let fileOffset = 0
+      let pendingRemainder = ''
+
+      while (fileOffset < totalSize) {
+        const bytesRead = fsSync.readSync(fd, buffer, 0, CHUNK_SIZE, fileOffset)
+        if (bytesRead === 0) break
+
+        const chunkStr = buffer.toString('utf8', 0, bytesRead)
+        const combined = pendingRemainder + chunkStr
+
+        let lineStart = 0
+        while (true) {
+          const newlineIdx = combined.indexOf('\n', lineStart)
+          if (newlineIdx === -1) {
+            pendingRemainder = combined.slice(lineStart)
+            break
+          }
+          const rawLine = combined.slice(lineStart, newlineIdx)
+          lineStart = newlineIdx + 1
+          const trimmed = rawLine.trim()
+          if (!trimmed) continue
+          const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(trimmed))
+          entries.push(parsed)
+        }
+
+        fileOffset += bytesRead
+      }
+
+      if (pendingRemainder.trim()) {
+        const parsed = AnnotationJournalEntrySchema.parse(JSON.parse(pendingRemainder.trim()))
+        entries.push(parsed)
+      }
+    } finally {
+      fsSync.closeSync(fd)
     }
 
     return entries
@@ -223,7 +656,6 @@ export class AnnotationJournal {
     if (this.customAppenderSync) {
       this.customAppenderSync(this.journalPath, line)
     } else if (this.customAppender) {
-      // If only async appender provided in sync context, execute directly
       throw new Error('Async custom appender cannot be executed synchronously')
     } else {
       const fd = fsSync.openSync(this.journalPath, 'a')
@@ -254,12 +686,10 @@ export class AnnotationJournal {
 
           if (this.customAppender) {
             await this.customAppender(this.journalPath, line)
-          } else if (this.customAppenderSync) {
-            this.customAppenderSync(this.journalPath, line)
           } else {
             const handle = await fs.open(this.journalPath, 'a')
             try {
-              await handle.write(line, null, 'utf8')
+              await handle.writeFile(line, 'utf8')
               await handle.sync()
             } finally {
               await handle.close()
@@ -273,7 +703,10 @@ export class AnnotationJournal {
     })
   }
 
-  public async appendPhotoAnnotation(data: {
+  // --- Convenience Appenders with opId Support ---
+
+  public async appendPhotoAnnotation(params: {
+    opId?: string
     locationId: number
     normalizedPath: string
     originalPath: string
@@ -286,25 +719,19 @@ export class AnnotationJournal {
     rating: number | null
     flag: 'none' | 'pick' | 'reject'
   }): Promise<AnnotationJournalEntry> {
-    return this.appendEntry((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'photo_annotation',
-      locationId: data.locationId,
-      normalizedPath: data.normalizedPath,
-      originalPath: data.originalPath,
-      byteSize: data.byteSize,
-      filesystemMtimeMs: data.filesystemMtimeMs,
-      activeHash: data.activeHash,
-      discoveryObservationId: data.discoveryObservationId,
-      expectedRevision: data.expectedRevision,
-      version: data.version,
-      rating: data.rating,
-      flag: data.flag
+      ...params
     }))
   }
 
-  public appendPhotoAnnotationSync(data: {
+  public appendPhotoAnnotationSync(params: {
+    opId?: string
     locationId: number
     normalizedPath: string
     originalPath: string
@@ -317,171 +744,232 @@ export class AnnotationJournal {
     rating: number | null
     flag: 'none' | 'pick' | 'reject'
   }): AnnotationJournalEntry {
-    return this.appendEntrySync((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'photo_annotation',
-      locationId: data.locationId,
-      normalizedPath: data.normalizedPath,
-      originalPath: data.originalPath,
-      byteSize: data.byteSize,
-      filesystemMtimeMs: data.filesystemMtimeMs,
-      activeHash: data.activeHash,
-      discoveryObservationId: data.discoveryObservationId,
-      expectedRevision: data.expectedRevision,
-      version: data.version,
-      rating: data.rating,
-      flag: data.flag
+      ...params
     }))
   }
 
-  public async appendCollectionCreated(data: {
+  public async appendCollectionCreated(params: {
+    opId?: string
     collectionId: number
     name: string
     normalizedName: string
   }): Promise<AnnotationJournalEntry> {
-    return this.appendEntry((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'collection_created',
-      collectionId: data.collectionId,
-      name: data.name,
-      normalizedName: data.normalizedName
+      ...params
     }))
   }
 
-  public appendCollectionCreatedSync(data: {
+  public appendCollectionCreatedSync(params: {
+    opId?: string
     collectionId: number
     name: string
     normalizedName: string
   }): AnnotationJournalEntry {
-    return this.appendEntrySync((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'collection_created',
-      collectionId: data.collectionId,
-      name: data.name,
-      normalizedName: data.normalizedName
+      ...params
     }))
   }
 
-  public async appendCollectionRenamed(data: {
+  public async appendCollectionRenamed(params: {
+    opId?: string
     collectionId: number
     oldName: string
     newName: string
     normalizedName: string
   }): Promise<AnnotationJournalEntry> {
-    return this.appendEntry((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'collection_renamed',
-      collectionId: data.collectionId,
-      oldName: data.oldName,
-      newName: data.newName,
-      normalizedName: data.normalizedName
+      ...params
     }))
   }
 
-  public appendCollectionRenamedSync(data: {
+  public appendCollectionRenamedSync(params: {
+    opId?: string
     collectionId: number
     oldName: string
     newName: string
     normalizedName: string
   }): AnnotationJournalEntry {
-    return this.appendEntrySync((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'collection_renamed',
-      collectionId: data.collectionId,
-      oldName: data.oldName,
-      newName: data.newName,
-      normalizedName: data.normalizedName
+      ...params
     }))
   }
 
-  public async appendMembershipAdded(data: {
+  public async appendMembershipAdded(params: {
+    opId?: string
     collectionId: number
     collectionName: string
     locationId: number
+    expectedRevision: string
     normalizedPath: string
     byteSize: number
     activeHash: string | null
     discoveryObservationId: number
   }): Promise<AnnotationJournalEntry> {
-    return this.appendEntry((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'membership_added',
-      collectionId: data.collectionId,
-      collectionName: data.collectionName,
-      locationId: data.locationId,
-      normalizedPath: data.normalizedPath,
-      byteSize: data.byteSize,
-      activeHash: data.activeHash,
-      discoveryObservationId: data.discoveryObservationId
+      ...params
     }))
   }
 
-  public appendMembershipAddedSync(data: {
+  public appendMembershipAddedSync(params: {
+    opId?: string
     collectionId: number
     collectionName: string
     locationId: number
+    expectedRevision: string
     normalizedPath: string
     byteSize: number
     activeHash: string | null
     discoveryObservationId: number
   }): AnnotationJournalEntry {
-    return this.appendEntrySync((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'membership_added',
-      collectionId: data.collectionId,
-      collectionName: data.collectionName,
-      locationId: data.locationId,
-      normalizedPath: data.normalizedPath,
-      byteSize: data.byteSize,
-      activeHash: data.activeHash,
-      discoveryObservationId: data.discoveryObservationId
+      ...params
     }))
   }
 
-  public async appendMembershipRemoved(data: {
+  public async appendMembershipRemoved(params: {
+    opId?: string
     collectionId: number
     collectionName: string
     locationId: number
+    expectedRevision: string
     normalizedPath: string
   }): Promise<AnnotationJournalEntry> {
-    return this.appendEntry((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'membership_removed',
-      collectionId: data.collectionId,
-      collectionName: data.collectionName,
-      locationId: data.locationId,
-      normalizedPath: data.normalizedPath
+      ...params
     }))
   }
 
-  public appendMembershipRemovedSync(data: {
+  public appendMembershipRemovedSync(params: {
+    opId?: string
     collectionId: number
     collectionName: string
     locationId: number
+    expectedRevision: string
     normalizedPath: string
   }): AnnotationJournalEntry {
-    return this.appendEntrySync((seq, ts) => ({
-      entrySeq: seq,
-      entryTimestampMs: ts,
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
       kind: 'membership_removed',
-      collectionId: data.collectionId,
-      collectionName: data.collectionName,
-      locationId: data.locationId,
-      normalizedPath: data.normalizedPath
+      ...params
+    }))
+  }
+
+  public async appendCommitRecord(params: {
+    opId: string
+    targetSeq: number
+  }): Promise<AnnotationJournalEntry> {
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId: params.opId,
+      kind: 'op_committed',
+      targetSeq: params.targetSeq
+    }))
+  }
+
+  public appendCommitRecordSync(params: {
+    opId: string
+    targetSeq: number
+  }): AnnotationJournalEntry {
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId: params.opId,
+      kind: 'op_committed',
+      targetSeq: params.targetSeq
+    }))
+  }
+
+  public async appendAbortRecord(params: {
+    opId: string
+    targetSeq: number
+    reason: string
+  }): Promise<AnnotationJournalEntry> {
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId: params.opId,
+      kind: 'op_aborted',
+      targetSeq: params.targetSeq,
+      reason: params.reason
+    }))
+  }
+
+  public appendAbortRecordSync(params: {
+    opId: string
+    targetSeq: number
+    reason: string
+  }): AnnotationJournalEntry {
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId: params.opId,
+      kind: 'op_aborted',
+      targetSeq: params.targetSeq,
+      reason: params.reason
     }))
   }
 
   private assertInitialized(): void {
     if (!this.isInitialized) {
-      throw new Error('AnnotationJournal must be initialized before use')
+      throw new Error('AnnotationJournal must be initialized before performing operations')
     }
   }
 }

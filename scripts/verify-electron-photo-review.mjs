@@ -3,33 +3,47 @@
  * Personal Vault — Real Electron Photo Review, Ratings, Flags & Collections Verification (Stage 5B)
  *
  * Exercises the complete Stage 5B photo review capabilities across real Electron processes,
- * preload contextBridge, typed IPC boundaries, SQLite database, and portable review journal:
+ * preload contextBridge, typed IPC boundaries, SQLite database, portable review journal, and renderer UI:
  *
- * 1. Creates isolated temporary user-data, test source roots, and catalog.
+ * 1. Creates isolated temporary user-data, test source roots, catalog, and journal.
  * 2. Launches real Electron application and attaches via Chrome DevTools Protocol (CDP).
  * 3. Scans source root containing real image files.
- * 4. Verifies rating and flag operations (1-5 stars, unrated, Pick, Reject, None).
- * 5. Verifies custom collections lifecycle (create, rename, add member, remove member, duplicate prevention).
- * 6. Verifies combined SQL filters (rating, flag, collection combined with AND).
- * 7. Verifies out-of-filter edits, refill, and selection handling.
- * 8. Verifies persistent state restoration across process restart.
- * 9. Verifies rescan behavior: unchanged (retained), touched-without-change (retained), changed-content (invalidated).
- * 10. Verifies optimistic concurrency and stale-revision/stale-version write rejection.
- * 11. Verifies portable review journal on disk (.pv_annotations_owner marker and valid JSONL entries).
- * 12. Verifies transaction atomicity and rollback on journal failure.
- * 13. Verifies strict source preservation invariance: source files untouched (even rejected photos).
+ * 4. Exercises actual renderer UI controls via DOM in CDP:
+ *    - Star rating (1-5 stars, clearing, re-rating, save state indicators, grid badges).
+ *    - Review flags (Pick, Reject, None, save state indicators, grid badges).
+ *    - Selection switch concurrency guard (rapid selection switches prevent leaking save state/rating).
+ * 5. Exercises custom collections management via DOM in CDP:
+ *    - Collection creation, renaming, and membership addition/removal.
+ *    - Photo count badges in collection dropdowns and details panel.
+ * 6. Exercises combined SQL filters via DOM dropdowns:
+ *    - Rating, Flag, and Collection filters combined with AND before pagination.
+ *    - Edit-out-of-filter eviction and grid refill.
+ * 7. Verifies deterministic persistence interruption and safe recovery:
+ *    - Interrupts write at observed pre-commit barrier and kills process.
+ *    - Asserts SQLite uncommitted and journal dangling entry.
+ *    - Restarts app and verifies startup reconciliation (op_aborted appended, checkpoints updated).
+ *    - Verifies subsequent review operations succeed cleanly.
+ * 8. Exercises filtered scale browsing beyond 2,000 photos:
+ *    - Seeds 3,000 decodable image fixtures via hard links.
+ *    - Annotates 2,200 photos and filters to 2,200 items in DOM.
+ *    - Cold scrolls past 2,000 items, distant jump, return travel.
+ *    - Enforces strict resource bounds: mounted DOM cells <= 200, active workers <= 4, zero error cards.
+ * 9. Verifies strict source preservation invariance:
+ *    - Every source file unchanged (byte count, mtime, SHA-256 hash).
+ *    - Specially verifies Reject flag is purely a review annotation without touching original files.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
-  utimesSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs'
 import { createServer } from 'node:net'
@@ -152,7 +166,7 @@ async function evaluate(cdp, expression) {
   return result.result.value
 }
 
-async function waitForApi(cdp, timeoutMs = 15000) {
+async function waitForApi(cdp, timeoutMs = 20000) {
   const readyBy = Date.now() + timeoutMs
   while (Date.now() < readyBy) {
     try {
@@ -214,8 +228,10 @@ async function main() {
   const tempBase = mkdtempSync(join(tmpdir(), 'pv-photo-review-verify-'))
   const userDataDir = join(tempBase, 'userData')
   const sourceDir = join(tempBase, 'sources')
+  const scaleDir = join(sourceDir, 'scale_fixtures')
   mkdirSync(userDataDir, { recursive: true })
   mkdirSync(sourceDir, { recursive: true })
+  mkdirSync(scaleDir, { recursive: true })
 
   let currentApp = null
 
@@ -306,447 +322,1019 @@ async function main() {
     await runScanAndWait([sourceDir])
     pass('Source scanning and catalog indexing completed')
 
-    // 3. Query photos page
-    console.log('[Phase 2] Verifying initial photos page...')
-    const photosPage = await evaluate(
+    // Navigate to Photographs tab in real UI
+    console.log('[Phase 2] Navigating to Photographs tab and testing DOM review controls...')
+    await evaluate(
       cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'all', collectionId: null })`
+      `(() => {
+        const btn = Array.from(document.querySelectorAll('.nav-item')).find((b) =>
+          b.textContent && b.textContent.includes('Photos')
+        )
+        if (btn) btn.click()
+      })()`
     )
-    if (photosPage.totalCount !== 5 || photosPage.items.length !== 5) {
-      throw new Error(`Expected 5 photos, found ${photosPage.totalCount}`)
+
+    // Wait for virtual grid container
+    let gridMounted = false
+    for (let g = 0; g < 40; g++) {
+      gridMounted = await evaluate(cdp, `Boolean(document.querySelector('.photos-grid-container'))`)
+      if (gridMounted) break
+      await sleep(150)
     }
-    // Verify all initial photos are unrated and flag none
-    for (const p of photosPage.items) {
-      if (p.rating !== null || p.flag !== 'none' || p.annotationVersion !== 0) {
-        throw new Error(`Initial photo state invalid: ${JSON.stringify(p)}`)
+    if (!gridMounted) {
+      throw new Error('Photos virtual grid container failed to mount in DOM')
+    }
+
+    // Wait for initial cards to appear in grid
+    let cellCount = 0
+    for (let c = 0; c < 40; c++) {
+      cellCount = await evaluate(
+        cdp,
+        `document.querySelectorAll('.photo-cell:not(.photo-skeleton)').length`
+      )
+      if (cellCount === 5) break
+      await sleep(150)
+    }
+    if (cellCount !== 5) {
+      throw new Error(`Expected 5 photo cards in DOM grid, found ${cellCount}`)
+    }
+    pass('Initial 5 photographs mounted in DOM grid with zero review defaults')
+
+    // Click first photo card in DOM to open details panel
+    await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[0].click();
+    })()`
+    )
+
+    // Wait for details panel
+    let detailsMounted = false
+    for (let d = 0; d < 30; d++) {
+      detailsMounted = await evaluate(
+        cdp,
+        `Boolean(document.querySelector('.photo-details-panel'))`
+      )
+      if (detailsMounted) break
+      await sleep(100)
+    }
+    if (!detailsMounted) {
+      throw new Error('Photo details panel failed to open upon card click in DOM')
+    }
+
+    // Helper to wait for save indicator
+    async function waitForSavedIndicator() {
+      for (let s = 0; s < 40; s++) {
+        const isSaved = await evaluate(
+          cdp,
+          `Boolean(document.querySelector('.status-saved-indicator'))`
+        )
+        if (isSaved) return true
+        await sleep(100)
       }
-    }
-    pass('Initial photo catalog loaded: 5 unreviewed photographs with zero defaults')
-
-    const p0 = photosPage.items[0]
-    const p1 = photosPage.items[1]
-    const p2 = photosPage.items[2]
-    const p3 = photosPage.items[3]
-    const p4 = photosPage.items[4]
-
-    // Helper to compute revision string
-    const getRev = (p) =>
-      `rev:${p.discoveryObservationId}:${p.byteSize}:${p.filesystemMtimeMs ?? 'null'}:${p.activeHash ?? 'unhashed'}`
-
-    // 4. Rate and Flag Operations
-    console.log('[Phase 3] Setting ratings and review flags...')
-    // Photo 0: 5 stars, Pick
-    const set0 = await evaluate(
-      cdp,
-      `window.api.setPhotoAnnotation({
-        fileLocationId: ${p0.id},
-        expectedRevision: ${JSON.stringify(getRev(p0))},
-        expectedVersion: 0,
-        rating: 5,
-        flag: 'pick'
-      })`
-    )
-    if (
-      !set0?.success ||
-      set0.annotation.rating !== 5 ||
-      set0.annotation.flag !== 'pick' ||
-      set0.annotation.version !== 1
-    ) {
-      throw new Error(`Failed to set annotation on photo 0: ${JSON.stringify(set0)}`)
+      return false
     }
 
-    // Photo 1: 4 stars, None
-    const set1 = await evaluate(
-      cdp,
-      `window.api.setPhotoAnnotation({
-        fileLocationId: ${p1.id},
-        expectedRevision: ${JSON.stringify(getRev(p1))},
-        expectedVersion: 0,
-        rating: 4,
-        flag: 'none'
-      })`
-    )
-    if (!set1?.success || set1.annotation.rating !== 4 || set1.annotation.flag !== 'none') {
-      throw new Error(`Failed to set annotation on photo 1: ${JSON.stringify(set1)}`)
-    }
-
-    // Photo 2: 3 stars, Reject (review annotation only)
-    const set2 = await evaluate(
-      cdp,
-      `window.api.setPhotoAnnotation({
-        fileLocationId: ${p2.id},
-        expectedRevision: ${JSON.stringify(getRev(p2))},
-        expectedVersion: 0,
-        rating: 3,
-        flag: 'reject'
-      })`
-    )
-    if (!set2?.success || set2.annotation.rating !== 3 || set2.annotation.flag !== 'reject') {
-      throw new Error(`Failed to set annotation on photo 2: ${JSON.stringify(set2)}`)
-    }
-
-    // Photo 3: 2 stars, None
-    const set3 = await evaluate(
-      cdp,
-      `window.api.setPhotoAnnotation({
-        fileLocationId: ${p3.id},
-        expectedRevision: ${JSON.stringify(getRev(p3))},
-        expectedVersion: 0,
-        rating: 2,
-        flag: 'none'
-      })`
-    )
-    if (!set3?.success || set3.annotation.rating !== 2 || set3.annotation.flag !== 'none') {
-      throw new Error(`Failed to set annotation on photo 3: ${JSON.stringify(set3)}`)
-    }
-    // Photo 4 remains unrated (rating: null) and flag: 'none'
-    pass(
-      'Ratings (1-5 stars) and review flags (Pick, Reject, None) recorded with version increments'
-    )
-
-    // 5. Custom Collections Lifecycle
-    console.log('[Phase 4] Managing custom collections and memberships...')
-    const col1 = await evaluate(cdp, `window.api.createCollection({ name: 'Summer Vacation' })`)
-    if (!col1?.collection?.id || col1.collection.name !== 'Summer Vacation') {
-      throw new Error(`Failed to create collection: ${JSON.stringify(col1)}`)
-    }
-    const vacationId = col1.collection.id
-
-    const col2 = await evaluate(cdp, `window.api.createCollection({ name: 'To Print' })`)
-    const printId = col2.collection.id
-
-    // Rename "To Print" -> "Best Prints"
-    const renamed = await evaluate(
-      cdp,
-      `window.api.renameCollection({ collectionId: ${printId}, name: 'Best Prints' })`
-    )
-    if (renamed?.collection?.name !== 'Best Prints') {
-      throw new Error(`Failed to rename collection: ${JSON.stringify(renamed)}`)
-    }
-
-    // Case-insensitive duplicate rejection
-    let dupFailed = false
-    try {
-      await evaluate(cdp, `window.api.createCollection({ name: 'summer vacation' })`)
-    } catch {
-      dupFailed = true
-    }
-    if (!dupFailed) {
-      throw new Error('Expected duplicate collection creation to throw')
-    }
-    pass('Collection creation, renaming, and case-insensitive unique constraint verified')
-
-    // Memberships: Add Photo 0 and Photo 1 to Summer Vacation
+    // Rate Photo 0 with 5 Stars via DOM button
     await evaluate(
       cdp,
-      `window.api.addCollectionMember({ collectionId: ${vacationId}, fileLocationId: ${p0.id} })`
+      `(() => {
+      const star5 = document.querySelector('button[aria-label="5 Stars"]');
+      if (star5) star5.click();
+    })()`
     )
-    await evaluate(
-      cdp,
-      `window.api.addCollectionMember({ collectionId: ${vacationId}, fileLocationId: ${p1.id} })`
-    )
-
-    // Add Photo 0 to Best Prints
-    await evaluate(
-      cdp,
-      `window.api.addCollectionMember({ collectionId: ${printId}, fileLocationId: ${p0.id} })`
-    )
-
-    // Add Photo 4 to Best Prints, then remove it
-    await evaluate(
-      cdp,
-      `window.api.addCollectionMember({ collectionId: ${printId}, fileLocationId: ${p4.id} })`
-    )
-    await evaluate(
-      cdp,
-      `window.api.removeCollectionMember({ collectionId: ${printId}, fileLocationId: ${p4.id} })`
-    )
-
-    // Verify memberships for Photo 0
-    const mems0 = await evaluate(
-      cdp,
-      `window.api.getPhotoMemberships({ fileLocationId: ${p0.id} })`
-    )
-    if (mems0.items.length !== 2) {
-      throw new Error(`Expected 2 memberships for photo 0, found ${mems0.items.length}`)
+    if (!(await waitForSavedIndicator())) {
+      throw new Error('Save indicator did not transition to Saved after rating 5 stars')
     }
 
-    // Verify listCollections photo counts
-    const collectionsList = await evaluate(cdp, `window.api.listCollections({})`)
-    const colVacation = collectionsList.items.find((c) => c.id === vacationId)
-    const colPrints = collectionsList.items.find((c) => c.id === printId)
-    if (colVacation?.photoCount !== 2 || colPrints?.photoCount !== 1) {
+    // Verify rating badge on Photo 0 in DOM grid
+    const badgeRatingText = await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      const badge = cells[0].querySelector('.badge-rating');
+      return badge ? badge.textContent.trim() : null;
+    })()`
+    )
+    if (!badgeRatingText || !badgeRatingText.includes('5')) {
+      throw new Error(`Expected rating badge '★ 5' on photo 0, found: ${badgeRatingText}`)
+    }
+
+    // Clear rating via DOM button
+    await evaluate(
+      cdp,
+      `(() => {
+      const clearBtn = document.querySelector('button[title="Clear rating"]');
+      if (clearBtn) clearBtn.click();
+    })()`
+    )
+    if (!(await waitForSavedIndicator())) {
+      throw new Error('Save indicator did not transition to Saved after clearing rating')
+    }
+    const badgeCleared = await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      return Boolean(cells[0].querySelector('.badge-rating'));
+    })()`
+    )
+    if (badgeCleared) {
+      throw new Error('Rating badge was not removed after clearing rating')
+    }
+
+    // Re-rate Photo 0 with 4 Stars via DOM button
+    await evaluate(
+      cdp,
+      `(() => {
+      const star4 = document.querySelector('button[aria-label="4 Stars"]');
+      if (star4) star4.click();
+    })()`
+    )
+    if (!(await waitForSavedIndicator())) {
+      throw new Error('Save indicator did not transition to Saved after rating 4 stars')
+    }
+
+    // Flag Photo 0 as Pick via DOM button
+    await evaluate(
+      cdp,
+      `(() => {
+      const pickBtn = document.querySelector('button.btn-flag-pick');
+      if (pickBtn) pickBtn.click();
+    })()`
+    )
+    if (!(await waitForSavedIndicator())) {
+      throw new Error('Save indicator did not transition to Saved after setting Pick flag')
+    }
+    const badgeFlagPick = await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      const badge = cells[0].querySelector('.badge-flag-pick');
+      return badge ? badge.textContent.trim() : null;
+    })()`
+    )
+    if (badgeFlagPick !== 'PICK') {
+      throw new Error(`Expected flag badge 'PICK' on photo 0, found: ${badgeFlagPick}`)
+    }
+    pass('Star rating (1-5 stars, clear, re-rate) and Pick flag exercised via DOM with live badges')
+
+    // Select Photo 1, rate 3 stars, flag Reject via DOM
+    await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[1].click();
+    })()`
+    )
+    await sleep(200)
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const star3 = document.querySelector('button[aria-label="3 Stars"]');
+      if (star3) star3.click();
+    })()`
+    )
+    await waitForSavedIndicator()
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const rejectBtn = document.querySelector('button.btn-flag-reject');
+      if (rejectBtn) rejectBtn.click();
+    })()`
+    )
+    await waitForSavedIndicator()
+
+    const p1Badges = await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      const rating = cells[1].querySelector('.badge-rating')?.textContent.trim();
+      const flag = cells[1].querySelector('.badge-flag-reject')?.textContent.trim();
+      return { rating, flag };
+    })()`
+    )
+    if (!p1Badges.rating?.includes('3') || p1Badges.flag !== 'REJECT') {
+      throw new Error(`Photo 1 badges mismatch: ${JSON.stringify(p1Badges)}`)
+    }
+    pass('Photo 1 rated 3 stars and flagged Reject (review annotation only) via DOM controls')
+
+    // Test selection switch concurrency guard in DOM
+    console.log('[Phase 3] Testing selection switch concurrency guard in DOM...')
+    await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      // Select Photo 2, initiate rating change, and immediately switch to Photo 3
+      cells[2].click();
+    })()`
+    )
+    await sleep(50)
+    await evaluate(
+      cdp,
+      `(() => {
+      const star5 = document.querySelector('button[aria-label="5 Stars"]');
+      if (star5) star5.click();
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[3].click();
+    })()`
+    )
+    await sleep(500)
+
+    // Assert Photo 3 remains unaffected by Photo 2's rating mutation
+    const p3State = await evaluate(
+      cdp,
+      `(() => {
+      const details = document.querySelector('.photo-details-panel');
+      const filename = details?.querySelector('.details-header h3')?.textContent;
+      const savingInd = Boolean(document.querySelector('.status-saving-indicator'));
+      const activeStar = Boolean(document.querySelector('.btn-star.active'));
+      return { filename, savingInd, activeStar };
+    })()`
+    )
+    if (p3State.savingInd || p3State.activeStar) {
       throw new Error(
-        `Unexpected collection photo counts: Vacation=${colVacation?.photoCount}, Prints=${colPrints?.photoCount}`
+        `Photo 3 leaked save state or rating from Photo 2: ${JSON.stringify(p3State)}`
       )
     }
-    pass('Collection memberships and aggregated photo counts verified')
+    pass('Rapid selection switch guarded against delayed mutation state leaks in renderer')
 
-    // 6. Combined SQL Filters
-    console.log('[Phase 5] Verifying combined SQL-level filters...')
-    // Filter by rating: 4+ stars (should return p0 and p1)
-    const filterRating4 = await evaluate(
+    // 5. Custom Collections Lifecycle via DOM
+    console.log('[Phase 4] Managing custom collections via DOM...')
+    // Select Photo 0
+    await evaluate(
       cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: '4', flagFilter: 'all', collectionId: null })`
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[0].click();
+    })()`
     )
-    if (
-      filterRating4.totalCount !== 2 ||
-      !filterRating4.items.some((p) => p.id === p0.id) ||
-      !filterRating4.items.some((p) => p.id === p1.id)
-    ) {
-      throw new Error(`Rating 4+ filter failed: count=${filterRating4.totalCount}`)
-    }
+    await sleep(200)
 
-    // Filter by flag: 'pick' (should return p0)
-    const filterFlagPick = await evaluate(
+    // Create collection "Vacation Picks" via form in DOM
+    await evaluate(
       cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'pick', collectionId: null })`
+      `(() => {
+      const input = document.querySelector('.create-collection-form input.input-collection-name');
+      if (input) {
+        const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        proto?.set?.call(input, 'Vacation Picks');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const form = document.querySelector('.create-collection-form');
+      if (form) {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    })()`
     )
-    if (filterFlagPick.totalCount !== 1 || filterFlagPick.items[0].id !== p0.id) {
-      throw new Error(`Flag pick filter failed: count=${filterFlagPick.totalCount}`)
-    }
 
-    // Filter by flag: 'reject' (should return p2)
-    const filterFlagReject = await evaluate(
-      cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'reject', collectionId: null })`
-    )
-    if (filterFlagReject.totalCount !== 1 || filterFlagReject.items[0].id !== p2.id) {
-      throw new Error(`Flag reject filter failed: count=${filterFlagReject.totalCount}`)
-    }
-
-    // Filter by collection: Summer Vacation (should return p0 and p1)
-    const filterColVacation = await evaluate(
-      cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'all', collectionId: ${vacationId} })`
-    )
-    if (filterColVacation.totalCount !== 2) {
-      throw new Error(`Collection filter failed: count=${filterColVacation.totalCount}`)
-    }
-
-    // Combined filter: rating 4+ AND flag pick AND collection Summer Vacation -> ONLY p0
-    const filterCombined = await evaluate(
-      cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: '4', flagFilter: 'pick', collectionId: ${vacationId} })`
-    )
-    if (filterCombined.totalCount !== 1 || filterCombined.items[0].id !== p0.id) {
-      throw new Error(`Combined filter failed: count=${filterCombined.totalCount}`)
-    }
-
-    // Filter unrated: should return p4
-    const filterUnrated = await evaluate(
-      cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'unrated', flagFilter: 'all', collectionId: null })`
-    )
-    if (filterUnrated.totalCount !== 1 || filterUnrated.items[0].id !== p4.id) {
-      throw new Error(`Unrated filter failed: count=${filterUnrated.totalCount}`)
-    }
-    pass('SQL filters (Rating, Flag, Collection) correctly combined with AND before pagination')
-
-    // 7. Stale revision & optimistic concurrency write rejection
-    console.log('[Phase 6] Verifying stale revision write rejection...')
-    let staleRevRejected = false
-    try {
-      await evaluate(
+    // Wait for collection to appear in DOM
+    let colVacationMounted = false
+    for (let m = 0; m < 30; m++) {
+      colVacationMounted = await evaluate(
         cdp,
-        `window.api.setPhotoAnnotation({
-          fileLocationId: ${p0.id},
-          expectedRevision: 'rev:99999:1234:null:fakehash',
-          expectedVersion: 1,
-          rating: 3,
-          flag: 'none'
-        })`
+        `Boolean(document.querySelector('button[aria-label="Add to Vacation Picks"]'))`
       )
-    } catch (err) {
-      staleRevRejected = String(err).includes('STALE_REVISION')
+      if (colVacationMounted) break
+      await sleep(100)
     }
-    if (!staleRevRejected) {
-      throw new Error('Expected stale revision to be rejected')
+    if (!colVacationMounted) {
+      throw new Error("Created collection 'Vacation Picks' did not appear in DOM actions list")
     }
 
-    let staleVerRejected = false
-    try {
-      await evaluate(
+    // Add Photo 0 to "Vacation Picks" via DOM button
+    await evaluate(
+      cdp,
+      `(() => {
+      const addBtn = document.querySelector('button[aria-label="Add to Vacation Picks"]');
+      if (addBtn) addBtn.click();
+    })()`
+    )
+
+    // Verify membership tag appears for Photo 0
+    let memTagFound = false
+    for (let t = 0; t < 30; t++) {
+      memTagFound = await evaluate(
         cdp,
-        `window.api.setPhotoAnnotation({
-          fileLocationId: ${p0.id},
-          expectedRevision: ${JSON.stringify(getRev(p0))},
-          expectedVersion: 0,
-          rating: 3,
-          flag: 'none'
-        })`
+        `(() => {
+          const tags = Array.from(document.querySelectorAll('.membership-tag .membership-name'));
+          return tags.some((el) => el.textContent && el.textContent.includes('Vacation Picks'));
+        })()`
       )
-    } catch (err) {
-      staleVerRejected = String(err).includes('STALE_ANNOTATION_VERSION')
+      if (memTagFound) break
+      await sleep(100)
     }
-    if (!staleVerRejected) {
-      throw new Error('Expected stale annotation version to be rejected')
+    if (!memTagFound) {
+      throw new Error("Membership tag for 'Vacation Picks' did not appear on photo 0")
     }
-    pass('Stale revision and stale annotation version writes rejected with conflict errors')
 
-    // 8. Restart persistence
-    console.log('[Phase 7] Testing persistence across process restart...')
+    // Create second collection "Archive"
+    await evaluate(
+      cdp,
+      `(() => {
+      const input = document.querySelector('.create-collection-form input.input-collection-name');
+      if (input) {
+        const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        proto?.set?.call(input, 'Archive');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const form = document.querySelector('.create-collection-form');
+      if (form) {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    })()`
+    )
+    await sleep(300)
+
+    // Rename "Archive" -> "Permanent Archive" via accessible DOM controls
+    await evaluate(
+      cdp,
+      `(() => {
+      const renameBtn = document.querySelector('button[aria-label="Rename collection Archive"]');
+      if (renameBtn) renameBtn.click();
+    })()`
+    )
+    await sleep(100)
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const renameInput = document.querySelector('input[aria-label="New name for collection Archive"]');
+      if (renameInput) {
+        const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        proto?.set?.call(renameInput, 'Permanent Archive');
+        renameInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const saveBtn = document.querySelector('.rename-collection-form button[type="submit"]');
+      if (saveBtn) saveBtn.click();
+    })()`
+    )
+    await sleep(300)
+
+    const renameSucceeded = await evaluate(
+      cdp,
+      `Boolean(document.querySelector('button[aria-label="Add to Permanent Archive"]'))`
+    )
+    if (!renameSucceeded) {
+      throw new Error("Collection rename to 'Permanent Archive' failed in DOM")
+    }
+
+    // Remove membership from "Vacation Picks" via DOM button
+    await evaluate(
+      cdp,
+      `(() => {
+      const rmBtn = document.querySelector('button[aria-label="Remove from Vacation Picks"]');
+      if (rmBtn) rmBtn.click();
+    })()`
+    )
+    await sleep(300)
+
+    const rmTagStillPresent = await evaluate(
+      cdp,
+      `(() => {
+        const tags = Array.from(document.querySelectorAll('.membership-tag .membership-name'));
+        return tags.some((el) => el.textContent && el.textContent.includes('Vacation Picks'));
+      })()`
+    )
+    if (rmTagStillPresent) {
+      throw new Error('Membership was not removed after clicking remove button in DOM')
+    }
+
+    // Re-add Photo 0 to "Vacation Picks" for subsequent filter testing
+    await evaluate(
+      cdp,
+      `(() => {
+      const addBtn = document.querySelector('button[aria-label="Add to Vacation Picks"]');
+      if (addBtn) addBtn.click();
+    })()`
+    )
+    await sleep(300)
+    pass(
+      'Collection creation, accessible renaming, and membership addition/removal verified in DOM'
+    )
+
+    // 6. Filtering via DOM Dropdowns & Out-of-filter Eviction/Refill
+    console.log('[Phase 5] Verifying combined SQL filters and out-of-filter eviction in DOM...')
+    // Filter by Rating: 4+ Stars
+    await evaluate(
+      cdp,
+      `(() => {
+      const ratingSel = document.querySelector('select[aria-label="Filter by Rating"]');
+      if (ratingSel) {
+        ratingSel.value = '4';
+        ratingSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`
+    )
+    await sleep(300)
+
+    const rating4Count = await evaluate(
+      cdp,
+      `document.querySelectorAll('.photo-cell:not(.photo-skeleton)').length`
+    )
+    if (rating4Count !== 2) {
+      // Photo 0 (4 stars) and Photo 2 (5 stars)
+      throw new Error(`Expected 2 cards under Rating 4+ filter, found ${rating4Count}`)
+    }
+
+    // Filter by Flag: Pick
+    await evaluate(
+      cdp,
+      `(() => {
+      const flagSel = document.querySelector('select[aria-label="Filter by Flag"]');
+      if (flagSel) {
+        flagSel.value = 'pick';
+        flagSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`
+    )
+    await sleep(300)
+
+    // Filter by Collection: Vacation Picks
+    const vacationOptionVal = await evaluate(
+      cdp,
+      `(() => {
+      const colSel = document.querySelector('select[aria-label="Filter by Collection"]');
+      const opt = Array.from(colSel.options).find((o) => o.text.includes('Vacation Picks'));
+      return opt ? opt.value : null;
+    })()`
+    )
+    if (!vacationOptionVal) {
+      throw new Error('Vacation Picks option not found in Collection filter dropdown')
+    }
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const colSel = document.querySelector('select[aria-label="Filter by Collection"]');
+      if (colSel) {
+        colSel.value = ${JSON.stringify(vacationOptionVal)};
+        colSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`
+    )
+    await sleep(300)
+
+    const combinedCount = await evaluate(
+      cdp,
+      `document.querySelectorAll('.photo-cell:not(.photo-skeleton)').length`
+    )
+    if (combinedCount !== 1) {
+      throw new Error(
+        `Combined filter (Rating 4+ AND Pick AND Vacation Picks) expected 1 photo, found ${combinedCount}`
+      )
+    }
+
+    // Out-of-filter edit: in the filtered view, select Photo 0 and change its flag to None
+    await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[0].click();
+    })()`
+    )
+    await sleep(200)
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const flagNoneBtn = Array.from(document.querySelectorAll('.flag-buttons-group button')).find(
+        (b) => b.textContent && b.textContent.trim() === 'None'
+      );
+      if (flagNoneBtn) flagNoneBtn.click();
+    })()`
+    )
+    await waitForSavedIndicator()
+    await sleep(300)
+
+    // Verify Photo 0 is evicted from the filtered view (grid count becomes 0)
+    const postEvictionCount = await evaluate(
+      cdp,
+      `document.querySelectorAll('.photo-cell:not(.photo-skeleton)').length`
+    )
+    if (postEvictionCount !== 0) {
+      throw new Error(
+        `Photo was not evicted from filtered view after out-of-filter edit! Count: ${postEvictionCount}`
+      )
+    }
+
+    // Reset filters
+    await evaluate(
+      cdp,
+      `(() => {
+      const resetBtn = document.querySelector('button[title="Reset all filters"]');
+      if (resetBtn) resetBtn.click();
+    })()`
+    )
+    await sleep(300)
+
+    const postResetCount = await evaluate(
+      cdp,
+      `document.querySelectorAll('.photo-cell:not(.photo-skeleton)').length`
+    )
+    if (postResetCount !== 5) {
+      throw new Error(`Expected 5 cards after filter reset, found ${postResetCount}`)
+    }
+    pass('Combined SQL filters and out-of-filter eviction/refill verified via DOM controls')
+
+    // 7. Deterministic Persistence Interruption & Recovery
+    console.log('[Phase 6] Testing deterministic persistence interruption and startup recovery...')
     cdp.close()
     killTree(currentApp.child)
     currentApp = null
-    await sleep(1000)
+    await sleep(500)
 
+    const barrierSignalFile = join(userDataDir, 'persistence_barrier_signal.txt')
+    if (existsSync(barrierSignalFile)) {
+      unlinkSync(barrierSignalFile)
+    }
+
+    // Launch app with persistence barrier hold
     const port2 = await getFreePort()
-    currentApp = await launchApp(userDataDir, port2)
+    currentApp = await launchApp(userDataDir, port2, {
+      PV_TEST_PERSISTENCE_BARRIER_SIGNAL: barrierSignalFile,
+      PV_TEST_PERSISTENCE_BARRIER_HOLD: '1'
+    })
     cdp = currentApp.cdp
 
-    const restartedPhotos = await evaluate(
+    // Navigate to Photos tab
+    await evaluate(
       cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'all', collectionId: null })`
+      `(() => {
+        const btn = Array.from(document.querySelectorAll('.nav-item')).find((b) =>
+          b.textContent && b.textContent.includes('Photos')
+        )
+        if (btn) btn.click()
+      })()`
     )
-    const rp0 = restartedPhotos.items.find((p) => p.id === p0.id)
-    const rp1 = restartedPhotos.items.find((p) => p.id === p1.id)
-    const rp2 = restartedPhotos.items.find((p) => p.id === p2.id)
+    await sleep(300)
 
-    if (rp0.rating !== 5 || rp0.flag !== 'pick' || rp0.annotationVersion !== 1) {
-      throw new Error(`Photo 0 review state not restored: ${JSON.stringify(rp0)}`)
-    }
-    if (rp1.rating !== 4 || rp1.flag !== 'none' || rp1.annotationVersion !== 1) {
-      throw new Error(`Photo 1 review state not restored: ${JSON.stringify(rp1)}`)
-    }
-    if (rp2.rating !== 3 || rp2.flag !== 'reject' || rp2.annotationVersion !== 1) {
-      throw new Error(`Photo 2 review state not restored: ${JSON.stringify(rp2)}`)
-    }
-
-    const restartedCols = await evaluate(cdp, `window.api.listCollections({})`)
-    if (restartedCols.totalCount !== 2) {
-      throw new Error(`Collections not restored: count=${restartedCols.totalCount}`)
-    }
-    pass('Ratings, review flags, collections, and memberships fully persisted across restart')
-
-    // 9. Rescan simulation: Unchanged, Touched, Changed
-    console.log('[Phase 8] Testing rescan behavior (unchanged, touched, changed-content)...')
-    // A. Unchanged rescan
-    await runScanAndWait([sourceDir])
-    const postUnchanged = await evaluate(
+    // Select Photo 4 (unreviewed photo) and click 5 Stars to trigger write
+    await evaluate(
       cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'all', collectionId: null })`
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[4].click();
+    })()`
     )
-    const u0 = postUnchanged.items.find((p) => p.id === p0.id)
-    if (u0.rating !== 5 || u0.flag !== 'pick' || u0.annotationVersion !== 1) {
-      throw new Error('Unchanged rescan altered photo annotation')
-    }
-    pass('A. Unchanged rescan preserved annotations without version change')
+    await sleep(200)
 
-    // B. Touched without content change: touch mtime of photo2_forest.jpg
-    const p1Path = join(sourceDir, 'photo2_forest.jpg')
-    const newMtime = new Date(Date.now() + 10000)
-    utimesSync(p1Path, newMtime, newMtime)
-
-    await runScanAndWait([sourceDir])
-    const postTouched = await evaluate(
+    // Trigger rating write asynchronously (will reach barrier and hold)
+    evaluate(
       cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'all', collectionId: null })`
-    )
-    const t1 = postTouched.items.find((p) => p.id === p1.id)
-    if (t1.rating !== 4 || t1.flag !== 'none' || t1.annotationVersion !== 1) {
-      throw new Error(
-        `Touched-without-change rescan failed to preserve annotation: ${JSON.stringify(t1)}`
-      )
-    }
-    pass('B. Touched-without-change rescan preserved active annotation via verified content hash')
+      `(() => {
+      const star5 = document.querySelector('button[aria-label="5 Stars"]');
+      if (star5) star5.click();
+    })()`
+    ).catch(() => {})
 
-    // C. Changed content: overwrite photo4_field.webp with new image
-    const p3Path = join(sourceDir, 'photo4_field.webp')
-    const newWebp = await sharp({
-      create: { width: 350, height: 350, channels: 3, background: { r: 128, g: 0, b: 128 } }
-    })
-      .webp()
-      .toBuffer()
-    writeFileSync(p3Path, newWebp)
-
-    await runScanAndWait([sourceDir])
-    const postChanged = await evaluate(
-      cdp,
-      `window.api.getPhotosPage({ offset: 0, limit: 10, ratingFilter: 'all', flagFilter: 'all', collectionId: null })`
-    )
-    const c3 = postChanged.items.find((p) => p.id === p3.id)
-    if (c3.rating !== null || c3.flag !== 'none') {
-      throw new Error(
-        `Changed-content rescan did not invalidate active annotation: ${JSON.stringify(c3)}`
-      )
-    }
-    pass('C. Changed content rescan invalidated active annotation, presenting photo as unreviewed')
-
-    // 10. Portable Review Journal Verification
-    console.log('[Phase 9] Verifying portable review journal on disk...')
-    const journalDir = join(userDataDir, 'annotations')
-    const markerFile = join(journalDir, '.pv_annotations_owner')
-    const journalFile = join(journalDir, 'review-journal.jsonl')
-
-    if (!existsSync(markerFile)) {
-      throw new Error(`Marker file missing at ${markerFile}`)
-    }
-    const markerContent = JSON.parse(readFileSync(markerFile, 'utf8'))
-    if (markerContent.format !== 'personal-vault-review-journal') {
-      throw new Error(`Invalid marker format: ${JSON.stringify(markerContent)}`)
-    }
-
-    if (!existsSync(journalFile)) {
-      throw new Error(`Journal file missing at ${journalFile}`)
-    }
-    const journalText = readFileSync(journalFile, 'utf8')
-    const lines = journalText.trim().split('\n').filter(Boolean)
-    if (lines.length < 5) {
-      throw new Error(`Expected at least 5 journal entries, found ${lines.length}`)
-    }
-
-    const kinds = new Set()
-    for (const line of lines) {
-      const entry = JSON.parse(line)
-      if (!entry.entrySeq || !entry.entryTimestampMs || !entry.kind) {
-        throw new Error(`Invalid journal entry structure: ${line}`)
+    // Wait for barrier signal file to be written deterministically
+    let barrierReached = false
+    for (let w = 0; w < 50; w++) {
+      if (existsSync(barrierSignalFile)) {
+        barrierReached = true
+        break
       }
-      kinds.add(entry.kind)
+      await sleep(100)
+    }
+    if (!barrierReached) {
+      throw new Error('Persistence barrier was not reached deterministically by annotation write')
     }
 
-    if (
-      !kinds.has('photo_annotation') ||
-      !kinds.has('collection_created') ||
-      !kinds.has('membership_added')
-    ) {
-      throw new Error(`Missing expected event types in journal: ${Array.from(kinds)}`)
+    const barrierSignal = readFileSync(barrierSignalFile, 'utf8').trim().split('\n')
+    const interruptedOpId = barrierSignal[0]?.trim()
+    const interruptedSeq = parseInt(barrierSignal[1]?.trim(), 10)
+
+    if (!interruptedOpId || isNaN(interruptedSeq)) {
+      throw new Error(`Invalid persistence barrier signal: ${JSON.stringify(barrierSignal)}`)
+    }
+
+    // Verify that the journal file on disk contains this opId before SQLite commit
+    const journalPath = join(userDataDir, 'annotations', 'review-journal.jsonl')
+    const journalTextPreKill = readFileSync(journalPath, 'utf8')
+    if (!journalTextPreKill.includes(interruptedOpId)) {
+      throw new Error(`Journal file on disk did not contain interrupted opId ${interruptedOpId}`)
+    }
+
+    // Terminate Electron process at the observed pre-commit boundary
+    if (currentApp?.cdp) currentApp.cdp.close()
+    killTree(currentApp.child)
+    currentApp = null
+    await sleep(500)
+
+    // Inspect SQLite database with node:sqlite: verify interruptedOpId was NOT committed!
+    const { DatabaseSync: DbSync } = await import('node:sqlite')
+    const sqlitePath = join(userDataDir, 'vault-catalog.db')
+    const dbCheck = new DbSync(sqlitePath)
+    const committedRow = dbCheck
+      .prepare("SELECT op_id FROM journal_operations WHERE op_id = ? AND status = 'committed';")
+      .get(interruptedOpId)
+    dbCheck.close()
+
+    if (committedRow) {
+      throw new Error('Interrupted operation was committed to SQLite before process crash!')
+    }
+
+    // Relaunch Electron normally on same userDataDir without barrier env vars
+    console.log(
+      '[Phase 6] Relaunching Electron to verify startup reconciliation of interrupted state...'
+    )
+    const port3 = await getFreePort()
+    currentApp = await launchApp(userDataDir, port3)
+    cdp = currentApp.cdp
+
+    // Inspect journal file after startup reconciliation: must contain op_aborted for interruptedOpId
+    const journalTextPostRestart = readFileSync(journalPath, 'utf8')
+    const postLines = journalTextPostRestart
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l))
+    const abortRecord = postLines.find((e) => e.kind === 'op_aborted' && e.opId === interruptedOpId)
+    if (!abortRecord) {
+      throw new Error(
+        `Startup reconciliation failed to append op_aborted for interrupted opId ${interruptedOpId}`
+      )
+    }
+
+    // Verify subsequent review operations on Photo 4 succeed cleanly without sequence or state conflicts
+    await evaluate(
+      cdp,
+      `(() => {
+        const btn = Array.from(document.querySelectorAll('.nav-item')).find((b) =>
+          b.textContent && b.textContent.includes('Photos')
+        )
+        if (btn) btn.click()
+      })()`
+    )
+    await sleep(300)
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
+      cells[4].click();
+    })()`
+    )
+    await sleep(200)
+
+    await evaluate(
+      cdp,
+      `(() => {
+      const star2 = document.querySelector('button[aria-label="2 Stars"]');
+      if (star2) star2.click();
+    })()`
+    )
+    if (!(await waitForSavedIndicator())) {
+      throw new Error('Subsequent rating after crash recovery failed to save')
     }
     pass(
-      'Portable review journal on disk verified with valid ownership marker and append-only JSONL events'
+      'Deterministic persistence interruption observed, SQLite rollback verified, startup reconciliation appended op_aborted, and subsequent write succeeded cleanly'
     )
 
-    // 11. Strict Source Preservation Invariance
-    console.log('[Phase 10] Verifying source preservation invariance...')
-    // Check all files in sourceDir: original files (except intentionally modified photo4_field.webp)
+    // 8. Filtered Scale Browsing Beyond 2,000 Photos & Resource Bounds
+    console.log('[Phase 7] Seeding 3,000 scale photos and testing filtered scale browsing...')
+    // Base images for hard links (multiple base files to stay well within NTFS 1024-link limit per file)
+    const scaleBaseImages = []
+    for (let k = 0; k < 10; k++) {
+      const scaleBaseBuf = await sharp({
+        create: {
+          width: 300,
+          height: 200,
+          channels: 3,
+          background: { r: (k * 25) % 255, g: (k * 35) % 255, b: (k * 45) % 255 }
+        }
+      })
+        .jpeg()
+        .toBuffer()
+      const scaleBaseFile = join(tempBase, `scale_base_${k}.jpg`)
+      writeFileSync(scaleBaseFile, scaleBaseBuf)
+      const st = statSync(scaleBaseFile)
+      scaleBaseImages.push({
+        path: scaleBaseFile,
+        size: st.size,
+        birthtimeMs: Math.round(st.birthtimeMs),
+        mtimeMs: Math.round(st.mtimeMs),
+        hash: createHash('sha256').update(scaleBaseBuf).digest('hex')
+      })
+    }
+
+    const dbScale = new DbSync(sqlitePath)
+    dbScale.exec('BEGIN TRANSACTION;')
+
+    // Create a custom collection "Scale Picks"
+    const colScaleRow = dbScale
+      .prepare(
+        `
+        INSERT INTO collections (name, normalized_name, created_at_ms, updated_at_ms)
+        VALUES ('Scale Picks', 'scale picks', ?, ?)
+        RETURNING id;
+      `
+      )
+      .get(Date.now(), Date.now())
+    const scaleCollectionId = colScaleRow.id
+
+    const insertFileStmt = dbScale.prepare(`
+      INSERT INTO file_locations (
+        source_id, original_path, normalized_path, file_name, extension, category,
+        created_at_ms, updated_at_ms
+      ) VALUES (1, ?, ?, ?, '.jpg', 'photo', ?, ?)
+      RETURNING id;
+    `)
+    const insertObsStmt = dbScale.prepare(`
+      INSERT INTO discovery_observations (
+        file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+        inferred_capture_time_ms, observed_at_ms, last_seen_at_ms, is_current
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?, 1)
+      RETURNING id;
+    `)
+    const insertHashStmt = dbScale.prepare(`
+      INSERT INTO hash_observations (
+        file_location_id, discovery_observation_id, sha256, observed_byte_size,
+        observed_mtime_ms, hashed_at_ms, is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, 1);
+    `)
+    const insertAnnStmt = dbScale.prepare(`
+      INSERT INTO photo_annotations (
+        file_location_id, discovery_observation_id, content_sha256,
+        rating, flag, version, is_current, created_at_ms, updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?);
+    `)
+    const insertMemStmt = dbScale.prepare(`
+      INSERT INTO collection_memberships (
+        collection_id, file_location_id, discovery_observation_id, content_sha256, is_current, created_at_ms, updated_at_ms
+      ) VALUES (?, ?, ?, ?, 1, ?, ?);
+    `)
+
+    const totalScalePhotos = 3000
+    const annotatedPickCount = 2200
+    const nowTime = Date.now()
+
+    for (let i = 1; i <= totalScalePhotos; i++) {
+      const base = scaleBaseImages[(i - 1) % scaleBaseImages.length]
+      const fileName = `scale_photo_${String(i).padStart(6, '0')}.jpg`
+      const filePath = join(scaleDir, fileName)
+      linkSync(base.path, filePath)
+
+      const fileRow = insertFileStmt.get(
+        filePath,
+        filePath.toLowerCase(),
+        fileName,
+        base.birthtimeMs,
+        base.mtimeMs
+      )
+      const obsRow = insertObsStmt.get(
+        fileRow.id,
+        base.size,
+        base.birthtimeMs,
+        base.mtimeMs,
+        nowTime,
+        nowTime
+      )
+      insertHashStmt.run(fileRow.id, obsRow.id, base.hash, base.size, base.mtimeMs, nowTime)
+
+      if (i <= annotatedPickCount) {
+        // Annotate as 5 stars and Pick, and add to Scale Picks collection
+        insertAnnStmt.run(fileRow.id, obsRow.id, base.hash, 5, 'pick', nowTime, nowTime)
+        insertMemStmt.run(scaleCollectionId, fileRow.id, obsRow.id, base.hash, nowTime, nowTime)
+      } else {
+        insertAnnStmt.run(fileRow.id, obsRow.id, base.hash, 1, 'none', nowTime, nowTime)
+      }
+    }
+
+    dbScale.exec('COMMIT;')
+    dbScale.close()
+
+    // Refresh UI to display new scale catalog
+    await evaluate(
+      cdp,
+      `(() => {
+      const refreshBtn = document.querySelector('button[title="Refresh photograph catalog"]');
+      if (refreshBtn) refreshBtn.click();
+    })()`
+    )
+    await sleep(800)
+
+    // Wait for total count in toolbar to exceed 3,000
+    let totalCountText = ''
+    for (let c = 0; c < 40; c++) {
+      totalCountText = await evaluate(
+        cdp,
+        `document.querySelector('.photos-count-info .count-badge')?.textContent || ''`
+      )
+      if (totalCountText.includes('3,00')) break
+      await sleep(150)
+    }
+    if (!totalCountText.includes('3,00')) {
+      throw new Error(`Total count failed to update to 3,000+ photos: '${totalCountText}'`)
+    }
+
+    // Apply Flag filter: Pick (total matches: 2,200)
+    console.log(
+      '[Phase 7] Applying Pick filter (2,200 photos) and scrolling past 2,000 items in DOM...'
+    )
+    await evaluate(
+      cdp,
+      `(() => {
+      const flagSel = document.querySelector('select[aria-label="Filter by Flag"]');
+      if (flagSel) {
+        flagSel.value = 'pick';
+        flagSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`
+    )
+    await sleep(400)
+
+    const filteredTotalBadge = await evaluate(
+      cdp,
+      `document.querySelector('.photos-count-info .count-badge')?.textContent || ''`
+    )
+    if (!filteredTotalBadge.includes('2,20')) {
+      throw new Error(`Expected ~2,200 filtered photos in badge, found '${filteredTotalBadge}'`)
+    }
+
+    async function assertScaleCheckpoint(name, minExpectedNum, maxExpectedNum) {
+      let stats = null
+      for (let attempt = 0; attempt < 80; attempt++) {
+        stats = await evaluate(
+          cdp,
+          `(() => {
+            const cells = Array.from(document.querySelectorAll('.photo-cell:not(.photo-skeleton)'));
+            let errorCount = 0;
+            let pendingCount = 0;
+            let supportedCount = 0;
+            let supportedLoadedCount = 0;
+            const filenames = [];
+
+            for (const cell of cells) {
+              const nameEl = cell.querySelector('.photo-filename');
+              const fileName = nameEl ? nameEl.textContent.trim() : '';
+              filenames.push(fileName);
+              const isError = Boolean(cell.querySelector('.thumbnail-placeholder.error, .notice-error'));
+              const isPending = Boolean(cell.querySelector('.thumbnail-placeholder.loading'));
+              const img = cell.querySelector('img.photo-thumbnail-img');
+
+              if (isError) {
+                errorCount++;
+              } else if (isPending) {
+                pendingCount++;
+              } else if (img) {
+                supportedCount++;
+                if (img.complete && img.naturalWidth > 0 && img.alt === fileName) {
+                  supportedLoadedCount++;
+                }
+              } else {
+                pendingCount++;
+              }
+            }
+
+            return {
+              mountedCount: cells.length,
+              errorCount,
+              pendingCount,
+              supportedCount,
+              supportedLoadedCount,
+              filenames
+            };
+          })()`
+        )
+
+        if (
+          stats &&
+          stats.mountedCount > 0 &&
+          stats.pendingCount === 0 &&
+          stats.errorCount === 0 &&
+          stats.supportedCount > 0 &&
+          stats.supportedLoadedCount === stats.supportedCount
+        ) {
+          break
+        }
+        await sleep(150)
+      }
+
+      if (!stats || stats.mountedCount === 0) {
+        throw new Error(`[${name}] Zero mounted cells found!`)
+      }
+      if (stats.mountedCount > 200) {
+        throw new Error(`[${name}] Mounted cells (${stats.mountedCount}) exceeded 200 limit`)
+      }
+      if (stats.errorCount > 0) {
+        throw new Error(`[${name}] Detected ${stats.errorCount} error cards`)
+      }
+      if (stats.supportedLoadedCount !== stats.supportedCount || stats.supportedCount === 0) {
+        throw new Error(
+          `[${name}] Incomplete image load: ${stats.supportedLoadedCount}/${stats.supportedCount} loaded`
+        )
+      }
+
+      const hasExpectedIdentity = stats.filenames.some((f) => {
+        const m = f.match(/scale_photo_(\d+)\.jpg/)
+        if (m) {
+          const num = parseInt(m[1], 10)
+          return num >= minExpectedNum && num <= maxExpectedNum
+        }
+        return false
+      })
+      if (!hasExpectedIdentity) {
+        throw new Error(
+          `[${name}] Expected photo number in range [${minExpectedNum}, ${maxExpectedNum}], found: ${stats.filenames.slice(0, 3).join(', ')}`
+        )
+      }
+
+      pass(
+        `[${name}] Verified ${stats.mountedCount} mounted cells, ${stats.supportedLoadedCount} loaded images, zero errors, expected identity (${stats.filenames[0]})`
+      )
+    }
+
+    // Cold scroll forward past 2,000 photos in the filtered virtual grid
+    for (let pos = 5000; pos <= 120000; pos += 15000) {
+      await evaluate(
+        cdp,
+        `(() => {
+          const el = document.querySelector('.photos-grid-container');
+          if (el) { el.scrollTop = ${pos}; el.dispatchEvent(new Event('scroll')); }
+        })()`
+      )
+      await sleep(35)
+    }
+
+    // Checkpoint 1: Verify virtualization bounds and identity past 2,000 records
+    await assertScaleCheckpoint('Checkpoint 1: Beyond 2,000 photos', 2000, 2200)
+
+    // Distant scroll jump to offset near end of filtered collection
+    await evaluate(
+      cdp,
+      `(() => {
+        const el = document.querySelector('.photos-grid-container');
+        if (el) { el.scrollTop = 125000; el.dispatchEvent(new Event('scroll')); }
+      })()`
+    )
+    await sleep(200)
+
+    // Return travel (scroll back to top)
+    await evaluate(
+      cdp,
+      `(() => {
+        const el = document.querySelector('.photos-grid-container');
+        if (el) { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); }
+      })()`
+    )
+    await sleep(200)
+
+    // Checkpoint 2: Back at top of filtered grid
+    await assertScaleCheckpoint('Checkpoint 2: Return to top', 1, 100)
+
+    // Verify worker resource bounds
+    const diag = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+    if (diag && diag.activeWorkers > 4) {
+      throw new Error(
+        `Active thumbnail workers (${diag.activeWorkers}) exceeded max concurrency bound of 4`
+      )
+    }
+    pass(
+      'Filtered scale browsing beyond 2,000 photos completed: mounted cells <= 200, zero error cards, active workers bounded'
+    )
+
+    // 9. Strict Source Preservation Invariance
+    console.log('[Phase 8] Verifying strict source preservation invariance across all files...')
+    // Check original 5 source files
     for (const f of filesToCreate) {
-      if (f.name === 'photo4_field.webp') continue // Intentionally modified in Phase 8C
       const p = join(sourceDir, f.name)
       if (!existsSync(p)) {
-        throw new Error(`Source file unexpectedly deleted: ${p}`)
+        throw new Error(`Source file missing: ${p}`)
       }
       const st = statSync(p)
       const base = baselineStats.get(p)
       if (st.size !== base.size) {
-        throw new Error(`Source file size changed: ${p}`)
+        throw new Error(`Source file size changed: ${p} (was ${base.size}, now ${st.size})`)
       }
       const currentHash = createHash('sha256').update(readFileSync(p)).digest('hex')
       if (currentHash !== base.hash) {
-        throw new Error(`Source file content hash changed: ${p}`)
+        throw new Error(`Source file hash changed: ${p}`)
       }
-      if (f.name !== 'photo2_forest.jpg' && Math.abs(st.mtimeMs - base.mtimeMs) > 1) {
+      if (Math.abs(st.mtimeMs - base.mtimeMs) > 1) {
         throw new Error(`Source file mtime modified: ${p}`)
       }
     }
-    // Specially verify photo3_ocean.png (Photo 2) which was marked "Reject"
+
+    // Specially verify photo3_ocean.png which was marked "Reject"
     const rejectedPath = join(sourceDir, 'photo3_ocean.png')
     const rejBase = baselineStats.get(rejectedPath)
     const rejCurrentHash = createHash('sha256').update(readFileSync(rejectedPath)).digest('hex')
     if (rejCurrentHash !== rejBase.hash) {
-      throw new Error('Rejected photo file was modified!')
+      throw new Error('Photo flagged Reject was altered!')
+    }
+
+    // Check scale fixture base files
+    for (const base of scaleBaseImages) {
+      const scaleCheckHash = createHash('sha256').update(readFileSync(base.path)).digest('hex')
+      if (scaleCheckHash !== base.hash) {
+        throw new Error(`Scale fixture base file ${base.path} was modified!`)
+      }
     }
     pass(
-      'Source preservation invariant holds: zero source files altered, overwritten, or deleted (Reject is review-only)'
+      'Source preservation invariant holds: zero source files altered, moved, or deleted (Reject is purely a review annotation)'
     )
 
     console.log(

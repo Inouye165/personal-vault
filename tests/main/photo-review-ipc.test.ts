@@ -146,9 +146,11 @@ describe('Photo Review & Collections IPC Handlers (Stage 5B)', () => {
     const p1 = catalog.getFileLocationByPath('C:\\photos\\p1.jpg')!
 
     // 4. Add member
+    const rev = catalog.getPhotoRevisionString(p1.id)
     const addRes = (await addMemberHandler(validEvent, {
       collectionId: createRes.collection.id,
-      fileLocationId: p1.id
+      fileLocationId: p1.id,
+      expectedRevision: rev
     })) as { success: boolean; isNew: boolean }
     expect(addRes.success).toBe(true)
     expect(addRes.isNew).toBe(true)
@@ -163,7 +165,8 @@ describe('Photo Review & Collections IPC Handlers (Stage 5B)', () => {
     // 6. Remove member
     const removeRes = (await removeMemberHandler(validEvent, {
       collectionId: createRes.collection.id,
-      fileLocationId: p1.id
+      fileLocationId: p1.id,
+      expectedRevision: rev
     })) as { success: boolean }
     expect(removeRes.success).toBe(true)
   })

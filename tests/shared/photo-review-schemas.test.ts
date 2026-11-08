@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AddCollectionMemberRequestSchema,
   AnnotationJournalEntrySchema,
   CreateCollectionRequestSchema,
   GetPhotosPageRequestSchema,
   PhotoItemSchema,
+  RemoveCollectionMemberRequestSchema,
   RenameCollectionRequestSchema,
   SetPhotoAnnotationRequestSchema
 } from '../../src/shared/validation/ipc-schemas'
@@ -251,11 +253,43 @@ describe('Stage 5B Photo Review & Collections IPC Schemas', () => {
     })
   })
 
+  describe('AddCollectionMemberRequestSchema and RemoveCollectionMemberRequestSchema', () => {
+    it('requires collectionId, fileLocationId, and non-empty expectedRevision', () => {
+      const validAdd = AddCollectionMemberRequestSchema.safeParse({
+        collectionId: 1,
+        fileLocationId: 10,
+        expectedRevision: 'rev:1:100:1700000000000:hash'
+      })
+      expect(validAdd.success).toBe(true)
+
+      const invalidAdd = AddCollectionMemberRequestSchema.safeParse({
+        collectionId: 1,
+        fileLocationId: 10
+      })
+      expect(invalidAdd.success).toBe(false)
+
+      const validRemove = RemoveCollectionMemberRequestSchema.safeParse({
+        collectionId: 1,
+        fileLocationId: 10,
+        expectedRevision: 'rev:1:100:1700000000000:hash'
+      })
+      expect(validRemove.success).toBe(true)
+
+      const invalidRemove = RemoveCollectionMemberRequestSchema.safeParse({
+        collectionId: 1,
+        fileLocationId: 10
+      })
+      expect(invalidRemove.success).toBe(false)
+    })
+  })
+
   describe('AnnotationJournalEntrySchema', () => {
     it('validates a photo_annotation journal entry', () => {
       const entry = {
+        formatVersion: 1,
         entrySeq: 1,
         entryTimestampMs: 1700000000000,
+        opId: 'op-1',
         kind: 'photo_annotation',
         locationId: 1,
         normalizedPath: 'photos/img.jpg',
@@ -275,8 +309,10 @@ describe('Stage 5B Photo Review & Collections IPC Schemas', () => {
 
     it('validates a collection_created journal entry', () => {
       const entry = {
+        formatVersion: 1,
         entrySeq: 2,
         entryTimestampMs: 1700000001000,
+        opId: 'op-2',
         kind: 'collection_created',
         collectionId: 1,
         name: 'Portraits',
@@ -284,6 +320,29 @@ describe('Stage 5B Photo Review & Collections IPC Schemas', () => {
       }
       const parsed = AnnotationJournalEntrySchema.safeParse(entry)
       expect(parsed.success).toBe(true)
+    })
+
+    it('validates op_committed and op_aborted entries', () => {
+      const commitEntry = {
+        formatVersion: 1,
+        entrySeq: 3,
+        entryTimestampMs: 1700000002000,
+        opId: 'op-2',
+        kind: 'op_committed',
+        targetSeq: 2
+      }
+      expect(AnnotationJournalEntrySchema.safeParse(commitEntry).success).toBe(true)
+
+      const abortEntry = {
+        formatVersion: 1,
+        entrySeq: 4,
+        entryTimestampMs: 1700000003000,
+        opId: 'op-3',
+        kind: 'op_aborted',
+        targetSeq: 3,
+        reason: 'Precondition failed'
+      }
+      expect(AnnotationJournalEntrySchema.safeParse(abortEntry).success).toBe(true)
     })
   })
 })

@@ -165,5 +165,13 @@ describe('Preload Photos Bridge', () => {
 
     const colRes = await api.createCollection({ name: 'Portraits' })
     expect(colRes.collection.name).toBe('Portraits')
+
+    // addCollectionMember requires expectedRevision
+    await expect(
+      api.addCollectionMember({
+        collectionId: 1,
+        fileLocationId: 10
+      } as unknown as import('../../src/shared/validation/ipc-schemas').AddCollectionMemberRequest)
+    ).rejects.toThrow()
   })
 })

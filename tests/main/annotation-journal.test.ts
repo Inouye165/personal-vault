@@ -99,6 +99,7 @@ describe('AnnotationJournal Service (Stage 5B Portable Persistence)', () => {
       collectionId: 1,
       collectionName: 'Studio Portraits',
       locationId: 42,
+      expectedRevision: 'rev:10:1048576:1700000000000:hash',
       normalizedPath: 'photos/vacation.jpg',
       byteSize: 1048576,
       activeHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
@@ -110,6 +111,7 @@ describe('AnnotationJournal Service (Stage 5B Portable Persistence)', () => {
       collectionId: 1,
       collectionName: 'Studio Portraits',
       locationId: 42,
+      expectedRevision: 'rev:10:1048576:1700000000000:hash',
       normalizedPath: 'photos/vacation.jpg'
     })
     expect(m2.entrySeq).toBe(4)

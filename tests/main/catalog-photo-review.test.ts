@@ -434,7 +434,11 @@ describe('CatalogDatabase Stage 5B Photo Review & Collections', () => {
         rating: 5,
         flag: 'pick'
       })
-      catalog.addCollectionMember({ collectionId: col1, fileLocationId: p0 })
+      catalog.addCollectionMember({
+        collectionId: col1,
+        fileLocationId: p0,
+        expectedRevision: catalog.getPhotoRevisionString(p0)
+      })
 
       catalog.setPhotoAnnotation({
         fileLocationId: p1,
@@ -443,8 +447,16 @@ describe('CatalogDatabase Stage 5B Photo Review & Collections', () => {
         rating: 4,
         flag: 'pick'
       })
-      catalog.addCollectionMember({ collectionId: col1, fileLocationId: p1 })
-      catalog.addCollectionMember({ collectionId: col2, fileLocationId: p1 })
+      catalog.addCollectionMember({
+        collectionId: col1,
+        fileLocationId: p1,
+        expectedRevision: catalog.getPhotoRevisionString(p1)
+      })
+      catalog.addCollectionMember({
+        collectionId: col2,
+        fileLocationId: p1,
+        expectedRevision: catalog.getPhotoRevisionString(p1)
+      })
 
       catalog.setPhotoAnnotation({
         fileLocationId: p2,
@@ -453,15 +465,27 @@ describe('CatalogDatabase Stage 5B Photo Review & Collections', () => {
         rating: 2,
         flag: 'reject'
       })
-      catalog.addCollectionMember({ collectionId: col2, fileLocationId: p2 })
+      catalog.addCollectionMember({
+        collectionId: col2,
+        fileLocationId: p2,
+        expectedRevision: catalog.getPhotoRevisionString(p2)
+      })
 
-      catalog.addCollectionMember({ collectionId: col1, fileLocationId: p3 })
+      catalog.addCollectionMember({
+        collectionId: col1,
+        fileLocationId: p3,
+        expectedRevision: catalog.getPhotoRevisionString(p3)
+      })
     })
 
     it('manages collection memberships idempotently and removes membership', () => {
       const p0 = photos[0]!
       // Adding duplicate membership is idempotent
-      const res1 = catalog.addCollectionMember({ collectionId: col1, fileLocationId: p0 })
+      const res1 = catalog.addCollectionMember({
+        collectionId: col1,
+        fileLocationId: p0,
+        expectedRevision: catalog.getPhotoRevisionString(p0)
+      })
       expect(res1.isNew).toBe(false)
 
       const memberships = catalog.getCollectionMembershipsForPhoto({ fileLocationId: p0 })
@@ -469,7 +493,11 @@ describe('CatalogDatabase Stage 5B Photo Review & Collections', () => {
       expect(memberships.items[0]!.collectionName).toBe('Landscape')
 
       // Remove membership
-      const removed = catalog.removeCollectionMember({ collectionId: col1, fileLocationId: p0 })
+      const removed = catalog.removeCollectionMember({
+        collectionId: col1,
+        fileLocationId: p0,
+        expectedRevision: catalog.getPhotoRevisionString(p0)
+      })
       expect(removed.success).toBe(true)
 
       const after = catalog.getCollectionMembershipsForPhoto({ fileLocationId: p0 })

@@ -438,6 +438,21 @@ const MIGRATIONS: readonly Migration[] = [
           ON collection_memberships(file_location_id, is_current);
         CREATE INDEX IF NOT EXISTS idx_collection_memberships_collection
           ON collection_memberships(collection_id, is_current);
+
+        CREATE TABLE IF NOT EXISTS journal_operations (
+          op_id TEXT PRIMARY KEY,
+          entry_seq INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('committed', 'aborted')),
+          applied_at_ms INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS journal_checkpoints (
+          singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+          last_applied_seq INTEGER NOT NULL DEFAULT 0,
+          last_op_id TEXT,
+          updated_at_ms INTEGER NOT NULL
+        );
       `)
     }
   }

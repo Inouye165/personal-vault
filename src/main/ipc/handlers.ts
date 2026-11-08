@@ -864,7 +864,8 @@ export function registerIpcHandlers({
     }
     const result = catalog.addCollectionMember({
       collectionId: parsed.data.collectionId,
-      fileLocationId: parsed.data.fileLocationId
+      fileLocationId: parsed.data.fileLocationId,
+      expectedRevision: parsed.data.expectedRevision
     })
     const validated = validatePayload(AddCollectionMemberResponseSchema, result)
     if (!validated.success) {
@@ -883,7 +884,8 @@ export function registerIpcHandlers({
     }
     const result = catalog.removeCollectionMember({
       collectionId: parsed.data.collectionId,
-      fileLocationId: parsed.data.fileLocationId
+      fileLocationId: parsed.data.fileLocationId,
+      expectedRevision: parsed.data.expectedRevision
     })
     const validated = validatePayload(RemoveCollectionMemberResponseSchema, result)
     if (!validated.success) {

@@ -468,11 +468,13 @@ export interface CatalogCollectionRecord {
 export interface AddCollectionMemberInput {
   readonly collectionId: number
   readonly fileLocationId: number
+  readonly expectedRevision: string
 }
 
 export interface RemoveCollectionMemberInput {
   readonly collectionId: number
   readonly fileLocationId: number
+  readonly expectedRevision: string
 }
 
 export interface CatalogCollectionMembershipRecord {

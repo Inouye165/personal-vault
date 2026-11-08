@@ -11,8 +11,8 @@
 
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { dirname } from 'node:path'
-import { mkdirSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import { checkSchemaCompatibility, runMigrations } from './migrations'
 import { normalizePathForLookup } from './path-normalization'
 import {
@@ -404,7 +404,11 @@ export class CatalogDatabase {
         runMigrations(rawDb)
       }
 
-      return new CatalogDatabase(rawDb, options.journal)
+      const instance = new CatalogDatabase(rawDb, options.journal)
+      if (instance.journal && !options.readOnly) {
+        instance.reconcileJournalWithDatabase()
+      }
+      return instance
     } catch (error) {
       if (rawDb) {
         try {
@@ -2852,6 +2856,83 @@ export class CatalogDatabase {
   // Stage 5B: Photo Review & Collections Methods
   // ==========================================
 
+  private maybeHoldPersistenceBarrier(opId: string, entrySeq: number): void {
+    const barrierSignal = process.env.PV_TEST_PERSISTENCE_BARRIER_SIGNAL
+    if (!barrierSignal) return
+    try {
+      writeFileSync(barrierSignal, `${opId}\n${entrySeq}\n`)
+    } catch {
+      // ignore
+    }
+    if (process.env.PV_TEST_PERSISTENCE_BARRIER_HOLD === '1') {
+      const releaseFile = process.env.PV_TEST_PERSISTENCE_BARRIER_RELEASE
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        if (releaseFile && existsSync(releaseFile)) break
+        const sab = new SharedArrayBuffer(4)
+        const int32 = new Int32Array(sab)
+        Atomics.wait(int32, 0, 0, 50)
+      }
+    }
+  }
+
+  public reconcileJournalWithDatabase(): void {
+    if (!this.journal) return
+    this.assertOpen()
+
+    const checkpointRow = this.db
+      .prepare('SELECT last_applied_seq FROM journal_checkpoints WHERE singleton_id = 1;')
+      .get() as { last_applied_seq: number } | undefined
+    if (!checkpointRow) {
+      this.db
+        .prepare(
+          'INSERT INTO journal_checkpoints (singleton_id, last_applied_seq, last_op_id, updated_at_ms) VALUES (1, 0, NULL, ?);'
+        )
+        .run(Date.now())
+    }
+
+    const entries = this.journal.readEntriesSync()
+    const committedRows = this.db
+      .prepare("SELECT op_id FROM journal_operations WHERE status = 'committed';")
+      .all() as Array<{ op_id: string }>
+    const committedOpIds = new Set(committedRows.map((r) => r.op_id))
+
+    const opEntries = new Map<
+      string,
+      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry
+    >()
+    const terminalOps = new Set<string>()
+
+    for (const entry of entries) {
+      if (entry.kind === 'op_committed' || entry.kind === 'op_aborted') {
+        terminalOps.add(entry.opId)
+      } else {
+        opEntries.set(entry.opId, entry)
+      }
+    }
+
+    for (const [opId, entry] of opEntries.entries()) {
+      if (!terminalOps.has(opId)) {
+        if (committedOpIds.has(opId)) {
+          this.journal.appendCommitRecordSync({ opId, targetSeq: entry.entrySeq })
+        } else {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: entry.entrySeq,
+            reason: 'Startup reconciliation: uncommitted transaction aborted'
+          })
+        }
+      }
+    }
+
+    const latestSeq = this.journal.getLatestSeq()
+    this.db
+      .prepare(
+        'UPDATE journal_checkpoints SET last_applied_seq = ?, updated_at_ms = ? WHERE singleton_id = 1;'
+      )
+      .run(latestSeq, Date.now())
+  }
+
   public createCollection(input: CreateCollectionInput): CatalogCollectionRecord {
     this.assertOpen()
     const normalizedName = normalizeCollectionName(input.name)
@@ -2865,7 +2946,11 @@ export class CatalogDatabase {
       throw new Error(`Collection with name '${name}' already exists`)
     }
 
-    this.db.exec('BEGIN TRANSACTION;')
+    const opId = randomUUID()
+    let journalEntry:
+      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
+
+    this.db.exec('BEGIN IMMEDIATE;')
     try {
       const stmt = this.db.prepare(`
         INSERT INTO collections (name, normalized_name, created_at_ms, updated_at_ms)
@@ -2881,14 +2966,31 @@ export class CatalogDatabase {
       }
 
       if (this.journal) {
-        this.journal.appendCollectionCreatedSync({
+        journalEntry = this.journal.appendCollectionCreatedSync({
+          opId,
           collectionId: row.id,
           name: row.name,
           normalizedName: row.normalized_name
         })
       }
 
+      this.maybeHoldPersistenceBarrier(opId, journalEntry ? journalEntry.entrySeq : 0)
+
+      this.db
+        .prepare(
+          "INSERT INTO journal_operations (op_id, entry_seq, kind, status, applied_at_ms) VALUES (?, ?, 'collection_created', 'committed', ?);"
+        )
+        .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
+
       this.db.exec('COMMIT;')
+
+      if (this.journal && journalEntry) {
+        this.journal.appendCommitRecordSync({
+          opId,
+          targetSeq: journalEntry.entrySeq
+        })
+      }
+
       return {
         id: row.id,
         name: row.name,
@@ -2902,6 +3004,17 @@ export class CatalogDatabase {
         this.db.exec('ROLLBACK;')
       } catch {
         // ignore
+      }
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq,
+            reason: err instanceof Error ? err.message : String(err)
+          })
+        } catch {
+          // ignore
+        }
       }
       throw err
     }
@@ -2930,7 +3043,11 @@ export class CatalogDatabase {
       throw new Error(`Collection with name '${name}' already exists`)
     }
 
-    this.db.exec('BEGIN TRANSACTION;')
+    const opId = randomUUID()
+    let journalEntry:
+      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
+
+    this.db.exec('BEGIN IMMEDIATE;')
     try {
       const stmt = this.db.prepare(`
         UPDATE collections
@@ -2947,7 +3064,8 @@ export class CatalogDatabase {
       }
 
       if (this.journal) {
-        this.journal.appendCollectionRenamedSync({
+        journalEntry = this.journal.appendCollectionRenamedSync({
+          opId,
           collectionId: row.id,
           oldName: current.name,
           newName: row.name,
@@ -2955,7 +3073,23 @@ export class CatalogDatabase {
         })
       }
 
+      this.maybeHoldPersistenceBarrier(opId, journalEntry ? journalEntry.entrySeq : 0)
+
+      this.db
+        .prepare(
+          "INSERT INTO journal_operations (op_id, entry_seq, kind, status, applied_at_ms) VALUES (?, ?, 'collection_renamed', 'committed', ?);"
+        )
+        .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
+
       this.db.exec('COMMIT;')
+
+      if (this.journal && journalEntry) {
+        this.journal.appendCommitRecordSync({
+          opId,
+          targetSeq: journalEntry.entrySeq
+        })
+      }
+
       return {
         id: row.id,
         name: row.name,
@@ -2968,6 +3102,17 @@ export class CatalogDatabase {
         this.db.exec('ROLLBACK;')
       } catch {
         // ignore
+      }
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq,
+            reason: err instanceof Error ? err.message : String(err)
+          })
+        } catch {
+          // ignore
+        }
       }
       throw err
     }
@@ -2987,9 +3132,16 @@ export class CatalogDatabase {
       .prepare(
         `
         SELECT c.id, c.name, c.normalized_name, c.created_at_ms, c.updated_at_ms,
-               COUNT(cm.id) as photo_count
+               COUNT(DISTINCT cm.file_location_id) as photo_count
         FROM collections c
         LEFT JOIN collection_memberships cm ON cm.collection_id = c.id AND cm.is_current = 1
+          AND EXISTS (
+            SELECT 1 FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+            WHERE f.id = cm.file_location_id
+              AND (cm.discovery_observation_id = d.id OR (cm.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND cm.content_sha256 = h.sha256))
+          )
         GROUP BY c.id
         ORDER BY c.name COLLATE NOCASE ASC
         LIMIT ? OFFSET ?;
@@ -3028,9 +3180,16 @@ export class CatalogDatabase {
       .prepare(
         `
         SELECT c.id, c.name, c.normalized_name, c.created_at_ms, c.updated_at_ms,
-               COUNT(cm.id) as photo_count
+               COUNT(DISTINCT cm.file_location_id) as photo_count
         FROM collections c
         LEFT JOIN collection_memberships cm ON cm.collection_id = c.id AND cm.is_current = 1
+          AND EXISTS (
+            SELECT 1 FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+            WHERE f.id = cm.file_location_id
+              AND (cm.discovery_observation_id = d.id OR (cm.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND cm.content_sha256 = h.sha256))
+          )
         WHERE c.id = ?
         GROUP BY c.id;
       `
@@ -3068,6 +3227,9 @@ export class CatalogDatabase {
     if (!input.fileLocationId || input.fileLocationId <= 0) {
       throw new TypeError('fileLocationId must be a positive integer')
     }
+    if (!input.expectedRevision || typeof input.expectedRevision !== 'string') {
+      throw new TypeError('expectedRevision must be a non-empty string')
+    }
 
     const collection = this.getCollectionById(input.collectionId)
     if (!collection) {
@@ -3075,6 +3237,13 @@ export class CatalogDatabase {
     }
 
     this.reconcilePhotoAnnotations(input.fileLocationId)
+
+    const currentRevision = this.getPhotoRevisionString(input.fileLocationId)
+    if (currentRevision !== input.expectedRevision) {
+      throw new Error(
+        `STALE_REVISION: Expected revision ${input.expectedRevision} but found ${currentRevision}`
+      )
+    }
 
     const obs = this.db
       .prepare(
@@ -3109,8 +3278,12 @@ export class CatalogDatabase {
       return { success: true, isNew: false }
     }
 
+    const opId = randomUUID()
+    let journalEntry:
+      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
     const now = Date.now()
-    this.db.exec('BEGIN TRANSACTION;')
+
+    this.db.exec('BEGIN IMMEDIATE;')
     try {
       this.db
         .prepare(
@@ -3123,10 +3296,12 @@ export class CatalogDatabase {
         .run(input.collectionId, input.fileLocationId, obs.discovery_id, obs.active_hash, now, now)
 
       if (this.journal) {
-        this.journal.appendMembershipAddedSync({
+        journalEntry = this.journal.appendMembershipAddedSync({
+          opId,
           collectionId: input.collectionId,
           collectionName: collection.name,
           locationId: input.fileLocationId,
+          expectedRevision: input.expectedRevision,
           normalizedPath: obs.normalized_path,
           byteSize: obs.byte_size,
           activeHash: obs.active_hash,
@@ -3134,7 +3309,23 @@ export class CatalogDatabase {
         })
       }
 
+      this.maybeHoldPersistenceBarrier(opId, journalEntry ? journalEntry.entrySeq : 0)
+
+      this.db
+        .prepare(
+          "INSERT INTO journal_operations (op_id, entry_seq, kind, status, applied_at_ms) VALUES (?, ?, 'membership_added', 'committed', ?);"
+        )
+        .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
+
       this.db.exec('COMMIT;')
+
+      if (this.journal && journalEntry) {
+        this.journal.appendCommitRecordSync({
+          opId,
+          targetSeq: journalEntry.entrySeq
+        })
+      }
+
       return { success: true, isNew: true }
     } catch (err) {
       try {
@@ -3142,15 +3333,36 @@ export class CatalogDatabase {
       } catch {
         // ignore
       }
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq,
+            reason: err instanceof Error ? err.message : String(err)
+          })
+        } catch {
+          // ignore
+        }
+      }
       throw err
     }
   }
 
   public removeCollectionMember(input: RemoveCollectionMemberInput): { success: boolean } {
     this.assertOpen()
+    if (!input.expectedRevision || typeof input.expectedRevision !== 'string') {
+      throw new TypeError('expectedRevision must be a non-empty string')
+    }
     const collection = this.getCollectionById(input.collectionId)
     if (!collection) {
       throw new Error(`Collection with ID ${input.collectionId} not found`)
+    }
+
+    const currentRevision = this.getPhotoRevisionString(input.fileLocationId)
+    if (currentRevision !== input.expectedRevision) {
+      throw new Error(
+        `STALE_REVISION: Expected revision ${input.expectedRevision} but found ${currentRevision}`
+      )
     }
 
     const file = this.getFileLocationById(input.fileLocationId)
@@ -3158,8 +3370,12 @@ export class CatalogDatabase {
       throw new Error(`File location with ID ${input.fileLocationId} not found`)
     }
 
+    const opId = randomUUID()
+    let journalEntry:
+      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
     const now = Date.now()
-    this.db.exec('BEGIN TRANSACTION;')
+
+    this.db.exec('BEGIN IMMEDIATE;')
     try {
       this.db
         .prepare(
@@ -3172,21 +3388,50 @@ export class CatalogDatabase {
         .run(now, input.collectionId, input.fileLocationId)
 
       if (this.journal) {
-        this.journal.appendMembershipRemovedSync({
+        journalEntry = this.journal.appendMembershipRemovedSync({
+          opId,
           collectionId: input.collectionId,
           collectionName: collection.name,
           locationId: input.fileLocationId,
+          expectedRevision: input.expectedRevision,
           normalizedPath: file.normalizedPath
         })
       }
 
+      this.maybeHoldPersistenceBarrier(opId, journalEntry ? journalEntry.entrySeq : 0)
+
+      this.db
+        .prepare(
+          "INSERT INTO journal_operations (op_id, entry_seq, kind, status, applied_at_ms) VALUES (?, ?, 'membership_removed', 'committed', ?);"
+        )
+        .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
+
       this.db.exec('COMMIT;')
+
+      if (this.journal && journalEntry) {
+        this.journal.appendCommitRecordSync({
+          opId,
+          targetSeq: journalEntry.entrySeq
+        })
+      }
+
       return { success: true }
     } catch (err) {
       try {
         this.db.exec('ROLLBACK;')
       } catch {
         // ignore
+      }
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq,
+            reason: err instanceof Error ? err.message : String(err)
+          })
+        } catch {
+          // ignore
+        }
       }
       throw err
     }
@@ -3205,7 +3450,12 @@ export class CatalogDatabase {
 
     const countRow = this.db
       .prepare(
-        'SELECT COUNT(*) as total FROM collection_memberships WHERE file_location_id = ? AND is_current = 1;'
+        `SELECT COUNT(*) as total FROM collection_memberships cm
+         JOIN file_locations f ON f.id = cm.file_location_id
+         JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+         LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+         WHERE cm.file_location_id = ? AND cm.is_current = 1
+           AND (cm.discovery_observation_id = d.id OR (cm.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND cm.content_sha256 = h.sha256));`
       )
       .get(options.fileLocationId) as { total: number }
     const totalCount = countRow.total
@@ -3216,7 +3466,11 @@ export class CatalogDatabase {
         SELECT cm.id, cm.collection_id, c.name as collection_name, cm.file_location_id, cm.created_at_ms
         FROM collection_memberships cm
         JOIN collections c ON c.id = cm.collection_id
+        JOIN file_locations f ON f.id = cm.file_location_id
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
         WHERE cm.file_location_id = ? AND cm.is_current = 1
+          AND (cm.discovery_observation_id = d.id OR (cm.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND cm.content_sha256 = h.sha256))
         ORDER BY c.name COLLATE NOCASE ASC
         LIMIT ? OFFSET ?;
       `
@@ -3297,113 +3551,123 @@ export class CatalogDatabase {
 
     if (!currentObs) return
 
-    // 1. Reconcile current annotation
-    const ann = this.db
+    // 1. Invalidate annotations and memberships where byte size changed
+    const now = Date.now()
+    this.db
       .prepare(
         `
-        SELECT a.id, a.discovery_observation_id, a.content_sha256, d.byte_size as old_byte_size
-        FROM photo_annotations a
-        JOIN discovery_observations d ON d.id = a.discovery_observation_id
-        WHERE a.file_location_id = ? AND a.is_current = 1;
+        UPDATE photo_annotations
+        SET is_current = 0, updated_at_ms = ?
+        WHERE is_current = 1
+          AND (? IS NULL OR file_location_id = ?)
+          AND file_location_id IN (
+            SELECT f.id FROM file_locations f
+            JOIN discovery_observations d_new ON d_new.file_location_id = f.id AND d_new.is_current = 1
+            JOIN discovery_observations d_old ON d_old.id = photo_annotations.discovery_observation_id
+            WHERE d_new.byte_size != d_old.byte_size
+          );
       `
       )
-      .get(fileLocationId) as
-      | {
-          id: number
-          discovery_observation_id: number
-          content_sha256: string | null
-          old_byte_size: number
-        }
-      | undefined
+      .run(now, fileLocationId ?? null, fileLocationId ?? null)
 
-    if (ann && ann.discovery_observation_id !== currentObs.discovery_id) {
-      if (ann.old_byte_size !== currentObs.byte_size) {
-        // Size changed: content definitely changed
-        this.db
-          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
-          .run(Date.now(), ann.id)
-      } else if (
-        ann.content_sha256 &&
-        currentObs.active_hash &&
-        ann.content_sha256 === currentObs.active_hash
-      ) {
-        // Hash matches: advance to new observation
-        this.db
-          .prepare(
-            'UPDATE photo_annotations SET discovery_observation_id = ?, updated_at_ms = ? WHERE id = ?;'
-          )
-          .run(currentObs.discovery_id, Date.now(), ann.id)
-      } else if (
-        ann.content_sha256 &&
-        currentObs.active_hash &&
-        ann.content_sha256 !== currentObs.active_hash
-      ) {
-        // Hash differed: invalidate
-        this.db
-          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
-          .run(Date.now(), ann.id)
-      } else if (!ann.content_sha256) {
-        // Unhashed annotation bound to observation
-        this.db
-          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
-          .run(Date.now(), ann.id)
-      }
-    }
-
-    // 2. Reconcile collection memberships
-    const memberships = this.db
+    this.db
       .prepare(
         `
-        SELECT cm.id, cm.discovery_observation_id, cm.content_sha256, d.byte_size as old_byte_size
-        FROM collection_memberships cm
-        JOIN discovery_observations d ON d.id = cm.discovery_observation_id
-        WHERE cm.file_location_id = ? AND cm.is_current = 1;
+        UPDATE collection_memberships
+        SET is_current = 0, updated_at_ms = ?
+        WHERE is_current = 1
+          AND (? IS NULL OR file_location_id = ?)
+          AND file_location_id IN (
+            SELECT f.id FROM file_locations f
+            JOIN discovery_observations d_new ON d_new.file_location_id = f.id AND d_new.is_current = 1
+            JOIN discovery_observations d_old ON d_old.id = collection_memberships.discovery_observation_id
+            WHERE d_new.byte_size != d_old.byte_size
+          );
       `
       )
-      .all(fileLocationId) as Array<{
-      id: number
-      discovery_observation_id: number
-      content_sha256: string | null
-      old_byte_size: number
-    }>
+      .run(now, fileLocationId ?? null, fileLocationId ?? null)
 
-    for (const mem of memberships) {
-      if (mem.discovery_observation_id !== currentObs.discovery_id) {
-        if (mem.old_byte_size !== currentObs.byte_size) {
-          this.db
-            .prepare(
-              'UPDATE collection_memberships SET is_current = 0, updated_at_ms = ? WHERE id = ?;'
-            )
-            .run(Date.now(), mem.id)
-        } else if (
-          mem.content_sha256 &&
-          currentObs.active_hash &&
-          mem.content_sha256 === currentObs.active_hash
-        ) {
-          this.db
-            .prepare(
-              'UPDATE collection_memberships SET discovery_observation_id = ?, updated_at_ms = ? WHERE id = ?;'
-            )
-            .run(currentObs.discovery_id, Date.now(), mem.id)
-        } else if (
-          mem.content_sha256 &&
-          currentObs.active_hash &&
-          mem.content_sha256 !== currentObs.active_hash
-        ) {
-          this.db
-            .prepare(
-              'UPDATE collection_memberships SET is_current = 0, updated_at_ms = ? WHERE id = ?;'
-            )
-            .run(Date.now(), mem.id)
-        } else if (!mem.content_sha256) {
-          this.db
-            .prepare(
-              'UPDATE collection_memberships SET is_current = 0, updated_at_ms = ? WHERE id = ?;'
-            )
-            .run(Date.now(), mem.id)
-        }
-      }
-    }
+    // 2. Invalidate annotations and memberships where hash changed (differed from original hash)
+    this.db
+      .prepare(
+        `
+        UPDATE photo_annotations
+        SET is_current = 0, updated_at_ms = ?
+        WHERE is_current = 1
+          AND (? IS NULL OR file_location_id = ?)
+          AND photo_annotations.content_sha256 IS NOT NULL
+          AND file_location_id IN (
+            SELECT f.id FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+            WHERE h.sha256 IS NOT NULL AND h.sha256 != photo_annotations.content_sha256
+          );
+      `
+      )
+      .run(now, fileLocationId ?? null, fileLocationId ?? null)
+
+    this.db
+      .prepare(
+        `
+        UPDATE collection_memberships
+        SET is_current = 0, updated_at_ms = ?
+        WHERE is_current = 1
+          AND (? IS NULL OR file_location_id = ?)
+          AND collection_memberships.content_sha256 IS NOT NULL
+          AND file_location_id IN (
+            SELECT f.id FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+            WHERE h.sha256 IS NOT NULL AND h.sha256 != collection_memberships.content_sha256
+          );
+      `
+      )
+      .run(now, fileLocationId ?? null, fileLocationId ?? null)
+
+    // 3. For records whose hash is identical on new observation, re-anchor discovery_observation_id
+    this.db
+      .prepare(
+        `
+        UPDATE photo_annotations
+        SET discovery_observation_id = (
+          SELECT d.id FROM discovery_observations d
+          WHERE d.file_location_id = photo_annotations.file_location_id AND d.is_current = 1
+        ), updated_at_ms = ?
+        WHERE is_current = 1
+          AND (? IS NULL OR file_location_id = ?)
+          AND photo_annotations.content_sha256 IS NOT NULL
+          AND file_location_id IN (
+            SELECT f.id FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+            WHERE h.sha256 = photo_annotations.content_sha256
+              AND d.id != photo_annotations.discovery_observation_id
+          );
+      `
+      )
+      .run(now, fileLocationId ?? null, fileLocationId ?? null)
+
+    this.db
+      .prepare(
+        `
+        UPDATE collection_memberships
+        SET discovery_observation_id = (
+          SELECT d.id FROM discovery_observations d
+          WHERE d.file_location_id = collection_memberships.file_location_id AND d.is_current = 1
+        ), updated_at_ms = ?
+        WHERE is_current = 1
+          AND (? IS NULL OR file_location_id = ?)
+          AND collection_memberships.content_sha256 IS NOT NULL
+          AND file_location_id IN (
+            SELECT f.id FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+            WHERE h.sha256 = collection_memberships.content_sha256
+              AND d.id != collection_memberships.discovery_observation_id
+          );
+      `
+      )
+      .run(now, fileLocationId ?? null, fileLocationId ?? null)
   }
 
   public setPhotoAnnotation(input: SetPhotoAnnotationInput): CatalogPhotoAnnotationRecord {
@@ -3475,9 +3739,12 @@ export class CatalogDatabase {
     }
 
     const nextVersion = currentVersion + 1
+    const opId = randomUUID()
+    let journalEntry:
+      import('../../../shared/validation/ipc-schemas').AnnotationJournalEntry | undefined
     const now = Date.now()
 
-    this.db.exec('BEGIN TRANSACTION;')
+    this.db.exec('BEGIN IMMEDIATE;')
     try {
       if (currentAnn) {
         this.db
@@ -3517,7 +3784,8 @@ export class CatalogDatabase {
       }
 
       if (this.journal) {
-        this.journal.appendPhotoAnnotationSync({
+        journalEntry = this.journal.appendPhotoAnnotationSync({
+          opId,
           locationId: input.fileLocationId,
           normalizedPath: obs.normalized_path,
           originalPath: obs.original_path,
@@ -3532,7 +3800,23 @@ export class CatalogDatabase {
         })
       }
 
+      this.maybeHoldPersistenceBarrier(opId, journalEntry ? journalEntry.entrySeq : 0)
+
+      this.db
+        .prepare(
+          "INSERT INTO journal_operations (op_id, entry_seq, kind, status, applied_at_ms) VALUES (?, ?, 'photo_annotation', 'committed', ?);"
+        )
+        .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
+
       this.db.exec('COMMIT;')
+
+      if (this.journal && journalEntry) {
+        this.journal.appendCommitRecordSync({
+          opId,
+          targetSeq: journalEntry.entrySeq
+        })
+      }
+
       return {
         id: row.id,
         fileLocationId: row.file_location_id,
@@ -3550,6 +3834,17 @@ export class CatalogDatabase {
         this.db.exec('ROLLBACK;')
       } catch {
         // ignore
+      }
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq,
+            reason: err instanceof Error ? err.message : String(err)
+          })
+        } catch {
+          // ignore
+        }
       }
       throw err
     }

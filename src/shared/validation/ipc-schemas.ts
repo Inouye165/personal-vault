@@ -641,7 +641,8 @@ export type ListCollectionsResponse = z.infer<typeof ListCollectionsResponseSche
 
 export const AddCollectionMemberRequestSchema = z.object({
   collectionId: z.number().int().positive(),
-  fileLocationId: z.number().int().positive()
+  fileLocationId: z.number().int().positive(),
+  expectedRevision: z.string().min(1)
 })
 export type AddCollectionMemberRequest = z.infer<typeof AddCollectionMemberRequestSchema>
 
@@ -653,7 +654,8 @@ export type AddCollectionMemberResponse = z.infer<typeof AddCollectionMemberResp
 
 export const RemoveCollectionMemberRequestSchema = z.object({
   collectionId: z.number().int().positive(),
-  fileLocationId: z.number().int().positive()
+  fileLocationId: z.number().int().positive(),
+  expectedRevision: z.string().min(1)
 })
 export type RemoveCollectionMemberRequest = z.infer<typeof RemoveCollectionMemberRequestSchema>
 
@@ -685,10 +687,14 @@ export const GetPhotoMembershipsResponseSchema = z.object({
 })
 export type GetPhotoMembershipsResponse = z.infer<typeof GetPhotoMembershipsResponseSchema>
 
+export const CURRENT_JOURNAL_FORMAT_VERSION = 1
+
 export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
   z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
     entrySeq: z.number().int().positive(),
     entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
     kind: z.literal('photo_annotation'),
     locationId: z.number().int().positive(),
     normalizedPath: z.string().min(1),
@@ -706,16 +712,20 @@ export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
     flag: z.enum(['none', 'pick', 'reject'])
   }),
   z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
     entrySeq: z.number().int().positive(),
     entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
     kind: z.literal('collection_created'),
     collectionId: z.number().int().positive(),
     name: z.string().min(1).max(80),
     normalizedName: z.string().min(1).max(80)
   }),
   z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
     entrySeq: z.number().int().positive(),
     entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
     kind: z.literal('collection_renamed'),
     collectionId: z.number().int().positive(),
     oldName: z.string().min(1).max(80),
@@ -723,12 +733,15 @@ export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
     normalizedName: z.string().min(1).max(80)
   }),
   z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
     entrySeq: z.number().int().positive(),
     entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
     kind: z.literal('membership_added'),
     collectionId: z.number().int().positive(),
     collectionName: z.string().min(1),
     locationId: z.number().int().positive(),
+    expectedRevision: z.string().min(1),
     normalizedPath: z.string().min(1),
     byteSize: z.number().int().nonnegative(),
     activeHash: z
@@ -738,13 +751,33 @@ export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
     discoveryObservationId: z.number().int().positive()
   }),
   z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
     entrySeq: z.number().int().positive(),
     entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
     kind: z.literal('membership_removed'),
     collectionId: z.number().int().positive(),
     collectionName: z.string().min(1),
     locationId: z.number().int().positive(),
+    expectedRevision: z.string().min(1),
     normalizedPath: z.string().min(1)
+  }),
+  z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
+    kind: z.literal('op_committed'),
+    targetSeq: z.number().int().positive()
+  }),
+  z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
+    kind: z.literal('op_aborted'),
+    targetSeq: z.number().int().positive(),
+    reason: z.string().min(1)
   })
 ])
 export type AnnotationJournalEntry = z.infer<typeof AnnotationJournalEntrySchema>
