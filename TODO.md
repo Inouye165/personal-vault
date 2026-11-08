@@ -68,16 +68,20 @@ Verification: implementation host **326 passed, 0 skipped** across all 16 test f
 
 ---
 
-## Stage 4: Verified Vault Copying and Portable Metadata (Implemented — Awaiting Independent Review)
+## Stage 4: Verified Vault Copying and Portable Metadata
 
-Status: **implemented & corrected across all independent review findings; awaiting independent re-review** (see HANDOFF.md).
+Status: **complete; independent review accepted at `1a1fb69`** (see HANDOFF.md for evidence).
+
+Verification: implementation host & independent review verification **421 passed across 23 test files** (exit code 0), with strict typecheck (exit code 0), ESLint (exit code 0), Prettier formatting check (exit code 0), production bundle build (exit code 0), unpacked desktop binary build (exit code 0), real Electron verified vault import in built and unpacked modes (`verify:vault`, `verify:vault:unpacked` — 11/11 checks passed each, exit code 0), duplicate review (`verify:duplicates` — 18/18 checks passed, exit code 0), scan workflow (`verify:scan` — 14/14 checks passed, exit code 0), SQLite catalog (`verify:sqlite` — 8/8 checks passed, exit code 0), real Electron smoke checks in built and unpacked modes (`smoke:built`, `smoke:unpacked` — passed, exit code 0), and source preservation invariance confirmed across all checks.
 
 - [x] Vault storage directory initialization and identification (`vault.json` identity manifest with versioning, name, UUID, and creation timestamp). Conflicting or invalid existing identity files are rejected without modification (`VaultInitializationError`).
 - [x] Source/vault separation and overlap validation with canonical `realpath` containment checks rejecting symlink/junction escapes.
 - [x] Verified copy pipeline (`copyAndVerifyFileToVault`): current source contents stream-hashed and descriptor stability verified on EVERY path (including shortcuts); destination integrity verified independently.
+- [x] Internal vault containment (`assertPathContainedInVault`): canonical realpath containment and segment-by-segment `lstat` traversal checking rejecting symlinks and Windows directory junctions in `files/`, content directories, `.vault-temp/`, identity files, manifests, and destinations.
 - [x] Strict overwrite prevention: atomic `COPYFILE_EXCL` publication; unmanaged matching destination collisions rejected; owned staging file cleanup with `pv_staging_${vaultId}_` prefix.
 - [x] Content-addressed vault storage (`files/<prefix>/<sha256>/<safeName>`) with safe collision handling and deduplicated storage for duplicate content.
-- [x] Portable metadata manifests (`manifest.json` sidecars) preserving multi-source provenance, actual recorded catalog facts (`firstDiscoveredAtMs`, `lastSeenAtMs`, `hashVerifiedAtMs`, `discoveryObservationId`), explicit `null`s for missing capture dates/locations, separate from review decisions, corrupt manifests throw `VaultManifestCorruptedError`, fully recoverable without SQLite.
+- [x] Portable metadata manifests (`manifest.json` sidecars) strictly validated with Zod (`VaultManifestSchema`), preserving multi-source provenance, actual recorded catalog facts (`firstDiscoveredAtMs`, `lastSeenAtMs`, `hashVerifiedAtMs`, `discoveryObservationId`), explicit `null`s for missing capture dates/locations, separate from review decisions, corrupt manifests throw `VaultManifestCorruptedError`, fully recoverable without SQLite.
+- [x] Safe publication and crash recovery: atomic directory publication using `.pv_in_progress_${vaultId}_${jobId}.json` markers, strictly non-overwriting collision checks with `COPYFILE_EXCL` fallback, and deterministic in-progress marker recovery for interrupted jobs.
 - [x] Resumable import coordinator (`VaultImportCoordinator`) with exact job-scope preservation via `getVaultImportItems`, observation currency revalidation (`isDiscoveryCurrent`, `isHashActive`), bounded queries without 1,000-candidate cutoffs, concurrency locking on start and resume, pause, resume, cooperative cancellation via `AbortSignal`, restart recovery (`interrupted` status), truthful completion status (`failed` when all items fail), and prompt IPC acknowledgment.
 - [x] SQLite catalog schema expansion (Migration 6) adding `vaults`, `vault_copies`, `vault_imports`, and `vault_import_items` tables with audit trail.
 - [x] Narrow typed IPC channels (`VAULT_*`) with strict bidirectional Zod validation (`ResumeImportRequestSchema`, `CancelImportRequestSchema`, `PauseImportRequestSchema`) and top-level sender authorization.
@@ -87,6 +91,8 @@ Status: **implemented & corrected across all independent review findings; awaiti
 ---
 
 ## Stage 5: Cached, Virtualized Photo Browsing; Ratings and Similarity Review
+
+Status: **planned; not started.**
 
 - [ ] Virtualized grid browsing capable of rendering large collections smoothly.
 - [ ] Thumbnail generation and secure local disk cache.

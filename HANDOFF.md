@@ -4,11 +4,12 @@
 
 - **Workspace**: `D:\organizer`
 - **Branch**: `feat/stage-4-verified-import` (branched directly from verified Stage 3 closeout commit `cf91653`, ancestry verified)
-- **Review Commit**: `1fa87d8` (Stage 4 independent review findings addressed)
+- **Accepted Revision**: `1a1fb69` (Stage 4 verified vault copying and portable metadata independently accepted)
 - **Stage 1 status**: complete (independently accepted at `070e3cb`).
 - **Stage 2 status**: complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
-- **Stage 4 status**: **Implemented & corrected across all review findings; awaiting independent re-review.** (Never implement on `main`; no push or merge authorized).
+- **Stage 4 status**: **complete; independently accepted at `1a1fb69`**.
+- **Stage 5 status**: **planned; not started**. (Never implement on `main`; no push or merge authorized).
 
 ---
 
@@ -115,30 +116,46 @@ The independent review at `1fa87d8` identified eight issues. All eight have been
 
 ## 2. Verification Results
 
-All checks executed from `D:\organizer` on the implementation host:
+All checks executed from `D:\organizer`:
 
-### 2.1 Quality Gates
+### 2.1 Implementation-Host Quality Gates & Verification Suites
 
-| Check                   | Command                | Result                              | Exit Code | Notes                                                        |
-| ----------------------- | ---------------------- | ----------------------------------- | --------- | ------------------------------------------------------------ |
-| Unit & Behavioral Tests | `npm test`             | **421 passed across 23 test files** | 0         | Node SQLite, copier, coordinator, catalog, preload, renderer |
-| Strict Typecheck        | `npm run typecheck`    | **Clean pass**                      | 0         | Node + Web TypeScript configs                                |
-| ESLint                  | `npm run lint`         | **Clean pass**                      | 0         | 0 errors, 0 warnings                                         |
-| Prettier Formatting     | `npm run format:check` | **Clean pass**                      | 0         | All files formatted                                          |
-| Production Bundle Build | `npm run build`        | **Clean pass**                      | 0         | Main, preload, renderer bundles generated                    |
-| Desktop Unpacked Build  | `npm run build:unpack` | **Clean pass**                      | 0         | `dist/win-unpacked/Personal Vault.exe` created               |
+| Check                                 | Command                         | Result                              | Exit Code | Notes                                                                                                                                                                                                                          |
+| ------------------------------------- | ------------------------------- | ----------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Unit & Behavioral Tests               | `npm test`                      | **421 passed across 23 test files** | 0         | Node SQLite, copier, coordinator, catalog, preload, renderer                                                                                                                                                                   |
+| Strict Typecheck                      | `npm run typecheck`             | **Clean pass**                      | 0         | Node + Web TypeScript configs                                                                                                                                                                                                  |
+| ESLint                                | `npm run lint`                  | **Clean pass**                      | 0         | 0 errors, 0 warnings                                                                                                                                                                                                           |
+| Prettier Formatting                   | `npm run format:check`          | **Clean pass**                      | 0         | All files formatted                                                                                                                                                                                                            |
+| Production Bundle Build               | `npm run build`                 | **Clean pass**                      | 0         | Main, preload, renderer bundles generated                                                                                                                                                                                      |
+| Desktop Unpacked Build                | `npm run build:unpack`          | **Clean pass**                      | 0         | `dist/win-unpacked/Personal Vault.exe` created                                                                                                                                                                                 |
+| Real Electron Vault Import (Built)    | `npm run verify:vault`          | **11/11 passed**                    | 0         | Real Electron CDP: init, overlap reject, scan, import, manifest verification, duplicate merging, idempotency, modified-source reject, active cancellation, crash recovery & restart resume, and source preservation invariance |
+| Real Electron Vault Import (Unpacked) | `npm run verify:vault:unpacked` | **11/11 passed**                    | 0         | Same complete 11-step verification on packaged Windows executable                                                                                                                                                              |
+| Real Electron Duplicate Review        | `npm run verify:duplicates`     | **18/18 passed**                    | 0         | Duplicate review regression check across scan, inspection, restart persistence, rescan invalidation                                                                                                                            |
+| Real Electron Scan & Recovery         | `npm run verify:scan`           | **14/14 passed**                    | 0         | Scan, pause/resume, in-flight process kill recovery, restart revalidation, source preservation                                                                                                                                 |
+| Real Electron SQLite Repository       | `npm run verify:sqlite`         | **8/8 passed**                      | 0         | Electron `node:sqlite` driver verification                                                                                                                                                                                     |
+| Real Electron Smoke (Built)           | `npm run smoke:built`           | **Passed**                          | 0         | Preload bridge surface, navigation guard, CSP                                                                                                                                                                                  |
+| Real Electron Smoke (Unpacked)        | `npm run smoke:unpacked`        | **Passed**                          | 0         | Packaged binary smoke check                                                                                                                                                                                                    |
 
-### 2.2 Real Electron Verification Suites
+### 2.2 Independent Review Reported Verification Results
 
-| Verification Suite              | Target                         | Result           | Exit Code | Verification Details                                                                                                                                                                                                           |
-| ------------------------------- | ------------------------------ | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `npm run verify:vault`          | Built (`out/main`)             | **11/11 passed** | 0         | Real Electron CDP: init, overlap reject, scan, import, manifest verification, duplicate merging, idempotency, modified-source reject, active cancellation, crash recovery & restart resume, and source preservation invariance |
-| `npm run verify:vault:unpacked` | Unpacked (`dist/win-unpacked`) | **11/11 passed** | 0         | Same complete 11-step verification on packaged Windows executable                                                                                                                                                              |
-| `npm run verify:duplicates`     | Built (`out/main`)             | **18/18 passed** | 0         | Duplicate review regression check across scan, inspection, restart persistence, rescan invalidation                                                                                                                            |
-| `npm run verify:scan`           | Built (`out/main`)             | **14/14 passed** | 0         | Scan, pause/resume, in-flight process kill recovery, restart revalidation, source preservation                                                                                                                                 |
-| `npm run verify:sqlite`         | Built (`out/main`)             | **8/8 passed**   | 0         | Electron `node:sqlite` driver verification                                                                                                                                                                                     |
-| `npm run smoke:built`           | Built (`out/main`)             | **Passed**       | 0         | Preload bridge surface, navigation guard, CSP                                                                                                                                                                                  |
-| `npm run smoke:unpacked`        | Unpacked (`dist/win-unpacked`) | **Passed**       | 0         | Packaged binary smoke check                                                                                                                                                                                                    |
+The independent review at commit `1a1fb69` independently executed and verified all quality gates and real-Electron suites:
+
+| Verification Suite / Gate                                         | Reviewer Result                | Exit Code | Details                                                                                                                                                                                                 |
+| ----------------------------------------------------------------- | ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Unit & Behavioral Tests** (`npm test`)                          | **421 passed across 23 files** | 0         | Copier (14), Coordinator (5), Catalog (46), IPC (141), Duplicate review (11), Scan jobs (30), UI components                                                                                             |
+| **Strict Typecheck** (`npm run typecheck`)                        | **Clean pass**                 | 0         | TypeScript strict checking across Node and Web targets (0 errors)                                                                                                                                       |
+| **ESLint** (`npm run lint`)                                       | **Clean pass**                 | 0         | Entire codebase compliant (0 errors, 0 warnings)                                                                                                                                                        |
+| **Formatting Compliance** (`npm run format:check`)                | **Clean pass**                 | 0         | 100% Prettier compliant                                                                                                                                                                                 |
+| **Production Bundle Build** (`npm run build`)                     | **Clean pass**                 | 0         | Main, preload, and renderer bundles built cleanly                                                                                                                                                       |
+| **Desktop Unpacked Build** (`npm run build:unpack`)               | **Clean pass**                 | 0         | Freshly rebuilt `dist/win-unpacked/Personal Vault.exe`                                                                                                                                                  |
+| **Vault Verification Built** (`npm run verify:vault`)             | **11/11 passed**               | 0         | Real Electron CDP: init, overlap reject, candidate query, verified copy, multi-source manifest, idempotency, modified source rejection, active cancel, restart recovery, source preservation invariance |
+| **Vault Verification Unpacked** (`npm run verify:vault:unpacked`) | **11/11 passed**               | 0         | Same complete 11-step verification on freshly rebuilt Windows binary                                                                                                                                    |
+| **Duplicate Review Built** (`npm run verify:duplicates`)          | **18/18 passed**               | 0         | Regression check: scan, grouping, review persistence, out-of-band invalidation, stale rejection, source preservation                                                                                    |
+| **Scan/Recovery Built** (`npm run verify:scan`)                   | **14/14 passed**               | 0         | Regression check: pause/resume, mid-flight process kill recovery, restart revalidation, source preservation                                                                                             |
+| **SQLite Built** (`npm run verify:sqlite`)                        | **8/8 passed**                 | 0         | `node:sqlite` driver verification in Electron runtime                                                                                                                                                   |
+| **Smoke Built** (`npm run smoke:built`)                           | **Passed**                     | 0         | Preload bridge surface, navigation guard, CSP                                                                                                                                                           |
+| **Smoke Unpacked** (`npm run smoke:unpacked`)                     | **Passed**                     | 0         | Packaged binary smoke check                                                                                                                                                                             |
+| **Source Preservation Invariance**                                | **Confirmed**                  | 0         | Byte-for-byte identical, untouched source originals across all workflows                                                                                                                                |
 
 ---
 
@@ -156,4 +173,5 @@ The following unrelated files remain intact and untouched:
 ## 4. Scope Exclusions & Next Steps
 
 - **Scope Exclusions**: No source or vault deletion, OCR, semantic search, visual similarity review, photo grid/thumbnails, or cloud uploads.
-- **Stage 4 Status**: Implemented, corrected, and awaiting independent re-review. Do NOT push, merge, or begin Stage 5 until independent review is complete.
+- **Stage 4 Status**: Complete and independently accepted at `1a1fb69`.
+- **Stage 5 Status**: Planned and not started. Do NOT push, merge, or begin Stage 5 until authorized.

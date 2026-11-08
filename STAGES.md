@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stage 1, Stage 2, and Stage 3 are complete (independently accepted at `070e3cb`, `71e1af7`, and `79bbf44`). Stage 4 has been implemented, all independent review findings from `1fa87d8` have been corrected and verified, and Stage 4 is awaiting independent re-review. Stages 5-8 are future work. Public release has not occurred and has no scheduled date.
+Stage 1, Stage 2, Stage 3, and Stage 4 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, and `1a1fb69`). Stages 5-8 are future work. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status          | Acceptance |
-| ----- | -------------------------------------------------------------- | --------------- | ---------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete        | `070e3cb`  |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete        | `71e1af7`  |
-| 3     | Exact duplicate grouping and review                            | Complete        | `79bbf44`  |
-| 4     | Verified vault copying and portable metadata                   | Awaiting review | Pending    |
-| 5     | Fast photo browsing, ratings, and similarity review            | Planned         | Pending    |
-| 6     | Semantic photo search and metadata filters                     | Planned         | Pending    |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned         | Pending    |
-| 8     | Export, recovery, release validation, beta, and public release | Planned         | Pending    |
+| Stage | Deliverable                                                    | Status   | Acceptance |
+| ----- | -------------------------------------------------------------- | -------- | ---------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete | `070e3cb`  |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete | `71e1af7`  |
+| 3     | Exact duplicate grouping and review                            | Complete | `79bbf44`  |
+| 4     | Verified vault copying and portable metadata                   | Complete | `1a1fb69`  |
+| 5     | Fast photo browsing, ratings, and similarity review            | Planned  | Pending    |
+| 6     | Semantic photo search and metadata filters                     | Planned  | Pending    |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned  | Pending    |
+| 8     | Export, recovery, release validation, beta, and public release | Planned  | Pending    |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -73,18 +73,21 @@ Exit: users can understand and review duplicate groups without losing locations 
 
 ## Stage 4 - Verified vault copying
 
-**Implemented; awaiting independent review.**
+**Complete; independently accepted at 1a1fb69.**
 
-- [x] Initialize vault storage directory with versioned identity manifest (`vault.json`) and validate separation from source roots.
+- [x] Initialize vault storage directory with versioned identity manifest (`vault.json`) and validate separation from source roots. Conflicting or invalid existing identity files are rejected without modification (`VaultInitializationError`).
 - [x] Strict source preservation: source files are strictly read-only; originals are never moved, renamed, touched, overwritten, or deleted.
-- [x] Verified copy pipeline (`copyAndVerifyFileToVault`): pre/post `fstat` source descriptor checks, bounded 64 KiB chunk streaming SHA-256 calculation, post-read path revalidation, and independent post-write destination staging SHA-256 verification before atomic publication.
+- [x] Verified copy pipeline (`copyAndVerifyFileToVault`): pre/post `fstat` source descriptor checks, bounded 64 KiB chunk streaming SHA-256 calculation on every path (including shortcuts), post-read live path revalidation, and independent post-write destination staging SHA-256 verification before atomic publication.
+- [x] Internal vault containment (`assertPathContainedInVault`): canonical realpath containment and iterative segment-by-segment `lstat` traversal checking rejecting symlinks and Windows directory junctions in `files/`, content directories, `.vault-temp/`, identity files, manifests, and destinations.
 - [x] Content-addressed vault storage (`files/<prefix>/<sha256>/<safeName>`) with safe collision handling; duplicate content shares a verified copy while preserving multi-source provenance.
-- [x] Portable metadata manifests (`manifest.json` sidecars) recording original paths, filesystem timestamps, byte size, verified hashes, observation provenance, and audit results; preserving explicit `null`s for missing capture dates/locations without SQLite dependency.
-- [x] Resumable import coordinator (`VaultImportCoordinator`) with single-active-job concurrency locking, pause/resume, cooperative cancellation via `AbortSignal`, restart recovery (`interrupted` status), and owned temporary staging file cleanup.
+- [x] Portable metadata manifests (`manifest.json` sidecars) strictly validated with Zod (`VaultManifestSchema`), recording original paths, filesystem timestamps, byte size, verified hashes, observation provenance, and audit results; preserving explicit `null`s for missing capture dates/locations without SQLite dependency.
+- [x] Safe publication and crash recovery: atomic directory publication using `.pv_in_progress_${vaultId}_${jobId}.json` markers, strictly non-overwriting collision checks with `COPYFILE_EXCL` fallback, and deterministic in-progress marker recovery for interrupted jobs.
+- [x] Resumable import coordinator (`VaultImportCoordinator`) with exact job-scope preservation via `getVaultImportItems`, observation currency revalidation (`isDiscoveryCurrent`, `isHashActive`), bounded queries without 1,000-candidate cutoffs, concurrency locking on start and resume, pause, resume, cooperative cancellation via `AbortSignal`, restart recovery (`interrupted` status), truthful completion status (`failed` when all items fail), and prompt IPC acknowledgment.
 - [x] SQLite catalog schema expansion (Migration 6) adding `vaults`, `vault_copies`, `vault_imports`, and `vault_import_items` tables with audit trail.
-- [x] Narrow typed IPC channels (`VAULT_*`) with strict bidirectional Zod validation and top-level sender authorization.
-- [x] Accessible renderer UI (`VaultImportPanel`) with setup card, candidate selection table with filters, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, verified success banner, and operations distinction notice.
-- [x] Isolated-fixture verification script (`scripts/verify-electron-vault-import.mjs`) exercising vault initialization, overlap rejection, candidate queries, verified copying, duplicate content manifest merging, idempotency, modified source rejection, cancellation, restart recovery, and source preservation invariance across real Electron built and unpacked modes.
+- [x] Narrow typed IPC channels (`VAULT_*`) with strict bidirectional Zod validation (`ResumeImportRequestSchema`, `CancelImportRequestSchema`, `PauseImportRequestSchema`) and top-level sender authorization.
+- [x] Accessible renderer UI (`VaultImportPanel`) with functional "Change Vault", candidate pagination beyond 100 items with monotonic request token protection, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, truth-aligned banners (no "Verified Success" for failures), and operations distinction notice.
+- [x] Isolated-fixture verification script (`scripts/verify-electron-vault-import.mjs`) exercising vault initialization, overlap rejection, candidate queries, verified copying, duplicate content manifest merging, idempotency, modified source rejection, active cancellation during copying, restart recovery & resume, and source preservation invariance across real Electron built and unpacked modes.
+- [x] Independent review verification passed at `1a1fb69`: 421 tests passed across 23 test files (exit 0); typecheck, lint, formatting, production build, and unpacked build clean pass (exit 0); real-Electron verified vault import (built & unpacked) 11/11 passed each (exit 0); duplicate review 18/18 passed (exit 0); scan workflow 14/14 passed (exit 0); SQLite 8/8 passed (exit 0); smoke checks (built & unpacked) passed (exit 0); source preservation invariance confirmed.
 
 Exit: originals can be copied with verified integrity and recoverable metadata outside SQLite.
 
