@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { VaultIdentitySchema, type VaultIdentity } from '../../../shared/validation/ipc-schemas'
-import { VaultNotInitializedError } from './errors'
+import { VaultInitializationError, VaultNotInitializedError } from './errors'
+import { assertPathContainedInVault } from './containment'
 
 const VAULT_IDENTITY_FILENAME = 'vault.json'
 const CURRENT_APP_VERSION = '0.1.0'
@@ -32,6 +33,7 @@ export function isVaultDirectory(vaultPath: string): boolean {
 
 export function loadVaultIdentity(vaultPath: string): VaultIdentity {
   const filePath = getVaultIdentityPath(vaultPath)
+  assertPathContainedInVault(vaultPath, filePath, 'vault identity path')
   if (!existsSync(filePath)) {
     throw new VaultNotInitializedError(vaultPath)
   }
@@ -62,9 +64,23 @@ export function initializeVault(options: InitializeVaultOptions): VaultIdentity 
 
   mkdirSync(options.vaultPath, { recursive: true })
 
-  // If vault.json already exists and is valid, return existing identity
-  if (isVaultDirectory(options.vaultPath)) {
-    return loadVaultIdentity(options.vaultPath)
+  const filePath = getVaultIdentityPath(options.vaultPath)
+  assertPathContainedInVault(options.vaultPath, filePath, 'vault identity path')
+
+  // If vault.json already exists:
+  // If it's a valid Personal Vault identity, return it.
+  // If it's invalid or unrelated, throw VaultInitializationError without overwriting it.
+  if (existsSync(filePath)) {
+    try {
+      const raw = readFileSync(filePath, 'utf-8')
+      const parsed = JSON.parse(raw)
+      return VaultIdentitySchema.parse(parsed)
+    } catch (err) {
+      throw new VaultInitializationError(
+        options.vaultPath,
+        `Existing vault.json is invalid or unrelated: ${(err as Error).message}`
+      )
+    }
   }
 
   const identity: VaultIdentity = {
@@ -75,8 +91,17 @@ export function initializeVault(options: InitializeVaultOptions): VaultIdentity 
     appVersion: CURRENT_APP_VERSION
   }
 
-  const filePath = getVaultIdentityPath(options.vaultPath)
-  writeFileSync(filePath, JSON.stringify(identity, null, 2), 'utf-8')
+  try {
+    writeFileSync(filePath, JSON.stringify(identity, null, 2), {
+      encoding: 'utf-8',
+      flag: 'wx'
+    })
+  } catch (err) {
+    throw new VaultInitializationError(
+      options.vaultPath,
+      `Could not write vault.json: ${(err as Error).message}`
+    )
+  }
 
   return identity
 }

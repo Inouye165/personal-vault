@@ -64,5 +64,6 @@ export type {
   RecordScanJobErrorInput,
   UnhashedFileRecord,
   UnhashedFilesOptions,
-  UnhashedCountResult
+  UnhashedCountResult,
+  VaultImportItemDetail
 } from './types'

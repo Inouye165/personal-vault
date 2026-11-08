@@ -16,6 +16,20 @@ export class VaultNotInitializedError extends VaultError {
   }
 }
 
+export class VaultInitializationError extends VaultError {
+  constructor(path: string, reason: string) {
+    super(`Failed to initialize Personal Vault at "${path}": ${reason}`)
+    this.name = 'VaultInitializationError'
+  }
+}
+
+export class VaultManifestCorruptedError extends VaultError {
+  constructor(path: string, reason: string) {
+    super(`Vault manifest at "${path}" is corrupted or invalid: ${reason}`)
+    this.name = 'VaultManifestCorruptedError'
+  }
+}
+
 export class VaultOverlapError extends VaultError {
   constructor(message: string) {
     super(`Unsafe vault/source storage overlap: ${message}`)

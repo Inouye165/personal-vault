@@ -395,23 +395,24 @@ async function run() {
     // Content hash for file1 & file2
     const hash1 = baselineFacts.get(file1Path).sha256
     const prefix1 = hash1.slice(0, 2)
-    const storedFile1 = join(vaultDir, 'files', prefix1, hash1, 'family_beach.jpg')
     const manifestPath1 = join(vaultDir, 'files', prefix1, hash1, 'manifest.json')
+
+    if (!existsSync(manifestPath1)) {
+      throw new Error(`Portable manifest does not exist: ${manifestPath1}`)
+    }
+
+    // Verify manifest contents without SQLite
+    const manifest1 = JSON.parse(readFileSync(manifestPath1, 'utf8'))
+    const storedFile1 = join(vaultDir, manifest1.managedCopy.relativePath)
 
     if (!existsSync(storedFile1)) {
       throw new Error(`Managed vault file does not exist: ${storedFile1}`)
-    }
-    if (!existsSync(manifestPath1)) {
-      throw new Error(`Portable manifest does not exist: ${manifestPath1}`)
     }
 
     const diskHash1 = computeSha256(storedFile1)
     if (diskHash1 !== hash1) {
       throw new Error(`Stored file hash mismatch! Expected ${hash1}, got ${diskHash1}`)
     }
-
-    // Verify manifest contents without SQLite
-    const manifest1 = JSON.parse(readFileSync(manifestPath1, 'utf8'))
     if (manifest1.formatVersion !== 1) {
       throw new Error(`Invalid manifest version: ${manifest1.formatVersion}`)
     }
@@ -517,65 +518,180 @@ async function run() {
     }
     console.log('[PASS] Observable source file modification detected and rejected safely')
 
-    // Test 9: Cancellation
-    console.log('       Testing import cancellation...')
-    // Create an extra file to import
-    const extraFilePath = join(sourceDir, 'large_extra.jpg')
-    writeFileSync(extraFilePath, Buffer.alloc(1024 * 1024, 0x11)) // 1MB
-    // Run scan to catalog it
+    // Test 9: Active Cancellation
+    console.log('       Testing active import cancellation while copying...')
+    const cancelFilePaths = []
+    const cancelFileLocationIds = []
+    for (let c = 0; c < 5; c++) {
+      const cPath = join(sourceDir, `cancel_file_${c}.jpg`)
+      writeFileSync(cPath, Buffer.alloc(1024 * 1024, 0x33 + c)) // 1 MB each
+      cancelFilePaths.push(cPath)
+    }
+
+    // Run scan to catalog cancellation test files
     await evaluate(cdp, `window.api.startScan(${JSON.stringify({ roots: [sourceDir] })})`)
-    let extraScanDone = false
-    const extraScanDeadline = Date.now() + 20000
-    while (Date.now() < extraScanDeadline) {
+    let cancelScanDone = false
+    const cancelScanDeadline = Date.now() + 20000
+    while (Date.now() < cancelScanDeadline) {
       const latest = await evaluate(cdp, `window.api.getLatestScanJob()`)
       if (latest?.job?.status === 'completed') {
-        extraScanDone = true
+        cancelScanDone = true
         break
       }
       await sleep(250)
     }
-    if (!extraScanDone) throw new Error('Scan for cancellation test timed out')
+    if (!cancelScanDone) throw new Error('Scan for cancellation test timed out')
 
-    const newCandidates = await evaluate(
+    const cancelCandidates = await evaluate(
       cdp,
-      `window.api.getImportCandidates(${JSON.stringify({ vaultId })})`
+      `window.api.getImportCandidates(${JSON.stringify({ vaultId, filter: 'unimported' })})`
     )
-    const extraCandidate = newCandidates.items.find((i) => i.originalPath === extraFilePath)
-    if (!extraCandidate) throw new Error('extraCandidate not found')
-
-    await evaluate(
-      cdp,
-      `window.api.startImport(${JSON.stringify({ vaultId, fileLocationIds: [extraCandidate.fileLocationId] })})`
-    )
-    // Immediately cancel
-    await evaluate(cdp, `window.api.cancelImport()`)
-    await sleep(500)
-    const cancelledJob = await evaluate(cdp, `window.api.getLatestImportJob()`)
-    if (cancelledJob?.job?.status !== 'cancelled' && cancelledJob?.job?.status !== 'completed') {
-      // It might complete very quickly for small file or be cancelled
+    for (const cPath of cancelFilePaths) {
+      const cand = cancelCandidates.items.find((i) => i.originalPath === cPath)
+      if (cand) cancelFileLocationIds.push(cand.fileLocationId)
     }
-    console.log('[PASS] Cancellation handled cleanly')
 
-    // Test 10: Restart recovery
-    console.log('       Testing restart recovery of interrupted jobs...')
+    // Start import of the 5 files
+    const cancelImportStart = await evaluate(
+      cdp,
+      `window.api.startImport(${JSON.stringify({ vaultId, fileLocationIds: cancelFileLocationIds })})`
+    )
+    if (!cancelImportStart?.job) {
+      throw new Error(`Failed to start cancel test job: ${JSON.stringify(cancelImportStart)}`)
+    }
+
+    // Actively cancel the job
+    const cancelActionRes = await evaluate(cdp, `window.api.cancelImport()`)
+    if (!cancelActionRes?.success) {
+      throw new Error(`cancelImport invocation failed: ${JSON.stringify(cancelActionRes)}`)
+    }
+
+    // Await job termination
+    const cancelWaitDeadline = Date.now() + 15000
+    let finalCancelledJob = null
+    while (Date.now() < cancelWaitDeadline) {
+      const latest = await evaluate(cdp, `window.api.getLatestImportJob()`)
+      if (latest?.job?.id === cancelImportStart.job.id) {
+        if (latest.job.status === 'cancelled' || latest.job.status === 'completed') {
+          finalCancelledJob = latest.job
+          break
+        }
+      }
+      await sleep(200)
+    }
+
+    if (!finalCancelledJob || finalCancelledJob.status !== 'cancelled') {
+      throw new Error(`Expected job to be cancelled, got: ${JSON.stringify(finalCancelledJob)}`)
+    }
+    console.log(
+      `[PASS] Active cancellation verified (job status: cancelled, ${finalCancelledJob.copiedFiles}/${finalCancelledJob.totalFiles} copied before cancel)`
+    )
+
+    // Test 10: Interruption and Restart Recovery
+    console.log('       Testing interruption and restart recovery...')
+    const restartFilePaths = []
+    const restartLocationIds = []
+    for (let r = 0; r < 4; r++) {
+      const rPath = join(sourceDir, `restart_file_${r}.jpg`)
+      writeFileSync(rPath, Buffer.alloc(1024 * 1024, 0x44 + r)) // 1 MB each
+      restartFilePaths.push(rPath)
+    }
+
+    // Scan
+    await evaluate(cdp, `window.api.startScan(${JSON.stringify({ roots: [sourceDir] })})`)
+    let restartScanDone = false
+    const restartScanDeadline = Date.now() + 20000
+    while (Date.now() < restartScanDeadline) {
+      const latest = await evaluate(cdp, `window.api.getLatestScanJob()`)
+      if (latest?.job?.status === 'completed') {
+        restartScanDone = true
+        break
+      }
+      await sleep(250)
+    }
+    if (!restartScanDone) throw new Error('Scan for restart recovery test timed out')
+
+    const restartCandidates = await evaluate(
+      cdp,
+      `window.api.getImportCandidates(${JSON.stringify({ vaultId, filter: 'unimported' })})`
+    )
+    for (const rPath of restartFilePaths) {
+      const cand = restartCandidates.items.find((i) => i.originalPath === rPath)
+      if (cand) restartLocationIds.push(cand.fileLocationId)
+    }
+
+    // Start multi-file import
+    const restartStartRes = await evaluate(
+      cdp,
+      `window.api.startImport(${JSON.stringify({ vaultId, fileLocationIds: restartLocationIds })})`
+    )
+    const restartJobId = restartStartRes.job.id
+
+    // Abruptly terminate the process while or right after starting
     cdp.close()
     killTree(child)
     await sleep(1000)
 
     // Relaunch the app on the same userDataDir
+    console.log('       Relaunching Electron application to test recovery...')
     const port2 = await getFreePort()
     child = await launchApp(userDataDir, port2)
     const pageTarget2 = await findPageTarget(port2, Date.now() + 15000)
     cdp = await connectCdp(pageTarget2.webSocketDebuggerUrl)
     await waitForApi(cdp, 15000)
 
-    const activeAfterRestart = await evaluate(cdp, `window.api.getActiveImportJob()`)
-    if (activeAfterRestart?.job) {
+    // Verify recovery marked job as interrupted on startup
+    const jobAfterRestart = await evaluate(cdp, `window.api.getLatestImportJob()`)
+    if (!jobAfterRestart?.job || jobAfterRestart.job.id !== restartJobId) {
       throw new Error(
-        `Expected no running job after restart, got: ${JSON.stringify(activeAfterRestart.job)}`
+        `Expected interrupted job ${restartJobId}, got: ${JSON.stringify(jobAfterRestart)}`
       )
     }
-    console.log('[PASS] Startup recovery marked interrupted jobs and initialized cleanly')
+    if (
+      jobAfterRestart.job.status !== 'interrupted' &&
+      jobAfterRestart.job.status !== 'completed'
+    ) {
+      throw new Error(
+        `Expected status 'interrupted' or 'completed', got: ${jobAfterRestart.job.status}`
+      )
+    }
+    console.log(
+      `[PASS] Startup recovery verified (interrupted job recovered with status: ${jobAfterRestart.job.status})`
+    )
+
+    // Resume the interrupted job
+    if (jobAfterRestart.job.status === 'interrupted') {
+      console.log('       Resuming interrupted job across restart...')
+      const resumeRes = await evaluate(
+        cdp,
+        `window.api.resumeImport(${JSON.stringify(restartJobId)})`
+      )
+      if (!resumeRes?.success) {
+        throw new Error(`resumeImport failed: ${JSON.stringify(resumeRes)}`)
+      }
+
+      // Wait for resumed completion
+      const resumeDeadline = Date.now() + 20000
+      let completedResumedJob = null
+      while (Date.now() < resumeDeadline) {
+        const latest = await evaluate(cdp, `window.api.getLatestImportJob()`)
+        if (
+          latest?.job?.id === restartJobId &&
+          (latest.job.status === 'completed' || latest.job.status === 'failed')
+        ) {
+          completedResumedJob = latest.job
+          break
+        }
+        await sleep(250)
+      }
+
+      if (!completedResumedJob || completedResumedJob.status !== 'completed') {
+        throw new Error(`Resumed job failed to complete: ${JSON.stringify(completedResumedJob)}`)
+      }
+      console.log(
+        `[PASS] Resumed job completed successfully across app restart (${completedResumedJob.copiedFiles}/${completedResumedJob.totalFiles} files copied)`
+      )
+    }
 
     // Test 11: Inviolable principle — Source preservation invariance
     console.log('       Verifying source preservation invariance...')
@@ -622,7 +738,11 @@ async function run() {
   }
 }
 
-run().catch((err) => {
-  console.error('\n[FAIL] Stage 4 Electron Verification failed:', err)
-  process.exit(1)
-})
+run()
+  .then(() => {
+    process.exit(0)
+  })
+  .catch((err) => {
+    console.error('\n[FAIL] Stage 4 Electron Verification failed:', err)
+    process.exit(1)
+  })

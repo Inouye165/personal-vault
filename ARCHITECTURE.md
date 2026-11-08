@@ -264,36 +264,50 @@ src/
     - **Separation of Source & Vault Storage**:
       - Strict separation enforced using canonical `realpath` checks.
       - Symlink and Windows directory junction escapes rejected eagerly with `VaultOverlapError` across all IPC boundaries (`initializeVault`, `setActiveVault`, and `startScan`).
-    - **Identification of Managed Vault Storage**:
+    - **Identification of Managed Vault Storage & Overwrite Prevention**:
       - Vault directory is explicitly identified by a versioned identity manifest `vault.json` in the root of the vault (`formatVersion: 1`, `vaultId`, `vaultName`, `createdAtMs`, `appVersion`).
-      - Arbitrary existing unmanaged directories or files cannot be treated as vault copies.
+      - Conflicting or invalid existing identity files are rejected without modification (`VaultInitializationError`).
+      - Internal vault containment: `assertPathContainedInVault` validates canonical realpath containment and walks all path segments with `lstat` to reject symlink and directory junction redirections in `files/`, content directories, `.vault-temp/`, identity files, manifests, and destination files.
+      - Arbitrary existing unmanaged files at the destination cannot be treated as vault copies: unmanaged matching files are rejected with `destination_collision`.
+      - Safe publication and interruption recovery:
+        - Files are staged in `.vault-temp/` and independently stream-hashed before publication.
+        - Prior to publication, an in-progress marker `.pv_in_progress_${vaultId}_${jobId}.json` is recorded.
+        - Destination publication uses atomic filesystem `renameSync` within the same vault filesystem with strictly non-overwriting collision checks and `constants.COPYFILE_EXCL` fallback.
+        - If interrupted post-publication before manifest creation, resuming the job recognizes the workflow in-progress marker, independently verifies published file bytes, creates the manifest, and cleans the marker.
+        - The in-progress marker is unlinked immediately following manifest publication.
     - **Content-Addressed Vault Storage & Collision Avoidance**:
       - Managed copies are stored content-addressed under `files/<prefix>/<sha256>/<safeName>` with a machine-readable `manifest.json` sidecar alongside.
       - Repeated imports of identical content share a single verified managed file on disk while preserving differing source locations, filenames, and metadata in the manifest.
-      - Temporary staging files are created strictly inside an app-owned `.vault-temp` staging directory in the vault root, never touching source storage. Temporary staging files use process-unique and job-unique names (`staging_<jobId>_<uuid>.tmp`, `manifest_<jobId>_<uuid>.tmp`).
-      - Publication is atomic: descriptor sync -> rename to final path without overwriting unrelated existing files.
+      - Temporary staging files are created strictly inside an app-owned `.vault-temp` staging directory in the vault root, prefixed with `pv_staging_${vaultId}_` and `pv_manifest_${vaultId}_`.
+      - Cleanup is restricted strictly to demonstrably owned temporary staging files.
     - **Verified Copy Pipeline (`copyAndVerifyFileToVault`)**:
       - Read-only descriptor open on source file.
       - Pre-copy `fstat` verifies regular file status, byte size match, and modification timestamp consistency against recorded catalog facts.
-      - Chunked streaming copy (constant 64 KiB buffer) computing incremental SHA-256 simultaneously into staging destination.
-      - Post-copy `fstat` verifies source remained stable and unaltered during entire read.
-      - Post-read disk revalidation (`lstat` and `realpath`) ensures candidate path was not swapped or replaced.
+      - Live source contents are ALWAYS stream-hashed and verified on EVERY path (including shortcuts); destination integrity is verified independently.
+      - Post-copy descriptor `fstat` verifies source remained stable and unaltered during entire read.
+      - Post-read disk revalidation (`statSync` and `realpath`) ensures candidate path was not swapped or replaced.
       - Destination staging file descriptor sync (`fdatasync`), independent descriptor reopening and re-read SHA-256 computation to confirm disk bits match expected hash before publication.
-      - Atomic publication via rename into `files/<prefix>/<sha256>/`.
+      - Publication into `files/<prefix>/<sha256>/` with `COPYFILE_EXCL`.
       - Documented limitations: Narrowed TOCTOU window through descriptor and pathname revalidation; user-space filesystem APIs on POSIX and Win32 lack atomic copy primitives.
     - **Portable Metadata Manifest (`manifest.json`)**:
       - Versioned schema (`formatVersion: 1`), fully portable and self-contained without SQLite.
+      - Strictly validated at runtime with Zod (`VaultManifestSchema`), validating relative path containment (rejecting path traversal `..` and absolute paths), UUID/string vault IDs, 64-hex SHA-256 hashes, and cross-field consistency between manifest headers, managed copies, and source entries.
       - Encodes `vaultId`, `sha256`, `byteSize`, `managedCopy` details, and array of `sources`.
-      - Preserves multi-source provenance: when duplicate source locations share one managed copy, all source paths, differing original filenames, timestamps, and observation IDs are merged and preserved in `sources`.
+      - Records actual catalog facts: `firstDiscoveredAtMs`, `lastSeenAtMs`, `hashVerifiedAtMs`, and `discoveryObservationId`.
+      - Corrupt or invalid manifests throw `VaultManifestCorruptedError` rather than silently dropping provenance.
+      - Preserves multi-source provenance: merges entries matching on exact provenance `(fileLocationId, discoveryObservationId, hashObservationId)` to avoid unbounded duplicates while retaining multiple source locations for duplicate content.
       - Strict separation of facts vs inferences: unknown capture times and locations remain explicit `null` (never fabricated).
       - Audit trail: records `importJobId`, `importedAtMs`, verified SHA-256 and byte size, and source stability stats (`preCopyMtimeMs`, `postCopyMtimeMs`, sizes).
-    - **Catalog Persistence (Migration 6)**:
+    - **Catalog Persistence (Migration 6) & Exact Authorization**:
       - Adds `vaults`, `vault_copies`, `vault_imports`, and `vault_import_items` tables with foreign keys and indexes.
       - Tracks job state: `running`, `paused`, `cancelled`, `interrupted`, `failed`, `completed`.
-      - Supports resume, pause, cooperative cancellation via `AbortSignal`, and restart recovery (`markRunningImportJobsAsInterrupted()`).
-      - Cleanup restricted strictly to owned staging temporary files in `.vault-temp/`.
+      - Exact scope preservation on resume: queries strictly authorized items via `getVaultImportItems(jobId)`.
+      - Revalidates observation currency (`isDiscoveryCurrent`, `isHashActive`) on resume.
+      - Supports resume, pause, cooperative cancellation via `AbortSignal`, direct cancellation of paused jobs in SQLite, and restart recovery (`markRunningImportJobsAsInterrupted()`).
+      - Truthful completion status: job status is `'failed'` when all items fail; `'completed'` with `failedFiles > 0` on partial failure.
+      - Start and resume acknowledge the job record promptly across IPC, running the pipeline asynchronously in the background.
     - **IPC & Renderer Integration**:
-      - Narrow typed IPC contracts with Zod validation.
+      - Narrow typed IPC contracts with bidirectional Zod validation (`ResumeImportRequestSchema`, `CancelImportRequestSchema`, `PauseImportRequestSchema`).
       - Sender-validated handlers for vault selection, initialization, candidate listing, import control, and progress streaming.
-      - UI components in `VaultImportPanel`: setup card, candidate selection table with filters, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, verified success banner, and operations distinction notice.
+      - UI components in `VaultImportPanel`: functional "Change Vault", candidate selection table with filters, pagination beyond 100 items with monotonic request token protection, real-time progress bar, pause/resume/cancel controls, interrupted job recovery alert, truth-aligned banners (no "Verified Success" for failures), and operations distinction notice.
       - Clear separation of operations: catalog index removal, vault copy deletion, and source deletion are distinct operations (none implemented).

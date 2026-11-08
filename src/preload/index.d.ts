@@ -28,7 +28,10 @@ import type {
   VaultImportProgress,
   GetActiveImportJobResponse,
   GetLatestImportJobResponse,
-  VaultImportActionResponse
+  VaultImportActionResponse,
+  PauseImportRequest,
+  ResumeImportRequest,
+  CancelImportRequest
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -55,9 +58,9 @@ export interface VaultApi {
   setActiveVault: (request: SetActiveVaultRequest) => Promise<SetActiveVaultResponse>
   getImportCandidates: (request: GetImportCandidatesRequest) => Promise<GetImportCandidatesResponse>
   startImport: (request: StartImportRequest) => Promise<StartImportResponse>
-  pauseImport: () => Promise<VaultImportActionResponse>
-  resumeImport: (jobId?: string) => Promise<VaultImportActionResponse>
-  cancelImport: () => Promise<VaultImportActionResponse>
+  pauseImport: (request?: PauseImportRequest) => Promise<VaultImportActionResponse>
+  resumeImport: (request?: ResumeImportRequest | string) => Promise<VaultImportActionResponse>
+  cancelImport: (request?: CancelImportRequest) => Promise<VaultImportActionResponse>
   getActiveImportJob: () => Promise<GetActiveImportJobResponse>
   getLatestImportJob: () => Promise<GetLatestImportJobResponse>
   onImportProgress: (callback: (progress: VaultImportProgress) => void) => () => void

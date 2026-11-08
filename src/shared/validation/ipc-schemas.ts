@@ -305,6 +305,9 @@ export const ImportCandidateRecordSchema = z.object({
   sha256: z.string().length(64),
   discoveryObservationId: z.number().int().positive(),
   hashObservationId: z.number().int().positive(),
+  firstDiscoveredAtMs: z.number().int().nonnegative().optional(),
+  lastSeenAtMs: z.number().int().nonnegative().optional(),
+  hashVerifiedAtMs: z.number().int().nonnegative().optional(),
   vaultStatus: z.enum(['not_imported', 'copied']),
   vaultCopyId: z.number().int().positive().nullable().optional(),
   isPreferred: z.boolean().optional()
@@ -335,6 +338,21 @@ export const StartImportRequestSchema = z.object({
   fileLocationIds: z.array(z.number().int().positive()).min(1)
 })
 export type StartImportRequest = z.infer<typeof StartImportRequestSchema>
+
+export const ResumeImportRequestSchema = z.object({
+  jobId: z.string().min(1).optional()
+})
+export type ResumeImportRequest = z.infer<typeof ResumeImportRequestSchema>
+
+export const CancelImportRequestSchema = z.object({
+  jobId: z.string().min(1).optional()
+})
+export type CancelImportRequest = z.infer<typeof CancelImportRequestSchema>
+
+export const PauseImportRequestSchema = z.object({
+  jobId: z.string().min(1).optional()
+})
+export type PauseImportRequest = z.infer<typeof PauseImportRequestSchema>
 
 export const VaultImportJobRecordSchema = z.object({
   id: z.string().min(1),

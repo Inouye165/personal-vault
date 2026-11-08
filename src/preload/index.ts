@@ -34,6 +34,9 @@ import {
   GetActiveImportJobResponseSchema,
   GetLatestImportJobResponseSchema,
   VaultImportActionResponseSchema,
+  PauseImportRequestSchema,
+  ResumeImportRequestSchema,
+  CancelImportRequestSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -64,7 +67,10 @@ import {
   type VaultImportProgress,
   type GetActiveImportJobResponse,
   type GetLatestImportJobResponse,
-  type VaultImportActionResponse
+  type VaultImportActionResponse,
+  type PauseImportRequest,
+  type ResumeImportRequest,
+  type CancelImportRequest
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -324,8 +330,12 @@ const api: VaultApi = {
     return result.data
   },
 
-  async pauseImport(): Promise<VaultImportActionResponse> {
-    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_PAUSE_IMPORT)
+  async pauseImport(request?: PauseImportRequest): Promise<VaultImportActionResponse> {
+    const parsed = validatePayload(PauseImportRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid pauseImport request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_PAUSE_IMPORT, parsed.data)
     const result = validatePayload(VaultImportActionResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid pauseImport response from main: ${result.error}`)
@@ -333,8 +343,13 @@ const api: VaultApi = {
     return result.data
   },
 
-  async resumeImport(jobId?: string): Promise<VaultImportActionResponse> {
-    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_RESUME_IMPORT, { jobId })
+  async resumeImport(request?: ResumeImportRequest | string): Promise<VaultImportActionResponse> {
+    const normalized = typeof request === 'string' ? { jobId: request } : (request ?? {})
+    const parsed = validatePayload(ResumeImportRequestSchema, normalized)
+    if (!parsed.success) {
+      throw new Error(`Invalid resumeImport request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_RESUME_IMPORT, parsed.data)
     const result = validatePayload(VaultImportActionResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid resumeImport response from main: ${result.error}`)
@@ -342,8 +357,12 @@ const api: VaultApi = {
     return result.data
   },
 
-  async cancelImport(): Promise<VaultImportActionResponse> {
-    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_CANCEL_IMPORT)
+  async cancelImport(request?: CancelImportRequest): Promise<VaultImportActionResponse> {
+    const parsed = validatePayload(CancelImportRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelImport request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.VAULT_CANCEL_IMPORT, parsed.data)
     const result = validatePayload(VaultImportActionResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid cancelImport response from main: ${result.error}`)

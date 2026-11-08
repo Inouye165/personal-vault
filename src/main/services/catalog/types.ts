@@ -399,12 +399,39 @@ export interface ImportCandidateItem {
   readonly filesystemBirthtimeMs: number | null
   readonly filesystemMtimeMs: number | null
   readonly inferredCaptureTimeMs: number | null
+  readonly firstDiscoveredAtMs: number
+  readonly lastSeenAtMs: number
   readonly sha256: string
   readonly discoveryObservationId: number
   readonly hashObservationId: number
+  readonly hashVerifiedAtMs: number
   readonly vaultStatus: 'not_imported' | 'copied'
   readonly vaultCopyId: number | null
   readonly isPreferred?: boolean
 }
 
 export type ImportCandidatesResult = PaginatedResult<ImportCandidateItem>
+
+export interface VaultImportItemDetail {
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly hashObservationId: number | null
+  readonly sha256: string
+  readonly byteSize: number
+  readonly status:
+    'pending' | 'copying' | 'verifying' | 'completed' | 'failed' | 'cancelled' | 'skipped'
+  readonly sourceId: number
+  readonly originalPath: string
+  readonly fileName: string
+  readonly extension: string
+  readonly category: 'photo' | 'document'
+  readonly filesystemBirthtimeMs: number | null
+  readonly filesystemMtimeMs: number | null
+  readonly firstDiscoveredAtMs: number
+  readonly lastSeenAtMs: number
+  readonly inferredCaptureTimeMs: number | null
+  readonly hashVerifiedAtMs: number | null
+  readonly isDiscoveryCurrent: boolean
+  readonly isHashActive: boolean
+  readonly isPreferred?: boolean
+}

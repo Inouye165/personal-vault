@@ -1,9 +1,11 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   AlertCircle,
   Archive,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Folder,
   FolderOpen,
   HelpCircle,
@@ -20,18 +22,23 @@ import type {
   VaultRecord
 } from '../../../shared/validation/ipc-schemas'
 
+const CANDIDATES_PER_PAGE = 100
+
 export function VaultImportPanel() {
   const [activeVault, setActiveVault] = useState<VaultRecord | null>(null)
   const [selectedVaultDir, setSelectedVaultDir] = useState<string | null>(null)
   const [vaultNameInput, setVaultNameInput] = useState('Personal Vault')
   const [candidates, setCandidates] = useState<ImportCandidateItem[]>([])
   const [totalCandidates, setTotalCandidates] = useState(0)
+  const [candidateOffset, setCandidateOffset] = useState(0)
   const [selectedLocationIds, setSelectedLocationIds] = useState<Set<number>>(new Set())
   const [candidateFilter, setCandidateFilter] = useState<'all' | 'unimported' | 'imported'>('all')
   const [activeJob, setActiveJob] = useState<VaultImportJobRecord | null>(null)
   const [progress, setProgress] = useState<VaultImportProgress | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+
+  const loadTokenRef = useRef(0)
 
   // 1. Load active vault & latest job on mount
   const loadInitialState = useCallback(async () => {
@@ -72,26 +79,31 @@ export function VaultImportPanel() {
     }
   }, [loadInitialState])
 
-  // 2. Load candidate files when active vault or filter changes
+  // 2. Load candidate files when active vault, filter, or page offset changes
   const loadCandidates = useCallback(async () => {
     if (!window.api || !activeVault) {
       setCandidates([])
       setTotalCandidates(0)
       return
     }
+    const currentToken = ++loadTokenRef.current
     try {
       const res = await window.api.getImportCandidates({
         vaultId: activeVault.vaultId,
-        limit: 100,
-        offset: 0,
+        limit: CANDIDATES_PER_PAGE,
+        offset: candidateOffset,
         filter: candidateFilter
       })
-      setCandidates(res.items)
-      setTotalCandidates(res.totalCount)
+      if (currentToken === loadTokenRef.current) {
+        setCandidates(res.items)
+        setTotalCandidates(res.totalCount)
+      }
     } catch (err) {
-      setActionError((err as Error).message)
+      if (currentToken === loadTokenRef.current) {
+        setActionError((err as Error).message)
+      }
     }
-  }, [activeVault, candidateFilter])
+  }, [activeVault, candidateFilter, candidateOffset])
 
   useEffect(() => {
     let active = true
@@ -106,6 +118,13 @@ export function VaultImportPanel() {
       active = false
     }
   }, [loadCandidates])
+
+  // Reset offset and selection when filter changes
+  const handleFilterChange = (filter: 'all' | 'unimported' | 'imported') => {
+    setCandidateFilter(filter)
+    setCandidateOffset(0)
+    setSelectedLocationIds(new Set())
+  }
 
   // 3. Subscribe to real-time progress events
   useEffect(() => {
@@ -129,13 +148,23 @@ export function VaultImportPanel() {
     }
   }, [loadCandidates])
 
-  // Directory selection
+  // Directory selection & functional Change Vault
   const handleSelectDirectory = async () => {
     setActionError(null)
     try {
       const res = await window.api.selectVaultDirectory()
       if (res.selectedDirectory) {
-        setSelectedVaultDir(res.selectedDirectory)
+        // Attempt to set as active vault immediately if already initialized
+        try {
+          const activeRes = await window.api.setActiveVault({ vaultPath: res.selectedDirectory })
+          setActiveVault(activeRes.vault)
+          setSelectedVaultDir(null)
+          setSelectedLocationIds(new Set())
+          setCandidateOffset(0)
+        } catch {
+          // Uninitialized directory; prompt initialization UI
+          setSelectedVaultDir(res.selectedDirectory)
+        }
       }
     } catch (err) {
       setActionError((err as Error).message)
@@ -148,17 +177,15 @@ export function VaultImportPanel() {
     setActionError(null)
     setIsLoading(true)
     try {
-      const res = await window.api.initializeVault({
+      await window.api.initializeVault({
         vaultPath: selectedVaultDir,
         vaultName: vaultNameInput.trim() || 'Personal Vault'
       })
-      setActiveVault({
-        vaultId: res.vault.vaultId,
-        vaultPath: selectedVaultDir,
-        name: res.vault.vaultName,
-        createdAtMs: res.vault.createdAtMs
-      })
+      const activeRes = await window.api.setActiveVault({ vaultPath: selectedVaultDir })
+      setActiveVault(activeRes.vault)
       setSelectedVaultDir(null)
+      setSelectedLocationIds(new Set())
+      setCandidateOffset(0)
     } catch (err) {
       setActionError((err as Error).message)
     } finally {
@@ -240,6 +267,9 @@ export function VaultImportPanel() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   }
 
+  const totalPages = Math.ceil(totalCandidates / CANDIDATES_PER_PAGE) || 1
+  const currentPage = Math.floor(candidateOffset / CANDIDATES_PER_PAGE) + 1
+
   return (
     <div className="vault-panel-container">
       {/* 1. Distinct Operations Notice */}
@@ -264,8 +294,8 @@ export function VaultImportPanel() {
         </div>
       )}
 
-      {/* 2. Vault Storage Setup Card */}
-      {!activeVault && (
+      {/* 2. Vault Storage Setup Card (when uninitialized or initializing new directory) */}
+      {(!activeVault || selectedVaultDir) && (
         <div className="vault-setup-card">
           <div className="setup-header">
             <Archive size={24} className="setup-icon" aria-hidden="true" />
@@ -346,7 +376,9 @@ export function VaultImportPanel() {
                 ? 'Import Interrupted'
                 : activeJob.status === 'completed'
                   ? 'Import Completed'
-                  : 'Import in Progress'}
+                  : activeJob.status === 'failed'
+                    ? 'Import Failed'
+                    : 'Import in Progress'}
             </h4>
             <span className={`status-badge status-${activeJob.status}`}>{activeJob.status}</span>
           </div>
@@ -431,11 +463,32 @@ export function VaultImportPanel() {
             </div>
           )}
 
-          {activeJob.status === 'completed' && (
-            <div className="job-completed-banner">
+          {/* Truthful job status banners */}
+          {activeJob.status === 'failed' && (
+            <div className="job-completed-banner job-failed-banner" role="alert">
+              <XCircle size={16} className="text-danger" aria-hidden="true" />
+              <span>
+                Import Failed: {activeJob.failedFiles} files failed to copy or verify.
+                {activeJob.errorMessage ? ` (${activeJob.errorMessage})` : ''}
+              </span>
+            </div>
+          )}
+
+          {activeJob.status === 'completed' && activeJob.failedFiles > 0 && (
+            <div className="job-completed-banner job-partial-banner" role="status">
+              <AlertCircle size={16} className="text-warning" aria-hidden="true" />
+              <span>
+                Completed with Failures: {activeJob.verifiedFiles} files copied,{' '}
+                {activeJob.failedFiles} failed.
+              </span>
+            </div>
+          )}
+
+          {activeJob.status === 'completed' && activeJob.failedFiles === 0 && (
+            <div className="job-completed-banner" role="status">
               <CheckCircle2 size={16} className="text-success" aria-hidden="true" />
               <span>
-                Verified Success: {activeJob.verifiedFiles} files verified and published with
+                Verified Success: All {activeJob.verifiedFiles} files verified and published with
                 portable metadata.
               </span>
             </div>
@@ -459,21 +512,21 @@ export function VaultImportPanel() {
                 <button
                   type="button"
                   className={`filter-pill ${candidateFilter === 'all' ? 'active' : ''}`}
-                  onClick={() => setCandidateFilter('all')}
+                  onClick={() => handleFilterChange('all')}
                 >
                   All ({totalCandidates})
                 </button>
                 <button
                   type="button"
                   className={`filter-pill ${candidateFilter === 'unimported' ? 'active' : ''}`}
-                  onClick={() => setCandidateFilter('unimported')}
+                  onClick={() => handleFilterChange('unimported')}
                 >
                   Not in Vault
                 </button>
                 <button
                   type="button"
                   className={`filter-pill ${candidateFilter === 'imported' ? 'active' : ''}`}
-                  onClick={() => setCandidateFilter('imported')}
+                  onClick={() => handleFilterChange('imported')}
                 >
                   In Vault
                 </button>
@@ -563,6 +616,51 @@ export function VaultImportPanel() {
               </tbody>
             </table>
           </div>
+
+          {/* Pagination Controls */}
+          {totalCandidates > CANDIDATES_PER_PAGE && (
+            <div
+              className="pagination-bar"
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginTop: 12
+              }}
+            >
+              <span className="text-sm text-muted">
+                Showing {candidateOffset + 1}–
+                {Math.min(candidateOffset + CANDIDATES_PER_PAGE, totalCandidates)} of{' '}
+                {totalCandidates} files (Page {currentPage} of {totalPages})
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={candidateOffset === 0}
+                  onClick={() => {
+                    setCandidateOffset((prev) => Math.max(0, prev - CANDIDATES_PER_PAGE))
+                    setSelectedLocationIds(new Set())
+                  }}
+                >
+                  <ChevronLeft size={14} aria-hidden="true" />
+                  <span>Previous</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={candidateOffset + CANDIDATES_PER_PAGE >= totalCandidates}
+                  onClick={() => {
+                    setCandidateOffset((prev) => prev + CANDIDATES_PER_PAGE)
+                    setSelectedLocationIds(new Set())
+                  }}
+                >
+                  <span>Next</span>
+                  <ChevronRight size={14} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

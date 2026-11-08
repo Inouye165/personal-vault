@@ -33,6 +33,9 @@ import {
   GetActiveImportJobResponseSchema,
   GetLatestImportJobResponseSchema,
   VaultImportActionResponseSchema,
+  PauseImportRequestSchema,
+  ResumeImportRequestSchema,
+  CancelImportRequestSchema,
   validatePayload,
   type AppInfo,
   type DismissJobResponse,
@@ -519,26 +522,17 @@ export function registerIpcHandlers({
     return validated.data
   })
 
-  handle(IPC_CHANNELS.VAULT_PAUSE_IMPORT, async (): Promise<VaultImportActionResponse> => {
-    if (!vaultCoordinator) {
-      throw new Error('Vault import coordinator is not available')
-    }
-    const job = await vaultCoordinator.pauseImport()
-    const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
-    if (!validated.success) {
-      throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
-    }
-    return validated.data
-  })
-
   handle(
-    IPC_CHANNELS.VAULT_RESUME_IMPORT,
+    IPC_CHANNELS.VAULT_PAUSE_IMPORT,
     async (raw: unknown): Promise<VaultImportActionResponse> => {
+      const parsed = validatePayload(PauseImportRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid pauseImport request: ${parsed.error}`)
+      }
       if (!vaultCoordinator) {
         throw new Error('Vault import coordinator is not available')
       }
-      const jobId = (raw as { jobId?: string })?.jobId
-      const job = await vaultCoordinator.resumeImport(jobId)
+      const job = await vaultCoordinator.pauseImport()
       const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
       if (!validated.success) {
         throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
@@ -547,17 +541,43 @@ export function registerIpcHandlers({
     }
   )
 
-  handle(IPC_CHANNELS.VAULT_CANCEL_IMPORT, async (): Promise<VaultImportActionResponse> => {
-    if (!vaultCoordinator) {
-      throw new Error('Vault import coordinator is not available')
+  handle(
+    IPC_CHANNELS.VAULT_RESUME_IMPORT,
+    async (raw: unknown): Promise<VaultImportActionResponse> => {
+      const parsed = validatePayload(ResumeImportRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid resumeImport request: ${parsed.error}`)
+      }
+      if (!vaultCoordinator) {
+        throw new Error('Vault import coordinator is not available')
+      }
+      const job = await vaultCoordinator.resumeImport(parsed.data.jobId)
+      const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
+      }
+      return validated.data
     }
-    const job = await vaultCoordinator.cancelImport()
-    const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
-    if (!validated.success) {
-      throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
+  )
+
+  handle(
+    IPC_CHANNELS.VAULT_CANCEL_IMPORT,
+    async (raw: unknown): Promise<VaultImportActionResponse> => {
+      const parsed = validatePayload(CancelImportRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid cancelImport request: ${parsed.error}`)
+      }
+      if (!vaultCoordinator) {
+        throw new Error('Vault import coordinator is not available')
+      }
+      const job = await vaultCoordinator.cancelImport(parsed.data.jobId)
+      const validated = validatePayload(VaultImportActionResponseSchema, { success: true, job })
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing VaultImportActionResponse in main: ${validated.error}`)
+      }
+      return validated.data
     }
-    return validated.data
-  })
+  )
 
   handle(IPC_CHANNELS.VAULT_GET_ACTIVE_IMPORT, (): GetActiveImportJobResponse => {
     if (!vaultCoordinator) {

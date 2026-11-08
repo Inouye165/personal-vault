@@ -16,6 +16,7 @@ export interface VaultManifestSourceRecordedFacts {
   readonly filesystemMtimeMs: number | null
   readonly firstDiscoveredAtMs: number
   readonly lastSeenAtMs: number
+  readonly discoveryObservationId: number
   readonly hashObservationId: number
   readonly hashVerifiedAtMs: number
 }

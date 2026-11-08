@@ -63,6 +63,7 @@ import type {
   UpdateVaultImportItemInput,
   GetImportCandidatesOptions,
   ImportCandidateItem,
+  VaultImportItemDetail,
   ImportCandidatesResult
 } from './types'
 
@@ -184,12 +185,38 @@ interface RawImportCandidateRow {
   byte_size: number
   filesystem_birthtime_ms: number | null
   filesystem_mtime_ms: number | null
+  first_discovered_at_ms: number
+  last_seen_at_ms: number
   inferred_capture_time_ms: number | null
   sha256: string
   discovery_observation_id: number
   hash_observation_id: number
+  hashed_at_ms: number
   vault_copy_id: number | null
   vault_status: 'not_imported' | 'copied'
+  is_preferred: number
+}
+
+interface RawVaultImportItemDetailRow {
+  file_location_id: number
+  discovery_observation_id: number
+  hash_observation_id: number | null
+  sha256: string
+  byte_size: number
+  status: 'pending' | 'copying' | 'verifying' | 'completed' | 'failed' | 'cancelled' | 'skipped'
+  source_id: number
+  original_path: string
+  file_name: string
+  extension: string
+  category: 'photo' | 'document'
+  filesystem_birthtime_ms: number | null
+  filesystem_mtime_ms: number | null
+  first_discovered_at_ms: number | null
+  last_seen_at_ms: number | null
+  inferred_capture_time_ms: number | null
+  hashed_at_ms: number | null
+  is_discovery_current: number | null
+  is_hash_active: number | null
   is_preferred: number
 }
 
@@ -2570,10 +2597,13 @@ export class CatalogDatabase {
         d.byte_size,
         d.filesystem_birthtime_ms,
         d.filesystem_mtime_ms,
+        d.observed_at_ms as first_discovered_at_ms,
+        d.last_seen_at_ms,
         d.inferred_capture_time_ms,
         h.sha256,
         d.id as discovery_observation_id,
         h.id as hash_observation_id,
+        h.hashed_at_ms,
         vc.id as vault_copy_id,
         CASE WHEN vc.id IS NOT NULL THEN 'copied' ELSE 'not_imported' END as vault_status,
         CASE WHEN dr.preferred_location_id = fl.id THEN 1 ELSE 0 END as is_preferred
@@ -2599,10 +2629,13 @@ export class CatalogDatabase {
       byteSize: r.byte_size,
       filesystemBirthtimeMs: r.filesystem_birthtime_ms,
       filesystemMtimeMs: r.filesystem_mtime_ms,
+      firstDiscoveredAtMs: r.first_discovered_at_ms,
+      lastSeenAtMs: r.last_seen_at_ms,
       inferredCaptureTimeMs: r.inferred_capture_time_ms,
       sha256: r.sha256,
       discoveryObservationId: r.discovery_observation_id,
       hashObservationId: r.hash_observation_id,
+      hashVerifiedAtMs: r.hashed_at_ms,
       vaultStatus: r.vault_status,
       vaultCopyId: r.vault_copy_id,
       isPreferred: r.is_preferred === 1
@@ -2615,5 +2648,135 @@ export class CatalogDatabase {
       limit,
       hasMore: offset + items.length < totalCount
     }
+  }
+
+  public getImportCandidatesByLocationIds(
+    vaultId: string,
+    locationIds: readonly number[]
+  ): ImportCandidateItem[] {
+    this.assertOpen()
+    if (locationIds.length === 0) return []
+
+    const results: ImportCandidateItem[] = []
+    const CHUNK_SIZE = 500
+
+    for (let i = 0; i < locationIds.length; i += CHUNK_SIZE) {
+      const chunk = locationIds.slice(i, i + CHUNK_SIZE)
+      const placeholders = chunk.map(() => '?').join(',')
+      const sql = `
+        SELECT
+          fl.id as file_location_id,
+          fl.source_id,
+          fl.original_path,
+          fl.file_name,
+          fl.extension,
+          fl.category,
+          d.byte_size,
+          d.filesystem_birthtime_ms,
+          d.filesystem_mtime_ms,
+          d.observed_at_ms as first_discovered_at_ms,
+          d.last_seen_at_ms,
+          d.inferred_capture_time_ms,
+          h.sha256,
+          d.id as discovery_observation_id,
+          h.id as hash_observation_id,
+          h.hashed_at_ms,
+          vc.id as vault_copy_id,
+          CASE WHEN vc.id IS NOT NULL THEN 'copied' ELSE 'not_imported' END as vault_status,
+          CASE WHEN dr.preferred_location_id = fl.id THEN 1 ELSE 0 END as is_preferred
+        FROM file_locations fl
+        JOIN discovery_observations d ON d.file_location_id = fl.id
+        JOIN hash_observations h ON h.discovery_observation_id = d.id
+        LEFT JOIN vault_copies vc ON vc.vault_id = ? AND vc.sha256 = h.sha256 AND vc.byte_size = d.byte_size
+        LEFT JOIN duplicate_reviews dr ON dr.sha256 = h.sha256 AND dr.byte_size = d.byte_size
+        WHERE d.is_current = 1
+          AND h.is_active = 1
+          AND h.observed_byte_size = d.byte_size
+          AND fl.id IN (${placeholders})
+        ORDER BY fl.id ASC;
+      `
+      const rows = this.db.prepare(sql).all(vaultId, ...chunk) as unknown as RawImportCandidateRow[]
+      for (const r of rows) {
+        results.push({
+          fileLocationId: r.file_location_id,
+          sourceId: r.source_id,
+          originalPath: r.original_path,
+          fileName: r.file_name,
+          extension: r.extension,
+          category: r.category,
+          byteSize: r.byte_size,
+          filesystemBirthtimeMs: r.filesystem_birthtime_ms,
+          filesystemMtimeMs: r.filesystem_mtime_ms,
+          firstDiscoveredAtMs: r.first_discovered_at_ms,
+          lastSeenAtMs: r.last_seen_at_ms,
+          inferredCaptureTimeMs: r.inferred_capture_time_ms,
+          sha256: r.sha256,
+          discoveryObservationId: r.discovery_observation_id,
+          hashObservationId: r.hash_observation_id,
+          hashVerifiedAtMs: r.hashed_at_ms,
+          vaultStatus: r.vault_status,
+          vaultCopyId: r.vault_copy_id,
+          isPreferred: r.is_preferred === 1
+        })
+      }
+    }
+    return results
+  }
+
+  public getVaultImportItems(jobId: string): VaultImportItemDetail[] {
+    this.assertOpen()
+    const sql = `
+      SELECT
+        vi.file_location_id,
+        vi.discovery_observation_id,
+        vi.hash_observation_id,
+        vi.sha256,
+        vi.byte_size,
+        vi.status,
+        fl.source_id,
+        fl.original_path,
+        fl.file_name,
+        fl.extension,
+        fl.category,
+        d.filesystem_birthtime_ms,
+        d.filesystem_mtime_ms,
+        d.observed_at_ms as first_discovered_at_ms,
+        d.last_seen_at_ms,
+        d.inferred_capture_time_ms,
+        CASE WHEN d.is_current = 1 AND d.id = vi.discovery_observation_id THEN 1 ELSE 0 END as is_discovery_current,
+        h.hashed_at_ms,
+        CASE WHEN h.is_active = 1 AND (vi.hash_observation_id IS NULL OR h.id = vi.hash_observation_id) THEN 1 ELSE 0 END as is_hash_active,
+        CASE WHEN dr.preferred_location_id = fl.id THEN 1 ELSE 0 END as is_preferred
+      FROM vault_import_items vi
+      JOIN file_locations fl ON fl.id = vi.file_location_id
+      LEFT JOIN discovery_observations d ON d.id = vi.discovery_observation_id
+      LEFT JOIN hash_observations h ON h.id = vi.hash_observation_id
+      LEFT JOIN duplicate_reviews dr ON dr.sha256 = vi.sha256 AND dr.byte_size = vi.byte_size
+      WHERE vi.import_id = ?
+      ORDER BY vi.id ASC;
+    `
+    const rows = this.db.prepare(sql).all(jobId) as unknown as RawVaultImportItemDetailRow[]
+    return rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      discoveryObservationId: r.discovery_observation_id,
+      hashObservationId: r.hash_observation_id,
+      sha256: r.sha256,
+      byteSize: r.byte_size,
+      status: r.status,
+      sourceId: r.source_id,
+      originalPath: r.original_path,
+      fileName: r.file_name,
+      extension: r.extension,
+      category: r.category,
+      filesystemBirthtimeMs: r.filesystem_birthtime_ms,
+      filesystemMtimeMs: r.filesystem_mtime_ms,
+      firstDiscoveredAtMs: r.first_discovered_at_ms ?? 0,
+      lastSeenAtMs: r.last_seen_at_ms ?? 0,
+      inferredCaptureTimeMs: r.inferred_capture_time_ms,
+      hashVerifiedAtMs: r.hashed_at_ms,
+      isDiscoveryCurrent: r.is_discovery_current === 1,
+      isHashActive: r.is_hash_active === 1,
+      isPreferred: r.is_preferred === 1
+    }))
   }
 }
