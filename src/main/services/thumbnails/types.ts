@@ -30,10 +30,15 @@ export interface ThumbnailDiskCacheOptions {
 
 export interface ThumbnailDiagnostics {
   readonly activeWorkers: number
+  readonly terminatingWorkers?: number
+  readonly liveWorkers?: number
   readonly queuedJobs: number
   readonly totalDecodes: number
   readonly cacheHits: number
   readonly cacheMisses: number
+  readonly mainEventLoopDelayP95Ms?: number
+  readonly mainEventLoopDelayMaxMs?: number
+  readonly mainEventLoopDelayMeanMs?: number
 }
 
 export interface ThumbnailCoordinatorOptions {

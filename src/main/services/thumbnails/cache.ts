@@ -272,6 +272,26 @@ export class ThumbnailDiskCache {
         throw new Error('Staging thumbnail write incomplete')
       }
 
+      // Narrowly scoped test fixture barrier for deterministic publication interruption
+      const barrierSignalFile = process.env.PV_TEST_PUBLICATION_BARRIER_SIGNAL
+      if (barrierSignalFile) {
+        try {
+          writeFileSync(barrierSignalFile, `${tempPath}\n${targetPath}`)
+        } catch {
+          // ignore
+        }
+        if (process.env.PV_TEST_PUBLICATION_BARRIER_HOLD === '1') {
+          const releaseFile = process.env.PV_TEST_PUBLICATION_BARRIER_RELEASE
+          const deadline = Date.now() + 10000
+          while (Date.now() < deadline) {
+            if (releaseFile && existsSync(releaseFile)) {
+              break
+            }
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+          }
+        }
+      }
+
       // Atomic publication
       renameSync(tempPath, targetPath)
 

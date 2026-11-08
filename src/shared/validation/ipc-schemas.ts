@@ -507,10 +507,15 @@ export type CancelThumbnailResponse = z.infer<typeof CancelThumbnailResponseSche
 
 export const PhotosDiagnosticsResponseSchema = z.object({
   activeWorkers: z.number().int().nonnegative(),
+  terminatingWorkers: z.number().int().nonnegative().optional(),
+  liveWorkers: z.number().int().nonnegative().optional(),
   queuedJobs: z.number().int().nonnegative(),
   totalDecodes: z.number().int().nonnegative(),
   cacheHits: z.number().int().nonnegative(),
-  cacheMisses: z.number().int().nonnegative()
+  cacheMisses: z.number().int().nonnegative(),
+  mainEventLoopDelayP95Ms: z.number().nonnegative().optional(),
+  mainEventLoopDelayMaxMs: z.number().nonnegative().optional(),
+  mainEventLoopDelayMeanMs: z.number().nonnegative().optional()
 })
 export type PhotosDiagnosticsResponse = z.infer<typeof PhotosDiagnosticsResponseSchema>
 

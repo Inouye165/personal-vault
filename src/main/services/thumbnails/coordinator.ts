@@ -10,6 +10,7 @@
 import { realpathSync, statSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks'
 import { ThumbnailDiskCache, readWebPDimensions } from './cache'
 import {
   THUMBNAIL_LIMITS,
@@ -89,6 +90,7 @@ export class ThumbnailCoordinator {
   private readonly maxSourceSizeBytes: number
   private readonly maxInputPixels: number
   private readonly workerScriptPath: string
+  private readonly eventLoopMonitor: IntervalHistogram
 
   private workers: ActiveWorkerEntry[] = []
   private queue: QueuedItem[] = []
@@ -116,6 +118,8 @@ export class ThumbnailCoordinator {
     this.maxSourceSizeBytes = options.maxSourceSizeBytes ?? THUMBNAIL_LIMITS.MAX_SOURCE_SIZE_BYTES
     this.maxInputPixels = options.maxInputPixels ?? THUMBNAIL_LIMITS.MAX_INPUT_PIXELS
     this.workerScriptPath = resolveWorkerScriptPath(options.workerScriptPath)
+    this.eventLoopMonitor = monitorEventLoopDelay({ resolution: 10 })
+    this.eventLoopMonitor.enable()
     void this.cache.cleanupStagingFiles()
   }
 
@@ -135,14 +139,32 @@ export class ThumbnailCoordinator {
     return this.cache
   }
 
+  public getLiveWorkerCount(): number {
+    return this.workers.length
+  }
+
+  public getActiveWorkerEntries(): readonly ActiveWorkerEntry[] {
+    return this.workers
+  }
+
   public getDiagnostics(): ThumbnailDiagnostics {
-    const active = this.workers.filter((w) => w.jobId !== null && !w.isTerminating).length
+    const active = this.workers.filter((w) => w.jobId !== null || w.isTerminating).length
+    const terminating = this.workers.filter((w) => w.isTerminating).length
+    const delayP95 = this.eventLoopMonitor.percentile(95) / 1e6
+    const delayMax = this.eventLoopMonitor.max / 1e6
+    const delayMean = this.eventLoopMonitor.mean / 1e6
+
     return {
       activeWorkers: active,
+      terminatingWorkers: terminating,
+      liveWorkers: this.workers.length,
       queuedJobs: this.queue.length,
       totalDecodes: this.totalDecodes,
       cacheHits: this.cacheHits,
-      cacheMisses: this.cacheMisses
+      cacheMisses: this.cacheMisses,
+      mainEventLoopDelayP95Ms: isFinite(delayP95) ? delayP95 : 0,
+      mainEventLoopDelayMaxMs: isFinite(delayMax) ? delayMax : 0,
+      mainEventLoopDelayMeanMs: isFinite(delayMean) ? delayMean : 0
     }
   }
 
@@ -175,7 +197,7 @@ export class ThumbnailCoordinator {
       entry.jobId = null
       entry.locationId = null
 
-      void entry.worker.terminate().then(() => {
+      void entry.worker.terminate().finally(() => {
         this.removeWorker(entry)
         this.processNext()
       })
@@ -383,9 +405,10 @@ export class ThumbnailCoordinator {
       return
     }
 
-    // Count non-terminating active workers
-    const busyWorkers = this.workers.filter((w) => w.jobId !== null && !w.isTerminating)
-    if (busyWorkers.length >= this.maxActiveJobs) {
+    // A worker counts against capacity if it is currently executing a job or terminating.
+    // Total live workers (including terminating workers) cannot exceed maxActiveJobs.
+    const idleWorker = this.workers.find((w) => w.jobId === null && !w.isTerminating)
+    if (!idleWorker && this.workers.length >= this.maxActiveJobs) {
       return
     }
 
@@ -401,7 +424,7 @@ export class ThumbnailCoordinator {
     // Find an idle worker or spawn new worker if below limit
     let entry = this.workers.find((w) => w.jobId === null && !w.isTerminating)
     if (!entry) {
-      if (this.workers.filter((w) => !w.isTerminating).length < this.maxActiveJobs) {
+      if (this.workers.length < this.maxActiveJobs) {
         entry = this.spawnWorker()
       } else {
         // Concurrency capacity full; put item back at head
@@ -577,13 +600,10 @@ export class ThumbnailCoordinator {
     entry.jobId = null
     entry.locationId = null
 
-    try {
-      void entry.worker.terminate()
-    } catch {
-      // ignore
-    }
-
-    this.removeWorker(entry)
+    void entry.worker.terminate().finally(() => {
+      this.removeWorker(entry)
+      this.processNext()
+    })
 
     if (item) {
       item.resolve({
@@ -593,8 +613,6 @@ export class ThumbnailCoordinator {
         message: `Worker failure: ${errorMessage}`
       })
     }
-
-    this.processNext()
   }
 
   private removeWorker(entry: ActiveWorkerEntry): void {
@@ -606,6 +624,11 @@ export class ThumbnailCoordinator {
 
   public async shutdown(): Promise<void> {
     this.isShuttingDown = true
+    try {
+      this.eventLoopMonitor.disable()
+    } catch {
+      // ignore
+    }
 
     for (const item of this.queue) {
       item.resolve({

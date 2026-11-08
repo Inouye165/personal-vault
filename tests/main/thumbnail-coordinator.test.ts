@@ -381,4 +381,109 @@ describe('ThumbnailCoordinator', () => {
     }
     await tightCoord.shutdown()
   })
+
+  it('counts terminating workers against capacity until confirmed exit so live workers never exceed maxActiveJobs', async () => {
+    // Coordinator with maxActiveJobs = 2
+    const testJpegPath = join(sourceRoot, 'concurrency_test.jpg')
+    const jpegBuffer = await sharp({
+      create: { width: 400, height: 400, channels: 3, background: { r: 100, g: 100, b: 100 } }
+    })
+      .jpeg()
+      .toBuffer()
+    writeFileSync(testJpegPath, jpegBuffer)
+    const stat = statSync(testJpegPath)
+
+    const boundedCoord = new ThumbnailCoordinator({
+      cacheDir,
+      maxActiveJobs: 2,
+      maxQueuedJobs: 10,
+      jobTimeoutMs: 5000,
+      approvedRoots: [sourceRoot]
+    })
+
+    // Submit Job 1 and Job 2 to occupy both slots
+    const job1Promise = boundedCoord.requestThumbnail({
+      locationId: 901,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+
+    const job2Promise = boundedCoord.requestThumbnail({
+      locationId: 902,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+
+    // Wait until both workers are spawned
+    while (boundedCoord.getLiveWorkerCount() < 2) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+
+    // Delay termination on the first worker to simulate real async thread exit
+    const internalWorkers = boundedCoord.getActiveWorkerEntries()
+    const worker1 = internalWorkers.find((w) => w.locationId === 901)
+    const worker2 = internalWorkers.find((w) => w.locationId === 902)
+    expect(worker1).toBeDefined()
+    expect(worker2).toBeDefined()
+
+    // Delay worker2 message delivery so it remains busy while worker1 is terminating
+    const listeners2 = [...worker2!.worker.listeners('message')]
+    worker2!.worker.removeAllListeners('message')
+    for (const listener of listeners2) {
+      worker2!.worker.on('message', (msg) => {
+        setTimeout(() => (listener as (m: unknown) => void)(msg), 200)
+      })
+    }
+
+    let terminationFinished = false
+    const origTerminate = worker1!.worker.terminate.bind(worker1!.worker)
+    worker1!.worker.terminate = async () => {
+      await new Promise((r) => setTimeout(r, 80))
+      terminationFinished = true
+      return origTerminate()
+    }
+
+    // Cancel Job 1
+    const cancelled = boundedCoord.cancelRequest(901)
+    expect(cancelled).toBe(true)
+
+    // While Worker 1 is terminating, diagnostics must NOT exclude it early
+    const diagWhileTerminating = boundedCoord.getDiagnostics()
+    expect(diagWhileTerminating.activeWorkers).toBeGreaterThanOrEqual(2)
+    expect(boundedCoord.getLiveWorkerCount()).toBe(2)
+
+    // Submit Job 3 while Worker 1 is terminating
+    const job3Promise = boundedCoord.requestThumbnail({
+      locationId: 903,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+
+    // Allow async cache check to complete and item to be queued
+    await new Promise((r) => setTimeout(r, 15))
+
+    // Critical assertion: actual live workers must NEVER exceed maxActiveJobs (2)!
+    expect(boundedCoord.getLiveWorkerCount()).toBeLessThanOrEqual(2)
+    const diagAfterSubmit = boundedCoord.getDiagnostics()
+    expect(diagAfterSubmit.queuedJobs).toBe(1) // Job 3 must remain queued until Worker 1 exits
+
+    // Wait for termination and all jobs to settle
+    const [res1, res2, res3] = await Promise.all([job1Promise, job2Promise, job3Promise])
+    expect(terminationFinished).toBe(true)
+    expect(res1.status).toBe('error')
+    if (res1.status === 'error') expect(res1.code).toBe('CANCELLED')
+    expect(res2.status).toBe('ready')
+    expect(res3.status).toBe('ready')
+
+    // Final live workers must be at or below maxActiveJobs
+    expect(boundedCoord.getLiveWorkerCount()).toBeLessThanOrEqual(2)
+
+    await boundedCoord.shutdown()
+  })
 })

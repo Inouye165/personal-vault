@@ -31,6 +31,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  unlinkSync,
   utimesSync,
   writeFileSync
 } from 'node:fs'
@@ -102,7 +103,8 @@ function connectCdp(url) {
     ws.onmessage = (message) => {
       const data = JSON.parse(String(message.data))
       if (data.id && pending.has(data.id)) {
-        const { ok, bad } = pending.get(data.id)
+        const { ok, bad, timer } = pending.get(data.id)
+        clearTimeout(timer)
         pending.delete(data.id)
         if (data.error) {
           bad(new Error(data.error.message || 'CDP Error'))
@@ -116,15 +118,26 @@ function connectCdp(url) {
         send: (method, params = {}) =>
           new Promise((ok, bad) => {
             const id = nextId++
-            pending.set(id, { ok, bad })
-            ws.send(JSON.stringify({ id, method, params }))
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (pending.delete(id)) {
                 bad(new Error(`CDP timed out for method: ${method}`))
               }
             }, 30000)
+            pending.set(id, { ok, bad, timer })
+            ws.send(JSON.stringify({ id, method, params }))
           }),
-        close: () => ws.close()
+        close: () => {
+          for (const entry of pending.values()) {
+            clearTimeout(entry.timer)
+            entry.bad(new Error('CDP connection closed'))
+          }
+          pending.clear()
+          try {
+            ws.close()
+          } catch {
+            // ignore
+          }
+        }
       })
     }
   })
@@ -156,8 +169,9 @@ async function waitForApi(cdp, timeoutMs = 15000) {
   return false
 }
 
-async function launchApp(userDataDir, port) {
+async function launchApp(userDataDir, port, extraEnv = {}) {
   const commonArgs = [`--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`]
+  const env = { ...process.env, ...extraEnv }
   let child
   if (mode === 'unpacked') {
     const exePath = join(rootDir, 'dist', 'win-unpacked', 'Personal Vault.exe')
@@ -166,12 +180,14 @@ async function launchApp(userDataDir, port) {
     }
     child = spawn(exePath, commonArgs, {
       cwd: rootDir,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env
     })
   } else {
     child = spawn(electronPath, ['.', ...commonArgs], {
       cwd: rootDir,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env
     })
   }
 
@@ -550,22 +566,75 @@ async function main() {
       )
     dbInt.close()
 
-    // Dispatch real thumbnail generation across IPC
-    void evaluate(cdp, `window.api.getThumbnail({ locationId: ${rowIntFile.id} })`)
-
-    // Interrupt the application while work is in flight
-    await sleep(20)
+    // Stop current instance and relaunch with narrowly scoped publication barrier instrumentation
     killTree(currentApp.child)
     currentApp = null
     await sleep(500)
 
-    // Relaunch application on the same userDataDir
-    console.log('[Phase 5B] Relaunching Electron after real publication interruption...')
+    const barrierSignalFile = join(userDataDir, 'publish_barrier_signal.txt')
+    if (existsSync(barrierSignalFile)) {
+      unlinkSync(barrierSignalFile)
+    }
+
     const port3 = await getFreePort()
-    currentApp = await launchApp(userDataDir, port3)
+    currentApp = await launchApp(userDataDir, port3, {
+      PV_TEST_PUBLICATION_BARRIER_SIGNAL: barrierSignalFile,
+      PV_TEST_PUBLICATION_BARRIER_HOLD: '1'
+    })
     cdp = currentApp.cdp
 
-    // Verify cache directory has 0 orphan temporary files on restart
+    // Dispatch real thumbnail generation across IPC
+    evaluate(cdp, `window.api.getThumbnail({ locationId: ${rowIntFile.id} })`).catch(() => {})
+
+    // Wait deterministically for the publication barrier to be observed
+    let barrierReached = false
+    for (let w = 0; w < 50; w++) {
+      if (existsSync(barrierSignalFile)) {
+        barrierReached = true
+        break
+      }
+      await sleep(100)
+    }
+    if (!barrierReached) {
+      throw new Error(
+        'Publication barrier was not reached deterministically by thumbnail generator'
+      )
+    }
+
+    const barrierContent = readFileSync(barrierSignalFile, 'utf8').trim().split('\n')
+    const stagingPath = barrierContent[0]?.trim()
+    const targetPath = barrierContent[1]?.trim()
+
+    if (!stagingPath || !existsSync(stagingPath)) {
+      throw new Error(`Staging file ${stagingPath} did not exist at publication boundary`)
+    }
+    if (targetPath && existsSync(targetPath)) {
+      throw new Error(`Target thumbnail ${targetPath} was already published before interruption`)
+    }
+
+    // Deterministically terminate the application at the observed publication boundary
+    if (currentApp?.cdp) {
+      currentApp.cdp.close()
+    }
+    killTree(currentApp.child)
+    currentApp = null
+    await sleep(500)
+
+    // Staging file is definitely still present on disk right after kill
+    if (!existsSync(stagingPath)) {
+      throw new Error('Staging file disappeared before restart')
+    }
+
+    // Relaunch application on the same userDataDir without barrier
+    console.log('[Phase 5B] Relaunching Electron after real publication interruption...')
+    const port4 = await getFreePort()
+    currentApp = await launchApp(userDataDir, port4)
+    cdp = currentApp.cdp
+
+    // Verify abandoned staging file was cleaned up safely on restart
+    if (existsSync(stagingPath)) {
+      throw new Error(`Abandoned staging file ${stagingPath} was not cleaned up on restart`)
+    }
     const cacheFilesPostRestart = readdirSync(cacheDir)
     const orphanPostRestart = cacheFilesPostRestart.filter((f) => f.startsWith('.thumb_tmp_'))
     if (orphanPostRestart.length > 0) {
@@ -573,8 +642,14 @@ async function main() {
         `Orphan staging files found after interrupted real publication: ${orphanPostRestart.join(', ')}`
       )
     }
+    if (targetPath && existsSync(targetPath)) {
+      throw new Error(`Target thumbnail ${targetPath} should not exist before regeneration`)
+    }
 
-    // Now request thumbnail for that interrupted photo: must regenerate cleanly from scratch
+    // Diagnostics before regeneration
+    const diagBeforeRegen = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+
+    // First request: must decode from scratch (new decode)
     const regenResult = await evaluate(
       cdp,
       `window.api.getThumbnail({ locationId: ${rowIntFile.id} })`
@@ -584,7 +659,38 @@ async function main() {
         `Failed to regenerate thumbnail after interrupted real publication: ${JSON.stringify(regenResult)}`
       )
     }
-    pass('Interrupted real thumbnail publication safely cleaned up and regenerated on restart')
+    const diagAfterRegen = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+    if (diagAfterRegen.totalDecodes !== diagBeforeRegen.totalDecodes + 1) {
+      throw new Error(
+        `Expected a new decode on first request after restart! Before: ${diagBeforeRegen.totalDecodes}, After: ${diagAfterRegen.totalDecodes}`
+      )
+    }
+    if (diagAfterRegen.cacheHits !== diagBeforeRegen.cacheHits) {
+      throw new Error('Expected 0 cache hits on first request after restart')
+    }
+    if (targetPath && !existsSync(targetPath)) {
+      throw new Error('Target thumbnail was not published after regeneration')
+    }
+
+    // Second request: must REUSE CACHE without re-decoding (totalDecodes unchanged, cacheHits + 1)
+    const secondReqResult = await evaluate(
+      cdp,
+      `window.api.getThumbnail({ locationId: ${rowIntFile.id} })`
+    )
+    if (secondReqResult.status !== 'ready') {
+      throw new Error(`Subsequent request failed: ${JSON.stringify(secondReqResult)}`)
+    }
+    const diagThird = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+    if (diagThird.totalDecodes !== diagAfterRegen.totalDecodes) {
+      throw new Error('Subsequent request re-decoded instead of reusing cache')
+    }
+    if (diagThird.cacheHits <= diagAfterRegen.cacheHits) {
+      throw new Error('Cache hit counter did not increment on subsequent request')
+    }
+
+    pass(
+      'Deterministic publication interruption observed at boundary, cleaned up on restart, decoded afresh, and reused on subsequent request'
+    )
 
     // 7. Out-of-band source modification invalidation
     console.log('[Phase 6] Verifying out-of-band modification detection...')
@@ -711,82 +817,152 @@ async function main() {
     }
 
     // Continuous metrics collectors across the workload
-    const mainLatencies = []
-    let peakWorkers = 0
+    const ipcRoundTripLatencies = []
+    let peakActiveWorkers = 0
+    let peakTerminatingWorkers = 0
+    let peakLiveWorkers = 0
     let peakQueued = 0
     let peakMounted = 0
+    let peakJsHeapBytes = 0
+    let lastMainEventLoopP95 = 0
+    let lastMainEventLoopMax = 0
+    let lastMainEventLoopMean = 0
 
     async function sampleWorkloadMetrics() {
       const t0 = performance.now()
       await evaluate(cdp, `window.api.getAppInfo()`)
-      mainLatencies.push(performance.now() - t0)
+      ipcRoundTripLatencies.push(performance.now() - t0)
 
       const diag = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
       if (diag) {
-        peakWorkers = Math.max(peakWorkers, diag.activeWorkers)
+        peakActiveWorkers = Math.max(peakActiveWorkers, diag.activeWorkers)
+        peakTerminatingWorkers = Math.max(peakTerminatingWorkers, diag.terminatingWorkers ?? 0)
+        peakLiveWorkers = Math.max(peakLiveWorkers, diag.liveWorkers ?? diag.activeWorkers)
         peakQueued = Math.max(peakQueued, diag.queuedJobs)
+        if (typeof diag.mainEventLoopDelayP95Ms === 'number') {
+          lastMainEventLoopP95 = Math.max(lastMainEventLoopP95, diag.mainEventLoopDelayP95Ms)
+        }
+        if (typeof diag.mainEventLoopDelayMaxMs === 'number') {
+          lastMainEventLoopMax = Math.max(lastMainEventLoopMax, diag.mainEventLoopDelayMaxMs)
+        }
+        if (typeof diag.mainEventLoopDelayMeanMs === 'number') {
+          lastMainEventLoopMean = Math.max(lastMainEventLoopMean, diag.mainEventLoopDelayMeanMs)
+        }
       }
 
       const mounted = await evaluate(cdp, `document.querySelectorAll('.photo-cell').length`)
       if (typeof mounted === 'number') {
         peakMounted = Math.max(peakMounted, mounted)
       }
+
+      const heap = await evaluate(cdp, `window.performance?.memory?.usedJSHeapSize ?? 0`)
+      if (typeof heap === 'number' && heap > 0) {
+        peakJsHeapBytes = Math.max(peakJsHeapBytes, heap)
+      }
     }
 
-    async function assertCheckpoint(name, minExpectedIdx, maxExpectedIdx, durationMs) {
-      let mountedCount = 0
-      let errorCount = 0
-      let readyImgsCount = 0
-      let filenames = []
+    async function assertCheckpoint(
+      name,
+      minExpectedIdx,
+      maxExpectedIdx,
+      durationMs,
+      expectedUnsupportedCount = 0
+    ) {
+      let stats = null
 
-      for (let attempt = 0; attempt < 40; attempt++) {
-        const stats = await evaluate(
+      for (let attempt = 0; attempt < 50; attempt++) {
+        stats = await evaluate(
           cdp,
           `(() => {
-            const cells = document.querySelectorAll('.photo-cell:not(.photo-skeleton)');
-            const errors = document.querySelectorAll('.thumbnail-placeholder.error, .notice-error');
-            const imgs = Array.from(document.querySelectorAll('.photo-thumbnail-img')).filter(
-              (img) => img.naturalWidth > 0 || img.complete
-            );
-            const names = Array.from(
-              document.querySelectorAll('.photo-cell:not(.photo-skeleton) .photo-filename')
-            ).map((el) => el.textContent.trim());
+            const cells = Array.from(document.querySelectorAll('.photo-cell:not(.photo-skeleton)'));
+            let errorCount = 0;
+            let pendingCount = 0;
+            let unsupportedCount = 0;
+            let supportedCount = 0;
+            let supportedLoadedCount = 0;
+            const filenames = [];
+
+            for (const cell of cells) {
+              const nameEl = cell.querySelector('.photo-filename');
+              const fileName = nameEl ? nameEl.textContent.trim() : '';
+              filenames.push(fileName);
+              const isError = Boolean(cell.querySelector('.thumbnail-placeholder.error, .notice-error'));
+              const isPending = Boolean(cell.querySelector('.thumbnail-placeholder.loading'));
+              const isUnsupported = Boolean(cell.querySelector('.thumbnail-placeholder.unsupported'));
+              const img = cell.querySelector('img.photo-thumbnail-img');
+
+              if (isError) {
+                errorCount++;
+              } else if (isPending) {
+                pendingCount++;
+              } else if (isUnsupported) {
+                unsupportedCount++;
+              } else if (img) {
+                supportedCount++;
+                const isCompleteAndLoaded = img.complete && img.naturalWidth > 0 && img.naturalHeight > 0;
+                const matchesCell = img.alt === fileName;
+                if (isCompleteAndLoaded && matchesCell) {
+                  supportedLoadedCount++;
+                }
+              } else {
+                pendingCount++;
+              }
+            }
+
             return {
               mountedCount: cells.length,
-              errorCount: errors.length,
-              readyImgsCount: imgs.length,
-              filenames: names
+              errorCount,
+              pendingCount,
+              unsupportedCount,
+              supportedCount,
+              supportedLoadedCount,
+              filenames
             };
           })()`
         )
 
-        mountedCount = stats.mountedCount
-        errorCount = stats.errorCount
-        readyImgsCount = stats.readyImgsCount
-        filenames = stats.filenames
-
-        if (mountedCount > 0 && readyImgsCount > 0 && errorCount === 0) {
+        if (
+          stats &&
+          stats.mountedCount > 0 &&
+          stats.pendingCount === 0 &&
+          stats.errorCount === 0 &&
+          stats.supportedCount > 0 &&
+          stats.supportedLoadedCount === stats.supportedCount &&
+          stats.unsupportedCount === expectedUnsupportedCount
+        ) {
           break
         }
-        await sleep(100)
+        await sleep(150)
       }
 
-      if (mountedCount === 0) {
+      if (!stats || stats.mountedCount === 0) {
         throw new Error(`[${name}] Zero mounted cells found!`)
       }
-      if (mountedCount > 200) {
-        throw new Error(`[${name}] Mounted cells (${mountedCount}) exceeded 200 limit`)
+      if (stats.mountedCount > 200) {
+        throw new Error(`[${name}] Mounted cells (${stats.mountedCount}) exceeded 200 limit`)
       }
-      if (errorCount > 0) {
+      if (stats.pendingCount > 0) {
         throw new Error(
-          `[${name}] Detected ${errorCount} error cards! Error cards must not satisfy acceptance.`
+          `[${name}] Detected ${stats.pendingCount} pending/incomplete cards! Every visible card must finish loading.`
         )
       }
-      if (readyImgsCount === 0) {
-        throw new Error(`[${name}] Zero ready images loaded!`)
+      if (stats.errorCount > 0) {
+        throw new Error(
+          `[${name}] Detected ${stats.errorCount} error cards! Error cards must not satisfy acceptance.`
+        )
+      }
+      if (stats.unsupportedCount !== expectedUnsupportedCount) {
+        throw new Error(
+          `[${name}] Expected ${expectedUnsupportedCount} unsupported cards, found ${stats.unsupportedCount}`
+        )
+      }
+      if (stats.supportedLoadedCount !== stats.supportedCount || stats.supportedCount === 0) {
+        throw new Error(
+          `[${name}] Incomplete image load: ${stats.supportedLoadedCount}/${stats.supportedCount} supported images loaded with complete && naturalWidth > 0 and matched to expected cells`
+        )
       }
 
-      const hasExpected = filenames.some((f) => {
+      const hasExpected = stats.filenames.some((f) => {
         const m = f.match(/photo_(\d+)\.jpg/)
         if (m) {
           const num = parseInt(m[1], 10)
@@ -796,11 +972,11 @@ async function main() {
       })
       if (!hasExpected) {
         throw new Error(
-          `[${name}] Expected photo index in range [${minExpectedIdx}, ${maxExpectedIdx}], found: ${filenames.slice(0, 5).join(', ')}`
+          `[${name}] Expected photo index in range [${minExpectedIdx}, ${maxExpectedIdx}], found: ${stats.filenames.slice(0, 5).join(', ')}`
         )
       }
       pass(
-        `[${name}] Verified ${mountedCount} mounted cells, ${readyImgsCount} ready images, 0 error cards, expected identity (${filenames[0]})${typeof durationMs === 'number' ? ` in ${durationMs.toFixed(1)} ms` : ''}`
+        `[${name}] Verified ${stats.mountedCount} mounted cells, ${stats.supportedLoadedCount} loaded images (complete && naturalWidth > 0), ${stats.unsupportedCount} unsupported cards, 0 pending, 0 errors, expected identity (${stats.filenames[0]})${typeof durationMs === 'number' ? ` in ${durationMs.toFixed(1)} ms` : ''}`
       )
     }
 
@@ -834,7 +1010,7 @@ async function main() {
       await sleep(25)
     }
     const tCold = performance.now() - tCold0
-    await assertCheckpoint('Checkpoint 1: Beyond 2,000 photos', 1800, 3200, tCold)
+    await assertCheckpoint('Checkpoint 1: Beyond 2,000 photos', 1800, 3200, tCold, 0)
 
     // Distant scroll jump (scroll to offset near photo 7,500)
     const tJump0 = performance.now()
@@ -848,7 +1024,7 @@ async function main() {
     await sampleWorkloadMetrics()
     await sleep(150)
     const tJump = performance.now() - tJump0
-    await assertCheckpoint('Checkpoint 2: Distant jump near photo 7,500', 6500, 8500, tJump)
+    await assertCheckpoint('Checkpoint 2: Distant jump near photo 7,500', 6500, 8500, tJump, 0)
 
     // Warm reversal: scroll back to index 0
     const tWarm0 = performance.now()
@@ -865,7 +1041,8 @@ async function main() {
     }
     await sleep(200)
     const tWarm = performance.now() - tWarm0
-    await assertCheckpoint('Checkpoint 3: Return to Page 0', 1, 50, tWarm)
+    // Checkpoint 3 (Page 0) contains 2 unsupported cards: iphone_shot.heic and camera_raw.cr2
+    await assertCheckpoint('Checkpoint 3: Return to Page 0', 1, 50, tWarm, 2)
 
     // Stop frame recording and calculate true frame interval p95
     await evaluate(cdp, `window.__recording = false`)
@@ -879,12 +1056,13 @@ async function main() {
     const frameP95 = frameTimes[p95Idx] ?? 0
     const frameMax = frameTimes[frameTimes.length - 1] ?? 0
 
-    // Calculate main process event-loop delay metrics across continuous samples
-    mainLatencies.sort((a, b) => a - b)
-    const mainP95Idx = Math.floor(mainLatencies.length * 0.95)
-    const mainP95 = mainLatencies[mainP95Idx] ?? 0
-    const mainMax = mainLatencies[mainLatencies.length - 1] ?? 0
-    const mainMean = mainLatencies.reduce((a, b) => a + b, 0) / (mainLatencies.length || 1)
+    // Calculate renderer-to-main IPC round-trip latency across continuous samples
+    ipcRoundTripLatencies.sort((a, b) => a - b)
+    const ipcP95Idx = Math.floor(ipcRoundTripLatencies.length * 0.95)
+    const ipcP95 = ipcRoundTripLatencies[ipcP95Idx] ?? 0
+    const ipcMax = ipcRoundTripLatencies[ipcRoundTripLatencies.length - 1] ?? 0
+    const ipcMean =
+      ipcRoundTripLatencies.reduce((a, b) => a + b, 0) / (ipcRoundTripLatencies.length || 1)
 
     // Calculate disk and temp usage
     const allCacheFiles = readdirSync(cacheDir)
@@ -896,33 +1074,55 @@ async function main() {
       totalCacheBytes += st.size
     }
 
-    console.log('\n--- Continuous Scale Workload Measurements ---')
+    console.log('\n================ Scale Workload Verification Evidence ================')
+    console.log('[Continuously Enforced Architectural Guarantees]')
+    console.log('  Worker thread capacity bound: <= 2 live workers')
+    console.log('  Job queue capacity bound: <= 64 queued jobs')
+    console.log('  DOM virtualization window bound: <= 200 mounted cells')
+    console.log('  LRU metadata page cache bound: <= 2,000 photos (40 pages x 50 items)')
+    console.log('  Source input size cap: <= 128 MiB (enforced before & during read)')
+    console.log('  Source image pixel cap: <= 100 megapixels')
+    console.log('  Decoder job timeout: 15,000 ms per job')
+    console.log('  Disk cache storage budget: <= 1,024 MiB (LRU evicted)')
+    console.log('  Atomic publication: exclusive wx temp write -> stat check -> rename')
+    console.log('  Source preservation invariance: source files strictly read-only')
+    console.log('\n[Sampled Workload Maxima & Measurements (10,000 Photos)]')
     console.log(`  Frame count sampled: ${frameTimes.length}`)
     console.log(`  Frame interval p95: ${frameP95.toFixed(2)} ms (bound <= 33 ms)`)
     console.log(`  Frame interval max: ${frameMax.toFixed(2)} ms`)
-    console.log(`  Main-process delay samples: ${mainLatencies.length}`)
-    console.log(`  Main-process delay p95: ${mainP95.toFixed(2)} ms (bound < 100 ms)`)
-    console.log(`  Main-process delay max: ${mainMax.toFixed(2)} ms (bound < 100 ms)`)
-    console.log(`  Main-process delay mean: ${mainMean.toFixed(2)} ms`)
-    console.log(`  Peak active worker threads: ${peakWorkers} (bound <= 2)`)
-    console.log(`  Peak queued decode jobs: ${peakQueued} (bound <= 64)`)
-    console.log(`  Peak mounted DOM cells: ${peakMounted} (bound <= 200)`)
+    console.log(
+      `  Main-process event-loop delay (inside main): p95=${lastMainEventLoopP95.toFixed(2)} ms, max=${lastMainEventLoopMax.toFixed(2)} ms, mean=${lastMainEventLoopMean.toFixed(2)} ms (bound < 100 ms)`
+    )
+    console.log(
+      `  Renderer-to-main IPC round-trip latency: p95=${ipcP95.toFixed(2)} ms, max=${ipcMax.toFixed(2)} ms, mean=${ipcMean.toFixed(2)} ms`
+    )
+    console.log(
+      `  Peak worker threads observed: live=${peakLiveWorkers} (bound <= 2), active=${peakActiveWorkers}, terminating=${peakTerminatingWorkers}`
+    )
+    console.log(`  Peak queued decode jobs observed: ${peakQueued} (bound <= 64)`)
+    console.log(`  Peak mounted DOM cells observed: ${peakMounted} (bound <= 200)`)
+    console.log(`  Peak renderer JS heap: ${(peakJsHeapBytes / (1024 * 1024)).toFixed(2)} MiB`)
     console.log(
       `  Disk cache usage: ${(totalCacheBytes / (1024 * 1024)).toFixed(2)} MiB (bound <= 1024 MiB)`
     )
     console.log(`  Orphan temporary files: ${orphanTempsCount} (bound === 0)`)
-    console.log('----------------------------------------------\n')
+    console.log('======================================================================\n')
 
     if (frameP95 > 33) {
       throw new Error(`Frame interval p95 (${frameP95.toFixed(1)} ms) exceeded 33 ms bound`)
     }
-    if (mainP95 >= 100 || mainMax >= 100) {
+    if (lastMainEventLoopP95 >= 100 || lastMainEventLoopMax >= 100) {
       throw new Error(
-        `Main process stall detected: p95=${mainP95.toFixed(1)} ms, max=${mainMax.toFixed(1)} ms >= 100 ms limit`
+        `Main process stall detected: p95=${lastMainEventLoopP95.toFixed(1)} ms, max=${lastMainEventLoopMax.toFixed(1)} ms >= 100 ms limit`
       )
     }
-    if (peakWorkers > 2) {
-      throw new Error(`Peak active workers (${peakWorkers}) exceeded max bound (2)`)
+    if (ipcP95 >= 100 || ipcMax >= 100) {
+      throw new Error(
+        `IPC round-trip stall detected: p95=${ipcP95.toFixed(1)} ms, max=${ipcMax.toFixed(1)} ms >= 100 ms limit`
+      )
+    }
+    if (peakLiveWorkers > 2) {
+      throw new Error(`Peak live workers (${peakLiveWorkers}) exceeded max bound (2)`)
     }
     if (peakQueued > 64) {
       throw new Error(`Peak queued jobs (${peakQueued}) exceeded max bound (64)`)
