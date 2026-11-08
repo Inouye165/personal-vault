@@ -369,12 +369,14 @@ src/
       - `journal_checkpoints`: singleton checkpoint tracking last applied journal sequence and operation id.
     - **Two-Phase Recoverable Protocol & Review Journal**:
       - Stored in app-owned storage (`<userData>/annotations/review-journal.jsonl`) with ownership marker (`.pv_annotations_owner`).
-      - Strict containment: recursive ancestor symlink/junction detection, dynamic getter overlap validation checking against live source and vault paths before mutations, and exclusive marker creation with `wx`.
+      - Strict containment: recursive ancestor symlink/junction detection, fail-closed security context checking against live source roots (`catalog.getAllSourceRoots()`) and active vault paths before mutations, and exclusive marker creation with `wx`.
       - Append-only JSONL format recording all annotation and collection lifecycle events with full provenance and fsync durability.
       - Two-phase protocol: operations are recorded to the journal, staged and committed in SQLite transactions, then marked `op_committed` in the journal.
       - Post-COMMIT failure handling: tracks actual commit boundary; never records committed database work as aborted. Returns truthful `persistencePending: true` state on post-commit append failure.
-      - Startup reconciliation (`reconcileJournalWithDatabase`): reconciles uncommitted operations across SQLite and journal via bounded streaming passes and indexed queries on `journal_operations`, appending `op_committed` or `op_aborted` appropriately without accumulating the whole journal in Node heap.
+      - Safe reconciliation & UI propagation: `usePhotoReview` and `PhotosPanel` expose an honest pending status banner and retry control calling `photos:reconcile-journal`, safely finalizing journal state without re-executing already committed mutations.
+      - Startup reconciliation (`reconcileJournalWithDatabase`): reconciles uncommitted operations across SQLite and journal via bounded streaming passes (`stmt.iterate()`) and indexed queries on `journal_operations`, appending `op_committed` or `op_aborted` appropriately without accumulating uncommitted records or journal entries in Node heap.
       - Safe, bounded streaming recovery: 64KB chunk buffer reading with multibyte UTF-8 safety across chunk boundaries, strict sequence validation, bounded record length checking (<= 64 KiB), interior corruption detection preserving file content, and safe truncation restricted strictly to torn final records at EOF without trailing newline.
+      - Bounded pagination: collections and memberships implement windowed 50-item page navigation with Prev/Next controls and absolute offsets, ensuring memory retention never accumulates lists indefinitely.
     - **Concurrency & Rescan Reconciliation**:
       - Annotations and memberships bound to location and content revision: `rev:<discoveryId>:<byteSize>:<mtime>:<hash>`.
       - Unchanged rescan: annotations preserved without version change.

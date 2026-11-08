@@ -54,7 +54,8 @@ import type {
   RemoveCollectionMemberRequest,
   RemoveCollectionMemberResponse,
   GetPhotoMembershipsRequest,
-  GetPhotoMembershipsResponse
+  GetPhotoMembershipsResponse,
+  ReconcileJournalResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -101,6 +102,7 @@ export interface VaultApi {
     request: RemoveCollectionMemberRequest
   ) => Promise<RemoveCollectionMemberResponse>
   getPhotoMemberships: (request: GetPhotoMembershipsRequest) => Promise<GetPhotoMembershipsResponse>
+  reconcileJournal: () => Promise<ReconcileJournalResponse>
 }
 
 declare global {

@@ -563,7 +563,9 @@ export type SetPhotoAnnotationRequest = z.infer<typeof SetPhotoAnnotationRequest
 
 export const SetPhotoAnnotationResponseSchema = z.object({
   success: z.boolean(),
-  annotation: PhotoAnnotationSchema
+  annotation: PhotoAnnotationSchema,
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type SetPhotoAnnotationResponse = z.infer<typeof SetPhotoAnnotationResponseSchema>
 
@@ -613,7 +615,9 @@ export const CreateCollectionRequestSchema = z.object({
 export type CreateCollectionRequest = z.infer<typeof CreateCollectionRequestSchema>
 
 export const CreateCollectionResponseSchema = z.object({
-  collection: CollectionItemSchema
+  collection: CollectionItemSchema,
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type CreateCollectionResponse = z.infer<typeof CreateCollectionResponseSchema>
 
@@ -624,9 +628,17 @@ export const RenameCollectionRequestSchema = z.object({
 export type RenameCollectionRequest = z.infer<typeof RenameCollectionRequestSchema>
 
 export const RenameCollectionResponseSchema = z.object({
-  collection: CollectionItemSchema
+  collection: CollectionItemSchema,
+  persistencePending: z.boolean().optional(),
+  persistenceError: z.string().optional()
 })
 export type RenameCollectionResponse = z.infer<typeof RenameCollectionResponseSchema>
+
+export const ReconcileJournalResponseSchema = z.object({
+  success: z.boolean(),
+  reconciledCount: z.number().int().nonnegative()
+})
+export type ReconcileJournalResponse = z.infer<typeof ReconcileJournalResponseSchema>
 
 export const ListCollectionsRequestSchema = z.object({
   offset: z.number().int().nonnegative().optional().default(0),

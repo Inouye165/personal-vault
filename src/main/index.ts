@@ -137,20 +137,22 @@ if (!app.requestSingleInstanceLock()) {
       setupSecurityPolicies(location)
       logStartup('setupSecurityPolicies completed')
 
+      const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
+      logStartup(`Opening catalog at ${catalogPath}`)
+      catalog = CatalogDatabase.open({ catalogPath })
+      logStartup('CatalogDatabase.open completed')
+
       const annotationsDir = join(app.getPath('userData'), 'annotations')
       const journal = new AnnotationJournal({
         storageDir: annotationsDir,
-        sourceRoots: () =>
-          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : [],
+        sourceRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
         vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
       })
       await journal.initialize()
       logStartup('journal.initialize completed')
 
-      const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
-      logStartup(`Opening catalog at ${catalogPath}`)
-      catalog = CatalogDatabase.open({ catalogPath, journal })
-      logStartup('CatalogDatabase.open completed')
+      catalog.setJournal(journal)
+      logStartup('catalog.setJournal completed with startup reconciliation')
 
       coordinator = new ScanJobCoordinator({ catalog })
       await coordinator.initialize()

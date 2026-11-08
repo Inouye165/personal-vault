@@ -60,6 +60,7 @@ import {
   RemoveCollectionMemberResponseSchema,
   GetPhotoMembershipsRequestSchema,
   GetPhotoMembershipsResponseSchema,
+  ReconcileJournalResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -116,7 +117,8 @@ import {
   type RemoveCollectionMemberRequest,
   type RemoveCollectionMemberResponse,
   type GetPhotoMembershipsRequest,
-  type GetPhotoMembershipsResponse
+  type GetPhotoMembershipsResponse,
+  type ReconcileJournalResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -610,6 +612,15 @@ const api: VaultApi = {
     const result = validatePayload(GetPhotoMembershipsResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getPhotoMemberships response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async reconcileJournal(): Promise<ReconcileJournalResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_RECONCILE_JOURNAL)
+    const result = validatePayload(ReconcileJournalResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid reconcileJournal response from main: ${result.error}`)
     }
     return result.data
   }

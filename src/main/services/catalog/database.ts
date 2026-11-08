@@ -362,7 +362,7 @@ export function isObservationTimestampMatching(
 
 export class CatalogDatabase {
   private readonly db: DatabaseSync
-  private readonly journal?: AnnotationJournal
+  private journal?: AnnotationJournal
   private closed = false
 
   private constructor(db: DatabaseSync, journal?: AnnotationJournal) {
@@ -2876,8 +2876,22 @@ export class CatalogDatabase {
     }
   }
 
-  public reconcileJournalWithDatabase(): void {
-    if (!this.journal) return
+  public setJournal(journal: AnnotationJournal): void {
+    this.assertOpen()
+    this.journal = journal
+    this.reconcileJournalWithDatabase()
+  }
+
+  public getAllSourceRoots(): string[] {
+    this.assertOpen()
+    const rows = this.db.prepare('SELECT root_path FROM sources ORDER BY id ASC;').all() as Array<{
+      root_path: string
+    }>
+    return rows.map((r) => r.root_path)
+  }
+
+  public reconcileJournalWithDatabase(): { reconciledCount: number } {
+    if (!this.journal) return { reconciledCount: 0 }
     this.assertOpen()
 
     const checkpointRow = this.db
@@ -2914,8 +2928,8 @@ export class CatalogDatabase {
       insertScanStmt.run(entry.opId, entry.entrySeq, isTerminal)
     }
 
-    // Query unterminated operations joining indexed journal_operations table
-    const unterminatedRows = this.db
+    // Query unterminated operations joining indexed journal_operations table using bounded streaming iterator
+    const unterminatedIter = this.db
       .prepare(
         `
         SELECT t.op_id, t.entry_seq, jo.status
@@ -2924,9 +2938,10 @@ export class CatalogDatabase {
         WHERE t.is_terminal = 0;
       `
       )
-      .all() as Array<{ op_id: string; entry_seq: number; status: string | null }>
+      .iterate() as Iterable<{ op_id: string; entry_seq: number; status: string | null }>
 
-    for (const row of unterminatedRows) {
+    let reconciledCount = 0
+    for (const row of unterminatedIter) {
       if (row.status === 'committed') {
         this.journal.appendCommitRecordSync({ opId: row.op_id, targetSeq: row.entry_seq })
       } else {
@@ -2936,6 +2951,7 @@ export class CatalogDatabase {
           reason: 'Startup reconciliation: uncommitted transaction aborted'
         })
       }
+      reconciledCount++
     }
 
     this.db.exec('DROP TABLE IF EXISTS temp_journal_scan;')
@@ -2946,6 +2962,8 @@ export class CatalogDatabase {
         'UPDATE journal_checkpoints SET last_applied_seq = ?, updated_at_ms = ? WHERE singleton_id = 1;'
       )
       .run(latestSeq, Date.now())
+
+    return { reconciledCount }
   }
 
   public createCollection(input: CreateCollectionInput): CatalogCollectionRecord {

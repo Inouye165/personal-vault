@@ -166,6 +166,19 @@ describe('Preload Photos Bridge', () => {
     const colRes = await api.createCollection({ name: 'Portraits' })
     expect(colRes.collection.name).toBe('Portraits')
 
+    mockIpcRenderer.invoke.mockImplementationOnce((channel: string) => {
+      if (channel === 'photos:reconcile-journal') {
+        return Promise.resolve({
+          success: true,
+          reconciledCount: 3
+        })
+      }
+      return Promise.resolve({})
+    })
+    const recRes = await api.reconcileJournal()
+    expect(recRes.success).toBe(true)
+    expect(recRes.reconciledCount).toBe(3)
+
     // addCollectionMember requires expectedRevision
     await expect(
       api.addCollectionMember({

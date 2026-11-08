@@ -28,6 +28,7 @@ import {
   RemoveCollectionMemberResponseSchema,
   GetPhotoMembershipsRequestSchema,
   GetPhotoMembershipsResponseSchema,
+  ReconcileJournalResponseSchema,
   type GetPhotosPageRequest,
   type GetPhotosPageResponse,
   type GetThumbnailRequest,
@@ -50,7 +51,8 @@ import {
   type RemoveCollectionMemberRequest,
   type RemoveCollectionMemberResponse,
   type GetPhotoMembershipsRequest,
-  type GetPhotoMembershipsResponse
+  type GetPhotoMembershipsResponse,
+  type ReconcileJournalResponse
 } from '../shared/validation/ipc-schemas'
 
 export interface PhotosApi {
@@ -68,10 +70,16 @@ export interface PhotosApi {
     request: RemoveCollectionMemberRequest
   ) => Promise<RemoveCollectionMemberResponse>
   getPhotoMemberships: (request: GetPhotoMembershipsRequest) => Promise<GetPhotoMembershipsResponse>
+  reconcileJournal: () => Promise<ReconcileJournalResponse>
 }
 
 export function createPhotosApi(ipcRenderer: IpcRenderer): PhotosApi {
   return {
+    async reconcileJournal(): Promise<ReconcileJournalResponse> {
+      const rawRes = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_RECONCILE_JOURNAL)
+      return ReconcileJournalResponseSchema.parse(rawRes)
+    },
+
     async getPhotosPage(request: GetPhotosPageRequest): Promise<GetPhotosPageResponse> {
       const validatedReq = GetPhotosPageRequestSchema.parse(request)
       const rawRes = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_GET_PAGE, validatedReq)

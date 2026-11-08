@@ -40,27 +40,32 @@ Catalog database schema updated via Migration 7 (`CURRENT_SCHEMA_VERSION = 7`):
 
 ### 1.3 Two-Phase Recoverable Protocol & Crash Consistency (Finding 1)
 
-- Two-phase commit protocol: mutations check preconditions -> generate unique `opId` -> `BEGIN IMMEDIATE` -> append operation to journal with `fsync` -> apply SQLite updates and insert into `journal_operations` -> `COMMIT` -> append `op_committed` to journal. Rollback on failure appends `op_aborted`.
-- Startup reconciliation (`reconcileJournalWithDatabase`): called during `CatalogDatabase.open(...)`, inspects journal entries and reconciles pending operations against `journal_operations`. If SQLite committed before crash, `op_committed` is written; if SQLite rolled back, `op_aborted` is written. `journal_checkpoints.last_applied_seq` is updated to the journal's latest sequence number.
+- Two-phase commit protocol: mutations check preconditions -> generate unique `opId` -> `BEGIN IMMEDIATE` -> append operation to journal with `fsync` -> apply SQLite updates and insert into `journal_operations` -> `COMMIT` -> append `op_committed` to journal. Rollback on pre-commit failure appends `op_aborted`.
+- Post-COMMIT failure handling: if SQLite `COMMIT` succeeds but journal `op_committed` append fails (e.g. disk barrier stall or power loss), the transaction is NEVER marked aborted. The operation returns truthful `persistencePending: true` with `persistenceError`.
+- UI Propagation and Safe Reconciliation: `usePhotoReview` and `PhotosPanel` propagate `persistencePending` across IPC and render an honest warning banner ("Journal finalization pending: Saved to database; awaiting journal finalization on disk") with a "Retry reconciliation" control. The retry action calls `photos:reconcile-journal` (`reconcileJournalWithDatabase()`), deterministically committing dangling records without re-executing already committed database mutations.
+- Startup reconciliation (`reconcileJournalWithDatabase`): called during `CatalogDatabase.open(...)`, streams unterminated operations via bounded iterator (`stmt.iterate()`) joining `journal_operations` without accumulating rows in memory. Committed operations are finalized with `op_committed`, uncommitted operations with `op_aborted`.
 
-### 1.4 Safe, Bounded Journal Recovery (Finding 2)
+### 1.4 Safe, Bounded Journal Recovery & Streaming Reconciliation (Finding 2)
 
-- Bounded streaming recovery: reads journal in 64 KiB chunks with buffer line scanning and tracks `lastValidByteOffset`.
+- Bounded streaming recovery: reads journal in 64 KiB chunks with buffer line scanning, UTF-8 multibyte boundary preservation, and tracks `lastValidByteOffset`.
 - Interior corruption handling: any unparseable line or sequence disorder (`entrySeq !== prev + 1`) prior to EOF is treated as corruption. The journal refuses to truncate or alter the file, preserving evidence and throwing `JournalCorruptionError`.
 - Safe EOF truncation: only a torn final record at EOF with no subsequent bytes is safely truncated to `lastValidByteOffset` and synced.
+- Bounded UI pagination: collections and memberships implement windowed 50-item page navigation (`collectionsPage`, `totalCollectionsPages`, `goToNextCollectionsPage`, `goToPrevCollectionsPage`, `membershipsPage`, `totalMembershipsPages`, `goToNextMembershipsPage`, `goToPrevMembershipsPage`). Memory retention is strictly bounded to at most 50 items per list, eliminating unbounded array accumulation.
 
-### 1.5 Strict Containment and Ownership (Finding 3)
+### 1.5 Strict Containment, Link Protections & Runtime Security (Finding 4)
 
 - Security containment: recursive ancestor check detects symlinks and Windows directory junctions in the storage directory path (`lstatSync`), rejecting symlink/junction redirection.
-- Storage separation: ensures journal storage directory never overlaps with source roots or active vault paths.
-- Exclusive ownership: creates `.pv_annotations_owner` using `wx` exclusive creation flag, validating JSON marker content and refusing to adopt foreign unmanaged journals.
+- Fail-closed security context: `sourceRootsGetter` and `vaultPathGetter` are required to return valid context; if either throws or returns invalid types, the journal immediately throws `JournalSecurityError` and fails closed.
+- Canonical platform-correct overlap check: resolves and normalizes paths, performing platform-specific case-insensitive boundary checks (`===` or prefix with separator).
+- Uncapped source inventory: `catalog.getAllSourceRoots()` inspects all registered source roots without arbitrary limits (eliminating earlier 1,000-root truncations).
+- Application startup wiring: `catalog` is opened prior to `journal.initialize()`, ensuring authoritative source roots and active vault context are available before journal repair can mutate storage on startup.
 
-### 1.6 Concurrency, Revisions, and Collections (Finding 4)
+### 1.6 Concurrency, Revisions, and Stale Response Guards (Finding 3)
 
-- Revision-bound memberships: `addCollectionMember` and `removeCollectionMember` require `expectedRevision` matching `getPhotoRevisionString(...)` (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`), throwing `STALE_REVISION` on mismatch.
-- Content change invalidation: when photo content (byte size or hash) changes on rescan, both `photo_annotations` and `collection_memberships` are cleanly invalidated.
-- Set-based reconciliation: `reconcilePhotoAnnotations` performs set-based SQL updates avoiding full catalog materialization in memory.
-- Bounded collection/membership pagination: `listCollections` and `getCollectionMembershipsForPhoto` support `limit` and `offset` pagination, joining only active observations and verified content hashes.
+- Per-photo mutation sequence guarding: `photoMutationSeqRef` tracks sequential operation tokens per photo. Stale, out-of-order, or superseded save responses never call `updatePhotoLocal` or overwrite newer catalog state.
+- Selection generation & revision guarding: asynchronous saves and membership loads are bound to `targetGen`, `targetPhotoId`, and computed photo revision (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`). If selection changes (A -> B -> A) or photo revision changes, stale responses are dropped.
+- Unmount invalidation: `isMountedRef` guarantees unmounted components discard pending in-flight callbacks.
+- Content change invalidation: when photo content (byte size or hash) changes on rescan, both `photo_annotations` and `collection_memberships` are cleanly invalidated while preserving prior version history in the journal. Stale writes rejected atomically with conflict errors (`STALE_REVISION`, `STALE_ANNOTATION_VERSION`).
 
 ### 1.7 Renderer Review Flow & Selection State (Finding 5)
 

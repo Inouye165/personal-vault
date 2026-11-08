@@ -301,28 +301,39 @@ export class AnnotationJournal {
     if (this.sourceRootsGetter) {
       try {
         const roots = this.sourceRootsGetter()
-        if (Array.isArray(roots)) {
-          allForbidden.push(...roots)
+        if (!Array.isArray(roots)) {
+          throw new JournalSecurityError('sourceRootsGetter must return an array of paths')
         }
-      } catch {
-        // ignore getter errors
+        allForbidden.push(...roots)
+      } catch (err) {
+        if (err instanceof JournalSecurityError) throw err
+        throw new JournalSecurityError(`Failed to obtain source roots security context: ${err}`)
       }
     }
     if (this.vaultPathGetter) {
       try {
         const vp = this.vaultPathGetter()
-        if (vp && typeof vp === 'string') {
+        if (vp !== null && vp !== undefined) {
+          if (typeof vp !== 'string') {
+            throw new JournalSecurityError('vaultPathGetter must return a string or null')
+          }
           allForbidden.push(vp)
         }
-      } catch {
-        // ignore getter errors
+      } catch (err) {
+        if (err instanceof JournalSecurityError) throw err
+        throw new JournalSecurityError(`Failed to obtain vault path security context: ${err}`)
       }
     }
 
-    const storageNormalized = this.storageDir.toLowerCase()
+    const isWindows = process.platform === 'win32'
+    const storageNormalized = isWindows
+      ? resolve(normalize(this.storageDir)).toLowerCase()
+      : resolve(normalize(this.storageDir))
+
     for (const rawForbidden of allForbidden) {
       if (!rawForbidden || typeof rawForbidden !== 'string') continue
-      const forbiddenNormalized = resolve(normalize(rawForbidden)).toLowerCase()
+      const resolvedForbidden = resolve(normalize(rawForbidden))
+      const forbiddenNormalized = isWindows ? resolvedForbidden.toLowerCase() : resolvedForbidden
       if (
         storageNormalized === forbiddenNormalized ||
         storageNormalized.startsWith(forbiddenNormalized + sep) ||
@@ -374,28 +385,39 @@ export class AnnotationJournal {
     if (this.sourceRootsGetter) {
       try {
         const roots = this.sourceRootsGetter()
-        if (Array.isArray(roots)) {
-          allForbidden.push(...roots)
+        if (!Array.isArray(roots)) {
+          throw new JournalSecurityError('sourceRootsGetter must return an array of paths')
         }
-      } catch {
-        // ignore getter errors
+        allForbidden.push(...roots)
+      } catch (err) {
+        if (err instanceof JournalSecurityError) throw err
+        throw new JournalSecurityError(`Failed to obtain source roots security context: ${err}`)
       }
     }
     if (this.vaultPathGetter) {
       try {
         const vp = this.vaultPathGetter()
-        if (vp && typeof vp === 'string') {
+        if (vp !== null && vp !== undefined) {
+          if (typeof vp !== 'string') {
+            throw new JournalSecurityError('vaultPathGetter must return a string or null')
+          }
           allForbidden.push(vp)
         }
-      } catch {
-        // ignore getter errors
+      } catch (err) {
+        if (err instanceof JournalSecurityError) throw err
+        throw new JournalSecurityError(`Failed to obtain vault path security context: ${err}`)
       }
     }
 
-    const storageNormalized = this.storageDir.toLowerCase()
+    const isWindows = process.platform === 'win32'
+    const storageNormalized = isWindows
+      ? resolve(normalize(this.storageDir)).toLowerCase()
+      : resolve(normalize(this.storageDir))
+
     for (const rawForbidden of allForbidden) {
       if (!rawForbidden || typeof rawForbidden !== 'string') continue
-      const forbiddenNormalized = resolve(normalize(rawForbidden)).toLowerCase()
+      const resolvedForbidden = resolve(normalize(rawForbidden))
+      const forbiddenNormalized = isWindows ? resolvedForbidden.toLowerCase() : resolvedForbidden
       if (
         storageNormalized === forbiddenNormalized ||
         storageNormalized.startsWith(forbiddenNormalized + sep) ||

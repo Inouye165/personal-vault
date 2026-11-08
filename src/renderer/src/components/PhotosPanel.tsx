@@ -182,16 +182,27 @@ export function PhotosPanel() {
 
   const {
     collections,
+    collectionsPage,
+    totalCollectionsPages,
     hasMoreCollections,
-    loadMoreCollections,
+    hasPrevCollections,
+    goToNextCollectionsPage,
+    goToPrevCollectionsPage,
     memberships,
+    membershipsPage,
+    totalMembershipsPages,
     hasMoreMemberships,
-    loadMoreMemberships,
+    hasPrevMemberships,
+    goToNextMembershipsPage,
+    goToPrevMembershipsPage,
     isLoadingMemberships,
     membershipError,
     retryLoadMemberships,
     saveStatus,
     statusMessage,
+    persistencePending,
+    persistenceError,
+    retryReconciliation,
     setRating,
     setFlag,
     createCollection,
@@ -589,7 +600,27 @@ export function PhotosPanel() {
                 </div>
               )}
 
-              {saveStatus === 'saved' && (
+              {persistencePending && (
+                <div className="notice notice-warning persistence-pending-indicator" role="status">
+                  <AlertTriangle size={16} />
+                  <div className="notice-content">
+                    <strong>Journal finalization pending</strong>
+                    <p>Saved to database; awaiting journal finalization on disk.</p>
+                    {persistenceError && <p className="error-text">{persistenceError}</p>}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-xs"
+                    aria-label="Retry reconciliation"
+                    onClick={() => void retryReconciliation()}
+                  >
+                    <RefreshCw size={12} />
+                    <span>Retry reconciliation</span>
+                  </button>
+                </div>
+              )}
+
+              {saveStatus === 'saved' && !persistencePending && (
                 <div className="status-saved-indicator" role="status">
                   <span>Saved</span>
                 </div>
@@ -720,15 +751,38 @@ export function PhotosPanel() {
                           </button>
                         </span>
                       ))}
-                      {hasMoreMemberships && (
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-xs load-more-btn"
-                          aria-label="Load more memberships"
-                          onClick={loadMoreMemberships}
+                      {totalMembershipsPages > 1 && (
+                        <div
+                          className="memberships-pagination-controls"
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            marginTop: '6px'
+                          }}
                         >
-                          Load more memberships
-                        </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-xs"
+                            aria-label="Previous memberships page"
+                            disabled={!hasPrevMemberships}
+                            onClick={() => void goToPrevMembershipsPage()}
+                          >
+                            Prev
+                          </button>
+                          <span className="sub-text">
+                            Page {membershipsPage} of {totalMembershipsPages}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-xs"
+                            aria-label="Next memberships page"
+                            disabled={!hasMoreMemberships}
+                            onClick={() => void goToNextMembershipsPage()}
+                          >
+                            Next
+                          </button>
+                        </div>
                       )}
                     </div>
                   ) : (
@@ -822,15 +876,38 @@ export function PhotosPanel() {
                             </div>
                           )
                         })}
-                        {hasMoreCollections && (
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-xs load-more-btn"
-                            aria-label="Load more collections"
-                            onClick={loadMoreCollections}
+                        {totalCollectionsPages > 1 && (
+                          <div
+                            className="collections-pagination-controls"
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              marginTop: '6px'
+                            }}
                           >
-                            Load more collections
-                          </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-xs"
+                              aria-label="Previous collections page"
+                              disabled={!hasPrevCollections}
+                              onClick={() => void goToPrevCollectionsPage()}
+                            >
+                              Prev
+                            </button>
+                            <span className="sub-text">
+                              Page {collectionsPage} of {totalCollectionsPages}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-xs"
+                              aria-label="Next collections page"
+                              disabled={!hasMoreCollections}
+                              onClick={() => void goToNextCollectionsPage()}
+                            >
+                              Next
+                            </button>
+                          </div>
                         )}
                       </div>
                     )}

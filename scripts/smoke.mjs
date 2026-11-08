@@ -255,6 +255,7 @@ async function main() {
         'onScanProgress',
         'pauseImport',
         'pauseScan',
+        'reconcileJournal',
         'removeCollectionMember',
         'renameCollection',
         'resumeImport',

@@ -78,7 +78,8 @@ describe('preload bridge', () => {
         'renameCollection',
         'addCollectionMember',
         'removeCollectionMember',
-        'getPhotoMemberships'
+        'getPhotoMemberships',
+        'reconcileJournal'
       ].sort()
     )
   })

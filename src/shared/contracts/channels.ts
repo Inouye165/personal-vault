@@ -37,7 +37,8 @@ export const IPC_CHANNELS = {
   COLLECTIONS_RENAME: 'collections:rename',
   COLLECTIONS_ADD_MEMBER: 'collections:add-member',
   COLLECTIONS_REMOVE_MEMBER: 'collections:remove-member',
-  COLLECTIONS_GET_MEMBERSHIPS_FOR_PHOTO: 'collections:get-memberships-for-photo'
+  COLLECTIONS_GET_MEMBERSHIPS_FOR_PHOTO: 'collections:get-memberships-for-photo',
+  PHOTOS_RECONCILE_JOURNAL: 'photos:reconcile-journal'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

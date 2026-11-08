@@ -83,6 +83,7 @@ import {
   RemoveCollectionMemberResponseSchema,
   GetPhotoMembershipsRequestSchema,
   GetPhotoMembershipsResponseSchema,
+  ReconcileJournalResponseSchema,
   type SetPhotoAnnotationResponse,
   type GetPhotoAnnotationResponse,
   type CreateCollectionResponse,
@@ -90,7 +91,8 @@ import {
   type ListCollectionsResponse,
   type AddCollectionMemberResponse,
   type RemoveCollectionMemberResponse,
-  type GetPhotoMembershipsResponse
+  type GetPhotoMembershipsResponse,
+  type ReconcileJournalResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -764,7 +766,9 @@ export function registerIpcHandlers({
     })
     const res: SetPhotoAnnotationResponse = {
       success: true,
-      annotation: ann
+      annotation: ann,
+      persistencePending: ann.persistencePending,
+      persistenceError: ann.persistenceError
     }
     const validated = validatePayload(SetPhotoAnnotationResponseSchema, res)
     if (!validated.success) {
@@ -826,7 +830,11 @@ export function registerIpcHandlers({
       throw new Error('Catalog unavailable')
     }
     const collection = catalog.createCollection({ name: parsed.data.name })
-    const res: CreateCollectionResponse = { collection }
+    const res: CreateCollectionResponse = {
+      collection,
+      persistencePending: collection.persistencePending,
+      persistenceError: collection.persistenceError
+    }
     const validated = validatePayload(CreateCollectionResponseSchema, res)
     if (!validated.success) {
       throw new Error(`Invalid outgoing CreateCollectionResponse in main: ${validated.error}`)
@@ -846,10 +854,30 @@ export function registerIpcHandlers({
       collectionId: parsed.data.collectionId,
       name: parsed.data.name
     })
-    const res: RenameCollectionResponse = { collection }
+    const res: RenameCollectionResponse = {
+      collection,
+      persistencePending: collection.persistencePending,
+      persistenceError: collection.persistenceError
+    }
     const validated = validatePayload(RenameCollectionResponseSchema, res)
     if (!validated.success) {
       throw new Error(`Invalid outgoing RenameCollectionResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.PHOTOS_RECONCILE_JOURNAL, (): ReconcileJournalResponse => {
+    if (!catalog) {
+      throw new Error('Catalog unavailable')
+    }
+    const result = catalog.reconcileJournalWithDatabase()
+    const res: ReconcileJournalResponse = {
+      success: true,
+      reconciledCount: result.reconciledCount
+    }
+    const validated = validatePayload(ReconcileJournalResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing ReconcileJournalResponse in main: ${validated.error}`)
     }
     return validated.data
   })
