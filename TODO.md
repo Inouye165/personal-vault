@@ -49,9 +49,9 @@ Verification: implementation host **276 passed, 0 skipped** across all 11 test f
 
 ## Stage 3: Exact Duplicate Grouping and Review Workflow
 
-Status: **complete — awaiting independent review** (see HANDOFF.md).
+Status: **complete; independent code review accepted at `79bbf44`** (see HANDOFF.md).
 
-Verification: implementation host **326 passed, 0 skipped** across all 16 test files (reviewer host 319 passed, 1 skipped on `c5da2f1` due to environment platform junction probe in `discovery.test.ts`), with strict typecheck, lint, formatting, production build, unpacked build, real Electron SQLite repository checks (`verify:sqlite`, `verify:sqlite:unpacked`), scan workflow checks (`verify:scan`, `verify:scan:unpacked`), isolated-fixture real Electron duplicate review checks (`verify:duplicates`, `verify:duplicates:unpacked` — 18/18 checks passed), and real Electron smoke checks in built and unpacked modes (`smoke:built`, `smoke:unpacked`) passed.
+Verification: implementation host **326 passed, 0 skipped** across all 16 test files (reviewer host 325 passed, 1 skipped on `79bbf44` due to environment platform junction probe in `discovery.test.ts`), with strict typecheck, lint, formatting, production build, unpacked build, real Electron SQLite repository checks (`verify:sqlite`, `verify:sqlite:unpacked`), scan workflow checks (`verify:scan`, `verify:scan:unpacked`), isolated-fixture real Electron duplicate review checks (`verify:duplicates`, `verify:duplicates:unpacked` — 18/18 checks passed, exit code 0), and real Electron smoke checks in built and unpacked modes (`smoke:built`, `smoke:unpacked`) passed. Reviewer runtime limitation noted: window connection timeout in reviewer environment (`lastError="fetch failed"`, `lastTargets=null`).
 
 - [x] Exact duplicate grouping by current verified SHA-256 AND byte size across distinct original paths, preserving all differing metadata.
 - [x] Schema Migration 5: `duplicate_reviews` table for persistent review annotations (`reviewed`/`unreviewed`, optional `preferred_location_id`, `group_signature`).
