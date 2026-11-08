@@ -21,6 +21,7 @@ import {
 } from 'node:fs'
 import { join, resolve, dirname, parse, relative, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
+import sharp from 'sharp'
 import {
   THUMBNAIL_LIMITS,
   type ThumbnailCacheKeyParams,
@@ -59,6 +60,41 @@ export function readWebPDimensions(buffer: Buffer): { width: number; height: num
     return { width, height }
   }
   return null
+}
+
+export async function validateWebPIntegrity(
+  buffer: Buffer,
+  maxBytes: number = THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES
+): Promise<{ width: number; height: number } | null> {
+  if (!buffer || buffer.length < 30 || buffer.length > maxBytes) {
+    return null
+  }
+  const dims = readWebPDimensions(buffer)
+  if (
+    !dims ||
+    dims.width <= 0 ||
+    dims.height <= 0 ||
+    dims.width > THUMBNAIL_LIMITS.MAX_DIMENSION_PX ||
+    dims.height > THUMBNAIL_LIMITS.MAX_DIMENSION_PX
+  ) {
+    return null
+  }
+  try {
+    const meta = await sharp(buffer).metadata()
+    if (
+      meta.format !== 'webp' ||
+      !meta.width ||
+      !meta.height ||
+      meta.width > THUMBNAIL_LIMITS.MAX_DIMENSION_PX ||
+      meta.height > THUMBNAIL_LIMITS.MAX_DIMENSION_PX
+    ) {
+      return null
+    }
+    await sharp(buffer).stats()
+    return { width: meta.width, height: meta.height }
+  } catch {
+    return null
+  }
 }
 
 function assertCacheDirContainment(cacheDir: string): void {
@@ -140,8 +176,12 @@ function validateCacheSeparation(
 export class ThumbnailDiskCache {
   private readonly cacheDir: string
   private readonly maxSizeBytes: number
+  private readonly maxThumbnailSizeBytes: number
   private readonly sourceRoots?: readonly string[] | (() => readonly string[])
   private readonly vaultPath?: string | (() => string | null)
+  private readonly customValidator?: (
+    buffer: Buffer
+  ) => Promise<{ width: number; height: number } | null> | { width: number; height: number } | null
 
   constructor(options: ThumbnailDiskCacheOptions) {
     if (!options.cacheDir || typeof options.cacheDir !== 'string') {
@@ -149,14 +189,30 @@ export class ThumbnailDiskCache {
     }
     this.cacheDir = resolve(options.cacheDir)
     this.maxSizeBytes = options.maxSizeBytes ?? THUMBNAIL_LIMITS.DISK_CACHE_BUDGET_BYTES
+    this.maxThumbnailSizeBytes =
+      options.maxThumbnailSizeBytes ?? THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES
     this.sourceRoots = options.sourceRoots
     this.vaultPath = options.vaultPath
+    this.customValidator = options.validateBuffer
 
     this.assertSeparationAndContainment()
 
     if (!existsSync(this.cacheDir)) {
       mkdirSync(this.cacheDir, { recursive: true })
     }
+  }
+
+  private async validateIntegrity(
+    buffer: Buffer
+  ): Promise<{ width: number; height: number } | null> {
+    if (this.customValidator) {
+      try {
+        return await this.customValidator(buffer)
+      } catch {
+        return null
+      }
+    }
+    return validateWebPIntegrity(buffer, this.maxThumbnailSizeBytes)
   }
 
   private assertSeparationAndContainment(): void {
@@ -210,7 +266,7 @@ export class ThumbnailDiskCache {
         return null
       }
 
-      if (lstat.size === 0) {
+      if (lstat.size === 0 || lstat.size > this.maxThumbnailSizeBytes) {
         try {
           unlinkSync(filePath)
         } catch {
@@ -220,7 +276,17 @@ export class ThumbnailDiskCache {
       }
 
       const buf = readFileSync(filePath)
-      if (buf.length === 0 || readWebPDimensions(buf) === null) {
+      if (buf.length === 0 || buf.length > this.maxThumbnailSizeBytes) {
+        try {
+          unlinkSync(filePath)
+        } catch {
+          // ignore
+        }
+        return null
+      }
+
+      const dims = await this.validateIntegrity(buf)
+      if (!dims) {
         try {
           unlinkSync(filePath)
         } catch {
@@ -253,10 +319,20 @@ export class ThumbnailDiskCache {
       throw new Error('Cannot cache empty thumbnail buffer')
     }
 
+    if (buffer.length > this.maxThumbnailSizeBytes) {
+      throw new Error(
+        `Thumbnail buffer size (${buffer.length} bytes) exceeds maximum allowed size (${this.maxThumbnailSizeBytes} bytes)`
+      )
+    }
+
     // Validate buffer integrity before caching
-    if (readWebPDimensions(buffer) === null) {
+    const dims = await this.validateIntegrity(buffer)
+    if (!dims) {
       throw new Error('Cannot cache invalid or corrupt WebP thumbnail buffer')
     }
+
+    // Reserve capacity before creating temporary staging files
+    this.reserveCapacity(buffer.length, key)
 
     const tempName = `.thumb_tmp_${process.pid}_${randomUUID()}`
     const tempPath = join(this.cacheDir, tempName)
@@ -270,6 +346,10 @@ export class ThumbnailDiskCache {
       const stat = statSync(tempPath)
       if (stat.size !== buffer.length) {
         throw new Error('Staging thumbnail write incomplete')
+      }
+
+      if (process.env.PV_TEST_STAGING_FAILURE === '1') {
+        throw new Error('Simulated staging disk failure: ENOSPC')
       }
 
       // Narrowly scoped test fixture barrier for deterministic publication interruption
@@ -294,9 +374,6 @@ export class ThumbnailDiskCache {
 
       // Atomic publication
       renameSync(tempPath, targetPath)
-
-      // Evict older entries if budget exceeded
-      this.evictIfNeeded()
     } catch (err) {
       try {
         if (existsSync(tempPath)) {
@@ -343,31 +420,38 @@ export class ThumbnailDiskCache {
   }
 
   /**
-   * Evicts oldest app-owned `.thumb` files if cache exceeds the configured budget.
-   * Strictly never touches unrelated files or files outside cacheDir.
+   * Returns all demonstrably app-owned `.thumb` files in cache directory.
    */
-  private evictIfNeeded(): void {
+  private getOwnedThumbnailEntries(): Array<{
+    name: string
+    fullPath: string
+    size: number
+    mtimeMs: number
+  }> {
+    const entries: Array<{
+      name: string
+      fullPath: string
+      size: number
+      mtimeMs: number
+    }> = []
+    if (!existsSync(this.cacheDir)) return entries
+
     try {
       const files = readdirSync(this.cacheDir)
-      const thumbEntries: Array<{ name: string; fullPath: string; size: number; mtimeMs: number }> =
-        []
-      let totalBytes = 0
-
       for (const file of files) {
         // Strictly only touch valid 64-hex .thumb files
-        if (/^[a-f0-9]{64}\.thumb$/.test(file)) {
+        if (/^[0-9a-fA-F]{64}\.thumb$/.test(file)) {
           const fullPath = join(this.cacheDir, file)
           try {
             if (dirname(fullPath) === this.cacheDir) {
               const st = lstatSync(fullPath)
-              if (st.isFile() && !st.isSymbolicLink()) {
-                thumbEntries.push({
+              if (st.isFile() && !st.isSymbolicLink() && !st.isDirectory()) {
+                entries.push({
                   name: file,
                   fullPath,
                   size: st.size,
                   mtimeMs: st.mtimeMs
                 })
-                totalBytes += st.size
               }
             }
           } catch {
@@ -375,27 +459,68 @@ export class ThumbnailDiskCache {
           }
         }
       }
-
-      if (totalBytes <= this.maxSizeBytes) {
-        return
-      }
-
-      // Sort by mtime ascending (oldest first)
-      thumbEntries.sort((a, b) => a.mtimeMs - b.mtimeMs)
-
-      for (const entry of thumbEntries) {
-        if (totalBytes <= this.maxSizeBytes) {
-          break
-        }
-        try {
-          unlinkSync(entry.fullPath)
-          totalBytes -= entry.size
-        } catch {
-          // ignore
-        }
-      }
     } catch {
-      // Non-fatal if eviction check fails
+      // ignore
+    }
+    return entries
+  }
+
+  /**
+   * Reserves capacity in the cache before staging/publication.
+   * Evicts oldest app-owned `.thumb` files if needed.
+   * Throws if the required capacity exceeds total budget or eviction fails to free enough space.
+   */
+  private reserveCapacity(neededBytes: number, excludingKey?: string): void {
+    if (neededBytes > this.maxSizeBytes) {
+      throw new Error(
+        `Required thumbnail capacity (${neededBytes} bytes) exceeds total disk cache budget (${this.maxSizeBytes} bytes)`
+      )
+    }
+
+    const entries = this.getOwnedThumbnailEntries()
+    let currentBytes = 0
+    const evictable: Array<{
+      name: string
+      fullPath: string
+      size: number
+      mtimeMs: number
+    }> = []
+
+    for (const entry of entries) {
+      if (excludingKey && entry.name === `${excludingKey}.thumb`) {
+        // Target entry will be overwritten atomically
+        continue
+      }
+      currentBytes += entry.size
+      evictable.push(entry)
+    }
+
+    if (currentBytes + neededBytes <= this.maxSizeBytes) {
+      return
+    }
+
+    // Sort by mtime ascending (oldest first)
+    evictable.sort((a, b) => a.mtimeMs - b.mtimeMs)
+
+    for (const entry of evictable) {
+      if (currentBytes + neededBytes <= this.maxSizeBytes) {
+        break
+      }
+      try {
+        if (process.env.PV_TEST_EVICTION_UNLINK_FAIL === '1') {
+          throw new Error('EPERM: operation not permitted, unlink')
+        }
+        unlinkSync(entry.fullPath)
+        currentBytes -= entry.size
+      } catch {
+        // Failed eviction of this file; cannot subtract
+      }
+    }
+
+    if (currentBytes + neededBytes > this.maxSizeBytes) {
+      throw new Error(
+        `Failed to free sufficient capacity in cache: needed ${neededBytes} bytes, current total ${currentBytes} bytes exceeds budget ${this.maxSizeBytes} bytes`
+      )
     }
   }
 

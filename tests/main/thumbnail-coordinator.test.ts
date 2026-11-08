@@ -486,4 +486,59 @@ describe('ThumbnailCoordinator', () => {
 
     await boundedCoord.shutdown()
   })
+
+  it('safely discards corrupt 30-byte cached thumbnails and regenerates from source', async () => {
+    const testJpegPath = join(sourceRoot, 'regen_test.jpg')
+    const jpegBuffer = await sharp({
+      create: { width: 500, height: 250, channels: 3, background: { r: 120, g: 120, b: 120 } }
+    })
+      .jpeg()
+      .toBuffer()
+    writeFileSync(testJpegPath, jpegBuffer)
+    const stat = statSync(testJpegPath)
+    const sha256 = createHash('sha256').update(jpegBuffer).digest('hex')
+
+    // Pre-populate cache with corrupt 30-byte pseudo-WebP file
+    const cacheKey = coordinator.getCache().computeCacheKey({
+      locationId: 555,
+      sourcePath: testJpegPath,
+      sha256,
+      byteSize: stat.size,
+      mtimeMs: Math.round(stat.mtimeMs)
+    })
+    const corruptThumbPath = join(cacheDir, `${cacheKey}.thumb`)
+
+    const corrupt30Buf = Buffer.alloc(30)
+    corrupt30Buf.write('RIFF', 0, 'ascii')
+    corrupt30Buf.writeUInt32LE(22, 4)
+    corrupt30Buf.write('WEBP', 8, 'ascii')
+    corrupt30Buf.write('VP8 ', 12, 'ascii')
+    corrupt30Buf.writeUInt32LE(10, 16)
+    corrupt30Buf[23] = 0x9d
+    corrupt30Buf[24] = 0x01
+    corrupt30Buf[25] = 0x2a
+    corrupt30Buf.writeUInt16LE(1, 26)
+    corrupt30Buf.writeUInt16LE(1, 28)
+    writeFileSync(corruptThumbPath, corrupt30Buf)
+
+    // Request thumbnail: coordinator must NOT return ready with 1x1 dimensions!
+    // It must discard the corrupt file, regenerate from source, and return genuine 512x256 thumbnail
+    const result = await coordinator.requestThumbnail({
+      locationId: 555,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: sha256
+    })
+
+    expect(result.status).toBe('ready')
+    if (result.status === 'ready') {
+      expect(result.width).toBe(500)
+      expect(result.height).toBe(250)
+    }
+
+    // Cache file on disk is now regenerated, valid WebP (> 30 bytes)
+    const newStat = statSync(corruptThumbPath)
+    expect(newStat.size).toBeGreaterThan(100)
+  })
 })

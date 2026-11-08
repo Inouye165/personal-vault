@@ -6,7 +6,7 @@
  * thumbnail decoding with honest placeholders, and factual details panel.
  */
 
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 import {
   RefreshCw,
   Image as ImageIcon,
@@ -16,7 +16,7 @@ import {
   FileImage
 } from 'lucide-react'
 import { usePhotos, PHOTO_BOUNDS } from '../hooks/usePhotos'
-import type { PhotoItem } from '../../../shared/validation/ipc-schemas'
+import type { PhotoItem, ThumbnailResult } from '../../../shared/validation/ipc-schemas'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -36,6 +36,93 @@ function formatDate(ms: number | null): string {
   })
 }
 
+interface PhotoCardCellProps {
+  photo: PhotoItem
+  thumb?: ThumbnailResult
+  isSelected: boolean
+  top: number
+  left: number
+  cellWidth: number
+  cellHeight: number
+  onSelect: (id: number) => void
+  onKeyDown: (e: KeyboardEvent<HTMLDivElement>, photo: PhotoItem) => void
+  requestThumbnail: (photo: PhotoItem, priority?: 'high' | 'normal' | 'low') => void
+  cancelThumbnail: (id: number) => void
+}
+
+function PhotoCardCell({
+  photo,
+  thumb,
+  isSelected,
+  top,
+  left,
+  cellWidth,
+  cellHeight,
+  onSelect,
+  onKeyDown,
+  requestThumbnail,
+  cancelThumbnail
+}: PhotoCardCellProps): ReactElement {
+  useEffect(() => {
+    requestThumbnail(photo, 'high')
+    return () => {
+      cancelThumbnail(photo.id)
+    }
+  }, [photo, requestThumbnail, cancelThumbnail])
+
+  return (
+    <div
+      id={`photo-cell-${photo.id}`}
+      className={`photo-card photo-cell ${isSelected ? 'selected' : ''}`}
+      style={{
+        position: 'absolute',
+        top: `${top}px`,
+        left: `${left}px`,
+        width: `${cellWidth}px`,
+        height: `${cellHeight}px`
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}`}
+      aria-pressed={isSelected}
+      onClick={() => onSelect(photo.id)}
+      onKeyDown={(e) => onKeyDown(e, photo)}
+    >
+      <div className="photo-thumbnail-container">
+        {thumb?.status === 'ready' ? (
+          <img
+            src={thumb.dataUrl}
+            alt={photo.fileName}
+            className="photo-thumbnail-img"
+            loading="lazy"
+          />
+        ) : thumb?.status === 'unsupported' ? (
+          <div className="thumbnail-placeholder unsupported">
+            <FileQuestion size={32} />
+            <span className="placeholder-tag">Unsupported</span>
+          </div>
+        ) : thumb?.status === 'error' ? (
+          <div className="thumbnail-placeholder error">
+            <AlertTriangle size={32} />
+            <span className="placeholder-tag">Unavailable</span>
+          </div>
+        ) : (
+          <div className="thumbnail-placeholder loading">
+            <FileImage size={32} className="pulse" />
+            <span className="placeholder-tag">Loading…</span>
+          </div>
+        )}
+      </div>
+      <div className="photo-card-info">
+        <span className="photo-filename" title={photo.fileName}>
+          {photo.fileName}
+        </span>
+        <span className="photo-size">{formatBytes(photo.byteSize)}</span>
+      </div>
+    </div>
+  )
+}
+
 export function PhotosPanel() {
   const {
     photos,
@@ -49,7 +136,8 @@ export function PhotosPanel() {
     refresh,
     ensureRangeLoaded,
     getPhoto,
-    requestThumbnail
+    requestThumbnail,
+    cancelThumbnail
   } = usePhotos()
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -267,59 +355,20 @@ export function PhotosPanel() {
                 const isSelected = selectedId === photo.id
 
                 return (
-                  <div
+                  <PhotoCardCell
                     key={photo.id}
-                    id={`photo-cell-${photo.id}`}
-                    className={`photo-card photo-cell ${isSelected ? 'selected' : ''}`}
-                    style={{
-                      position: 'absolute',
-                      top: `${top}px`,
-                      left: `${left}px`,
-                      width: `${cellWidth}px`,
-                      height: `${cellHeight}px`
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}`}
-                    aria-pressed={isSelected}
-                    onClick={() => selectPhoto(photo.id)}
-                    onKeyDown={(e) => handleKeyDown(e, photo)}
-                    ref={() => {
-                      requestThumbnail(photo, 'high')
-                    }}
-                  >
-                    <div className="photo-thumbnail-container">
-                      {thumb?.status === 'ready' ? (
-                        <img
-                          src={thumb.dataUrl}
-                          alt={photo.fileName}
-                          className="photo-thumbnail-img"
-                          loading="lazy"
-                        />
-                      ) : thumb?.status === 'unsupported' ? (
-                        <div className="thumbnail-placeholder unsupported">
-                          <FileQuestion size={32} />
-                          <span className="placeholder-tag">Unsupported</span>
-                        </div>
-                      ) : thumb?.status === 'error' ? (
-                        <div className="thumbnail-placeholder error">
-                          <AlertTriangle size={32} />
-                          <span className="placeholder-tag">Unavailable</span>
-                        </div>
-                      ) : (
-                        <div className="thumbnail-placeholder loading">
-                          <FileImage size={32} className="pulse" />
-                          <span className="placeholder-tag">Loading…</span>
-                        </div>
-                      )}
-                    </div>
-                    <div className="photo-card-info">
-                      <span className="photo-filename" title={photo.fileName}>
-                        {photo.fileName}
-                      </span>
-                      <span className="photo-size">{formatBytes(photo.byteSize)}</span>
-                    </div>
-                  </div>
+                    photo={photo}
+                    thumb={thumb}
+                    isSelected={isSelected}
+                    top={top}
+                    left={left}
+                    cellWidth={cellWidth}
+                    cellHeight={cellHeight}
+                    onSelect={selectPhoto}
+                    onKeyDown={handleKeyDown}
+                    requestThumbnail={requestThumbnail}
+                    cancelThumbnail={cancelThumbnail}
+                  />
                 )
               })}
             </div>

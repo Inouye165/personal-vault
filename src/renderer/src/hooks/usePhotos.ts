@@ -36,6 +36,7 @@ export interface UsePhotosResult {
   readonly ensureRangeLoaded: (startIndex: number, endIndex: number) => void
   readonly getPhoto: (index: number) => PhotoItem | undefined
   readonly requestThumbnail: (photo: PhotoItem, priority?: 'high' | 'normal' | 'low') => void
+  readonly cancelThumbnail: (locationId: number) => void
 }
 
 export function usePhotos(): UsePhotosResult {
@@ -45,6 +46,11 @@ export function usePhotos(): UsePhotosResult {
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [thumbnails, setThumbnails] = useState<Map<number, ThumbnailResult>>(new Map())
+  const thumbnailsRef = useRef(thumbnails)
+
+  useEffect(() => {
+    thumbnailsRef.current = thumbnails
+  }, [thumbnails])
 
   // Monotonic generation incremented on unmount and refresh
   const generationRef = useRef<number>(1)
@@ -160,7 +166,7 @@ export function usePhotos(): UsePhotosResult {
   const requestThumbnail = useCallback(
     (photo: PhotoItem, priority: 'high' | 'normal' | 'low' = 'normal') => {
       if (!window.api?.getThumbnail) return
-      if (thumbnails.has(photo.id)) return
+      if (thumbnailsRef.current.has(photo.id)) return
 
       const currentGen = generationRef.current
       const existingReq = inFlightThumbsRef.current.get(photo.id)
@@ -199,6 +205,14 @@ export function usePhotos(): UsePhotosResult {
           // Safe deletion: only delete if current active request matches this requestId
           inFlightThumbsRef.current.delete(photo.id)
 
+          // Do not cache transient queue pressure or cancellation as permanent error states
+          if (
+            result.status === 'error' &&
+            (result.code === 'QUEUE_FULL' || result.code === 'CANCELLED')
+          ) {
+            return
+          }
+
           setThumbnails((prev) => {
             const next = new Map(prev)
             if (next.size >= PHOTO_BOUNDS.MAX_THUMBNAIL_CACHE) {
@@ -217,8 +231,13 @@ export function usePhotos(): UsePhotosResult {
           }
         })
     },
-    [thumbnails]
+    []
   )
+
+  const cancelThumbnail = useCallback((locationId: number) => {
+    inFlightThumbsRef.current.delete(locationId)
+    void window.api?.cancelThumbnail?.({ locationId })
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -263,6 +282,7 @@ export function usePhotos(): UsePhotosResult {
     refresh,
     ensureRangeLoaded,
     getPhoto,
-    requestThumbnail
+    requestThumbnail,
+    cancelThumbnail
   }
 }

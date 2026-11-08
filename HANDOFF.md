@@ -71,13 +71,18 @@ All operations strictly enforce hard configurable resource bounds:
 - **Cache Key Identity**:
   - Hashed files: `hash:<sha256>:<recipe>`.
   - Unhashed files: `unhashed:<locationId>:<normalizedPath>:<byteSize>:<mtimeMs>:<recipe>`, strictly bound to source identity to guarantee files with identical size and mtime never collide.
-- **Integrity & Dimension Parsing**: Validates WebP header (`RIFF....WEBPVP8 `) via `readWebPDimensions`. Corrupt, empty, or truncated cache files are unlinked and treated as cache misses, safely regenerating on next request without inventing dimensions.
+- **Integrity & Dimension Parsing**: Validates WebP header dimensions and full image decode integrity via `validateWebPIntegrity` (which rejects corrupt pseudo-WebP headers, such as 30-byte truncated buffers with valid RIFF/VP8 chunk headers but missing image payloads). Corrupt, empty, truncated, or oversized cache entries are rejected before allocating contents, unlinked from disk, and treated as cache misses, safely regenerating genuine thumbnails on the next request without inventing dimensions.
+- **Resource Bounds & Pre-Allocation Capacity Reservation**:
+  - Maximum encoded thumbnail size: 1 MiB (`MAX_THUMBNAIL_BYTES = 1,024 * 1,024`).
+  - Maximum dimensions: 512x512 pixels (`MAX_DIMENSION_PX`).
+  - Capacity reservation: `reserveCapacity` executes _before_ creating staging files, evicting oldest `.thumb` entries to guarantee the incoming thumbnail and its staging file fit within `DISK_CACHE_BUDGET_BYTES`.
+  - Failed eviction and disk-full errors are safely handled and rethrown rather than silently claiming success; no orphan temporary files are left behind.
 - **Atomic Publication & Deterministic Interruption**: Thumbnails are written to unique staging files (`.thumb_tmp_<pid>_<uuid>`) using exclusive `wx` creation, then atomically renamed to `<key>.thumb`. Deterministic publication interruption at the publication boundary (staging file created and verified before rename) was verified in real Electron via narrowly scoped test barrier instrumentation (`PV_TEST_PUBLICATION_BARRIER_SIGNAL`). On mid-flight process termination, the staging file is proven abandoned on disk, cleaned up on restart, decoded afresh on the first request after restart (`totalDecodes + 1`, `cacheHits + 0`), and cleanly reused from cache on subsequent requests (`totalDecodes + 0`, `cacheHits + 1`).
-- **LRU Eviction**: Eviction strictly targets demonstrably owned `.thumb` files in `<userData>/thumbnails/`. Files outside or unrelated are never touched.
+- **LRU Eviction**: Eviction strictly targets demonstrably owned `.thumb` files matching `/^[0-9a-fA-F]{64}\.thumb$/` in `<userData>/thumbnails/`. Files outside or unrelated are never touched.
 - **Staging Cleanup**: Orphaned staging files (`.thumb_tmp_*`) are cleaned during startup and shutdown.
 - **Source Byte Cap Enforcement**: Checked on descriptor prior to read and on every chunk during streaming read.
 - **Residual Out-of-Band Modification Detection**: Prior to serving a cached thumbnail, `ThumbnailCoordinator` performs a fast `statSync` check on the live source file. If the file was modified or replaced out-of-band since cataloging, it returns `SOURCE_MODIFIED` rather than serving a stale cached image.
-- **Investigation of Reviewer Sandbox Test Limitations**: In the reviewer sandbox environment, 22 tests passed with 3 cache rename `EPERM` failures reported. On the implementation host, all 23 focused thumbnail unit & behavioral tests (`tests/main/thumbnail-cache.test.ts` and `tests/main/thumbnail-coordinator.test.ts`) pass 100% of the time (0 failures). The `EPERM` failure in sandboxed Windows environments occurs when background filesystem scanners (Windows Defender, Windows Search Indexer, or container filter drivers) hold momentary locks on newly written temporary dotfiles during synchronous `renameSync`. In accordance with standing instructions, atomic publication safeguards (exclusive write `wx` -> verify size -> atomic `renameSync` -> cleanup staging on error) are strictly preserved intact without weakening them merely to suppress environmental sandbox errors.
+- **Investigation of Reviewer Sandbox Test Limitations**: In the reviewer sandbox environment, focused tests reported 23 passed and 3 cache rename `EPERM` failures. On the implementation host, all 29 focused thumbnail unit & behavioral tests (`tests/main/thumbnail-cache.test.ts` and `tests/main/thumbnail-coordinator.test.ts`) pass cleanly (0 failures). The `EPERM` failure during cache-publication rename in the reviewer sandbox occurs when background file monitoring, container filter drivers, or indexers hold momentary handles on newly written dotfiles on Windows. Implementation-host success does not establish the specific cause of those reviewer failures. In accordance with standing instructions, publication safeguards (exclusive write `wx` -> verify size -> atomic `renameSync` -> cleanup staging on error) are strictly preserved intact without weakening them merely to suppress environmental sandbox errors.
 
 ### 1.5 IPC & Process Security
 
@@ -128,7 +133,7 @@ Scale verification was conducted with an isolated 10,000-photo catalog fixture b
     - Peak queued decode jobs: 4 ($\le 64$ bound).
     - Peak mounted DOM cells: 20 ($\le 200$ bound).
     - Peak renderer JS heap: 9.54 MiB.
-    - Disk cache budget: 0.00 MiB / 1,024 MiB (0 orphan temporary files at rest).
+    - Disk cache usage: final = 0.00 MiB, sampled peak = 0.00 MiB / 1,024 MiB (0 orphan temporary files at rest, sampled peak active staging files = 0).
   - **Worker Cancellation**: Observed active/queued request cancellation across IPC verified with worker thread termination and capacity recovery.
   - **Deterministic Publication Interruption**: Staging file verified on disk before rename, interrupted mid-flight, verified clean restart with 0 orphan staging files, verified new decode on first request after restart, and subsequent cache reuse.
   - **Source Preservation Invariance**: 100% byte-for-byte invariance confirmed across all test source files.

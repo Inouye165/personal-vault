@@ -8,6 +8,7 @@ export const THUMBNAIL_LIMITS = {
   MAX_QUEUED_JOBS: 64,
   MAX_SOURCE_SIZE_BYTES: 128 * 1024 * 1024, // 128 MiB
   MAX_INPUT_PIXELS: 100_000_000, // 100 MP
+  MAX_THUMBNAIL_BYTES: 1024 * 1024, // 1 MiB max encoded thumbnail
   JOB_TIMEOUT_MS: 15_000, // 15 seconds
   DISK_CACHE_BUDGET_BYTES: 1024 * 1024 * 1024, // 1 GiB
   RECIPE_VERSION: 'v1_512_webp'
@@ -24,8 +25,12 @@ export interface ThumbnailCacheKeyParams {
 export interface ThumbnailDiskCacheOptions {
   readonly cacheDir: string
   readonly maxSizeBytes?: number
+  readonly maxThumbnailSizeBytes?: number
   readonly sourceRoots?: readonly string[] | (() => readonly string[])
   readonly vaultPath?: string | (() => string | null)
+  readonly validateBuffer?: (
+    buffer: Buffer
+  ) => Promise<{ width: number; height: number } | null> | { width: number; height: number } | null
 }
 
 export interface ThumbnailDiagnostics {

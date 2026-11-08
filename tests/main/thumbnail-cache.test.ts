@@ -262,4 +262,133 @@ describe('ThumbnailDiskCache', () => {
     expect(await cache.get(key4)).not.toBeNull()
     expect(existsSync(unrelatedFile)).toBe(true) // Unrelated file strictly preserved
   })
+
+  it('rejects corrupt 30-byte header-only WebP buffers that pass basic header parsing but fail image integrity', async () => {
+    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
+    const key = cache.computeCacheKey({
+      locationId: 99,
+      sourcePath: join(tempDir, 'photo99.jpg'),
+      sha256: '9'.repeat(64),
+      byteSize: 3000,
+      mtimeMs: 1700000000000
+    })
+
+    // Construct the reviewer's exact 30-byte buffer:
+    // RIFF at 0, length 22 at 4, WEBP at 8, VP8-space at 12, length 10 at 16,
+    // start code 0x9d, 0x01, 0x2a at 23-25, 1x1 dimensions at 26/28
+    const corrupt30Buf = Buffer.alloc(30)
+    corrupt30Buf.write('RIFF', 0, 'ascii')
+    corrupt30Buf.writeUInt32LE(22, 4)
+    corrupt30Buf.write('WEBP', 8, 'ascii')
+    corrupt30Buf.write('VP8 ', 12, 'ascii')
+    corrupt30Buf.writeUInt32LE(10, 16)
+    corrupt30Buf[23] = 0x9d
+    corrupt30Buf[24] = 0x01
+    corrupt30Buf[25] = 0x2a
+    corrupt30Buf.writeUInt16LE(1, 26)
+    corrupt30Buf.writeUInt16LE(1, 28)
+
+    const thumbFile = join(cacheDir, `${key}.thumb`)
+    writeFileSync(thumbFile, corrupt30Buf)
+
+    // Must be rejected as corrupt, unlinked from disk, and return null
+    const retrieved = await cache.get(key)
+    expect(retrieved).toBeNull()
+    expect(existsSync(thumbFile)).toBe(false)
+  })
+
+  it('rejects oversized entries before reading or allocating contents', async () => {
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: 10 * 1024 * 1024,
+      maxThumbnailSizeBytes: 1024 * 1024 // 1 MiB limit
+    })
+    const key = 'e'.repeat(64)
+
+    // Oversized buffer on put (1.5 MiB)
+    const oversizedBuf = Buffer.alloc(1.5 * 1024 * 1024)
+    await expect(cache.put(key, oversizedBuf)).rejects.toThrow(/oversized|exceeds/i)
+
+    // Pre-existing oversized file on disk should be rejected via stat check without allocating into memory
+    const thumbFile = join(cacheDir, `${key}.thumb`)
+    writeFileSync(thumbFile, Buffer.alloc(1.5 * 1024 * 1024))
+    const retrieved = await cache.get(key)
+    expect(retrieved).toBeNull()
+    expect(existsSync(thumbFile)).toBe(false)
+  })
+
+  it('reserves capacity before staging and rejects entry when budget cannot accommodate it', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 1, b: 1 } }
+    })
+      .webp()
+      .toBuffer()
+
+    // Budget smaller than the thumbnail size
+    const tinyCache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: validWebp.length - 10
+    })
+
+    const key = 'f'.repeat(64)
+    await expect(tinyCache.put(key, validWebp)).rejects.toThrow(/budget|capacity/i)
+
+    // Verify no temporary files were created or left behind
+    const files = readdirSync(cacheDir)
+    expect(files.filter((f) => f.startsWith('.thumb_tmp_'))).toHaveLength(0)
+  })
+
+  it('handles failed eviction safely without leaving staging files or claiming capacity', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 1, b: 1 } }
+    })
+      .webp()
+      .toBuffer()
+
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: validWebp.length
+    })
+
+    const key1 = 'a'.repeat(64)
+    const key2 = 'b'.repeat(64)
+    await cache.put(key1, validWebp)
+
+    process.env.PV_TEST_EVICTION_UNLINK_FAIL = '1'
+    try {
+      // Putting key2 requires evicting key1. Since key1 eviction fails, put must reject
+      await expect(cache.put(key2, validWebp)).rejects.toThrow(/capacity|budget/i)
+
+      // Verify no temporary staging files left behind
+      const files = readdirSync(cacheDir)
+      expect(files.filter((f) => f.startsWith('.thumb_tmp_'))).toHaveLength(0)
+    } finally {
+      delete process.env.PV_TEST_EVICTION_UNLINK_FAIL
+    }
+  })
+
+  it('handles interrupted staging safely and leaves no orphan staging files', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 1, b: 1 } }
+    })
+      .webp()
+      .toBuffer()
+
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: 1024 * 1024
+    })
+
+    const key = 'd'.repeat(64)
+    process.env.PV_TEST_STAGING_FAILURE = '1'
+
+    try {
+      await expect(cache.put(key, validWebp)).rejects.toThrow(/ENOSPC/)
+      // Staging file must have been cleaned up in the catch block
+      const files = readdirSync(cacheDir)
+      expect(files.filter((f) => f.startsWith('.thumb_tmp_'))).toHaveLength(0)
+    } finally {
+      delete process.env.PV_TEST_STAGING_FAILURE
+    }
+  })
 })
