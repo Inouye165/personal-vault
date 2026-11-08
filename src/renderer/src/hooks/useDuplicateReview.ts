@@ -57,9 +57,14 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
   const isMountedRef = useRef(true)
   const groupsTokenRef = useRef(0)
   const selectionTokenRef = useRef(0)
+  const groupsRef = useRef<DuplicateGroupSummary[]>(groups)
   const selectedGroupRef = useRef<DuplicateGroupSummary | null>(null)
   const groupsFilterRef = useRef<DuplicateReviewFilter>(groupsFilter)
   const groupsOffsetRef = useRef<number>(groupsOffset)
+
+  useEffect(() => {
+    groupsRef.current = groups
+  }, [groups])
 
   useEffect(() => {
     selectedGroupRef.current = selectedGroup
@@ -264,6 +269,7 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
     async (status: 'unreviewed' | 'reviewed', preferredLocationId?: number | null) => {
       const current = selectedGroupRef.current
       if (!current) return
+      const submitFilter = groupsFilterRef.current
       const targetSha256 = current.sha256
       const targetByteSize = current.byteSize
       const targetSig = current.groupSignature
@@ -283,30 +289,46 @@ export function useDuplicateReview(): UseDuplicateReviewResult {
         if (!isMountedRef.current) return
 
         const activeFilter = groupsFilterRef.current
+        const isFilterUnchanged = activeFilter === submitFilter
+
+        // Check if the group in the list is still fresh at targetSig
+        const groupInList = groupsRef.current.find(
+          (g) => g.sha256 === response.sha256 && g.byteSize === response.byteSize
+        )
+        const isGroupFreshInList = groupInList?.groupSignature === targetSig
+
         const statusMatchesFilter =
           activeFilter === 'all' ||
           (activeFilter === 'unreviewed' && response.status === 'unreviewed') ||
           (activeFilter === 'reviewed' && response.status === 'reviewed')
 
-        if (!statusMatchesFilter) {
-          // Item no longer belongs in active filtered view: reload groups and update totals
-          void fetchGroups(groupsOffsetRef.current, activeFilter)
-        } else {
-          // Update groups list item in place
-          setGroups((prev) =>
-            prev.map((g) =>
-              g.sha256 === response.sha256 && g.byteSize === response.byteSize
-                ? {
-                    ...g,
-                    reviewStatus: response.status,
-                    preferredLocationId: response.preferredLocationId,
-                    groupSignature: response.groupSignature,
-                    hasStaleDecision: false,
-                    reviewedAtMs: response.reviewedAtMs
-                  }
-                : g
+        // 1. Groups list: only update if group is still fresh at targetSig
+        if (isGroupFreshInList) {
+          if (!statusMatchesFilter) {
+            // Item no longer belongs in active filtered view: reload groups and update totals
+            // only if user has not changed filter while save was pending
+            if (isFilterUnchanged) {
+              void fetchGroups(groupsOffsetRef.current, activeFilter)
+            }
+          } else {
+            // Update groups list item in place, guarded by targetSig
+            setGroups((prev) =>
+              prev.map((g) =>
+                g.sha256 === response.sha256 &&
+                g.byteSize === response.byteSize &&
+                g.groupSignature === targetSig
+                  ? {
+                      ...g,
+                      reviewStatus: response.status,
+                      preferredLocationId: response.preferredLocationId,
+                      groupSignature: response.groupSignature,
+                      hasStaleDecision: false,
+                      reviewedAtMs: response.reviewedAtMs
+                    }
+                  : g
+              )
             )
-          )
+          }
         }
 
         // Protect against stale async completion: only update selectedGroup if user is still on this group

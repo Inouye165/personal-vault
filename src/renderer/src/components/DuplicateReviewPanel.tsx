@@ -125,6 +125,15 @@ export function DuplicateReviewPanel() {
                 <span>
                   {review.totalGroups} Duplicate {review.totalGroups === 1 ? 'Group' : 'Groups'}
                 </span>
+                <button
+                  type="button"
+                  className="btn btn-icon btn-ghost"
+                  onClick={() => void review.refresh()}
+                  aria-label="Refresh duplicate groups"
+                  title="Refresh duplicate groups"
+                >
+                  <RotateCcw size={14} aria-hidden="true" />
+                </button>
               </div>
               <div className="groups-filter-row" role="group" aria-label="Filter groups">
                 {(['all', 'unreviewed', 'reviewed'] as const).map((filter) => (

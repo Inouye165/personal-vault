@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/src/App.js'
 import type { VaultApi } from '../../src/preload/index.d.js'
@@ -599,6 +599,25 @@ describe('Stage 3 — Duplicate Review UI Integration', () => {
       }
     )
 
+    ;(api.getDuplicateGroupMembers as ReturnType<typeof vi.fn>).mockImplementation(
+      async (req: { sha256: string; byteSize: number }) => {
+        const matchingGroup = [group1, group2].find((g) => g.sha256 === req.sha256)
+        return {
+          sha256: req.sha256,
+          byteSize: req.byteSize,
+          groupSignature: matchingGroup?.groupSignature ?? 'sig1',
+          reviewStatus: 'unreviewed' as const,
+          preferredLocationId: null,
+          hasStaleDecision: false,
+          items: sampleMembers,
+          totalCount: 2,
+          offset: 0,
+          limit: 50,
+          hasMore: false
+        }
+      }
+    )
+
     ;(api.setDuplicateReview as ReturnType<typeof vi.fn>).mockImplementation(
       async (req: { sha256: string; status: 'unreviewed' | 'reviewed' }) => {
         if (req.status === 'reviewed') {
@@ -828,5 +847,114 @@ describe('Stage 3 — Duplicate Review UI Integration', () => {
     expect(
       screen.queryByText(new RegExp(`SHA-256: ${unreviewedGroup.sha256.substring(0, 12)}`, 'i'))
     ).toBeNull()
+  })
+
+  it('preserves refreshed group signature S2 and invalidated decision when an old save response resolves with S1', async () => {
+    let resolveSave!: (res: unknown) => void
+    const savePromise = new Promise((resolve) => {
+      resolveSave = resolve
+    })
+
+    const groupWithS1 = {
+      ...sampleGroup,
+      groupSignature: 'S1',
+      reviewStatus: 'unreviewed' as const,
+      hasStaleDecision: false,
+      preferredLocationId: null
+    }
+
+    const groupWithS2 = {
+      ...sampleGroup,
+      groupSignature: 'S2',
+      reviewStatus: 'unreviewed' as const,
+      hasStaleDecision: true,
+      preferredLocationId: null
+    }
+
+    let currentCatalogGroup = groupWithS1
+
+    ;(api.getDuplicateGroups as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      return {
+        items: [currentCatalogGroup],
+        totalCount: 1,
+        offset: 0,
+        limit: 20,
+        hasMore: false
+      }
+    })
+
+    ;(api.getDuplicateGroupMembers as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      return {
+        sha256: currentCatalogGroup.sha256,
+        byteSize: currentCatalogGroup.byteSize,
+        groupSignature: currentCatalogGroup.groupSignature,
+        reviewStatus: currentCatalogGroup.reviewStatus,
+        preferredLocationId: currentCatalogGroup.preferredLocationId,
+        hasStaleDecision: currentCatalogGroup.hasStaleDecision,
+        items: sampleMembers,
+        totalCount: 2,
+        offset: 0,
+        limit: 50,
+        hasMore: false
+      }
+    })
+
+    ;(api.setDuplicateReview as ReturnType<typeof vi.fn>).mockImplementation(() => savePromise)
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /duplicates/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /duplicates/i }))
+
+    // 1. Group A loaded with signature S1
+    await waitFor(() => {
+      expect(screen.getByText('IMG_001.JPG')).toBeDefined()
+      expect(screen.getByRole('button', { name: /mark as reviewed/i })).toBeDefined()
+    })
+
+    // 2. Start a review save and delay its response
+    fireEvent.click(screen.getByRole('button', { name: /mark as reviewed/i }))
+    await waitFor(() => {
+      expect(api.setDuplicateReview).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sha256: sampleGroup.sha256,
+          byteSize: sampleGroup.byteSize,
+          status: 'reviewed',
+          expectedGroupSignature: 'S1'
+        })
+      )
+    })
+
+    // 3. Refresh groups and members to signature S2 with an invalidated decision
+    currentCatalogGroup = groupWithS2
+    fireEvent.click(screen.getByRole('button', { name: /refresh duplicate groups/i }))
+
+    // Verify S2 with stale decision notice is rendered
+    await waitFor(() => {
+      expect(screen.getByText(/review decision outdated/i)).toBeDefined()
+    })
+
+    // 4. Resolve the old save response containing S1 and reviewed status
+    await act(async () => {
+      resolveSave({
+        sha256: sampleGroup.sha256,
+        byteSize: sampleGroup.byteSize,
+        status: 'reviewed',
+        preferredLocationId: 101,
+        groupSignature: 'S1',
+        reviewedAtMs: 1700000000000
+      })
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    // 5. Assert both the group list and selected details retain S2 and the current decision/preference state
+    // The selected detail panel must retain S2 and the outdated decision notice
+    expect(screen.getByText(/review decision outdated/i)).toBeDefined()
+    // The group list summary item must NOT have been updated to reviewed or cleared of its outdated badge
+    const listSummary = screen.getByRole('listitem')
+    expect(within(listSummary).getByText('Review outdated')).toBeDefined()
+    expect(within(listSummary).queryByText('Reviewed')).toBeNull()
+    expect(within(listSummary).queryByText(/preferred set/i)).toBeNull()
+    // Preferred badge from old S1 save must NOT be applied to members
+    expect(screen.queryByText('Preferred Location')).toBeNull()
   })
 })
