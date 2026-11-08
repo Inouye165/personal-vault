@@ -277,7 +277,7 @@ describe('ThumbnailCoordinator', () => {
     await timeoutCoord.shutdown()
   })
 
-  it('supports cancellation of requests, releasing worker and queue immediately', async () => {
+  it('supports cancellation of active and queued requests, releasing worker and queue immediately', async () => {
     const cancelCoord = new ThumbnailCoordinator({
       cacheDir,
       maxActiveJobs: 1,
@@ -295,23 +295,54 @@ describe('ThumbnailCoordinator', () => {
     writeFileSync(testJpegPath, jpegBuffer)
     const stat = statSync(testJpegPath)
 
-    const jobPromise = cancelCoord.requestThumbnail({
-      locationId: 888,
+    // Job 1 becomes active in worker (maxActiveJobs is 1)
+    const job1Promise = cancelCoord.requestThumbnail({
+      locationId: 881,
       sourcePath: testJpegPath,
       expectedByteSize: stat.size,
       expectedMtimeMs: Math.round(stat.mtimeMs),
       expectedSha256: null
     })
 
-    // Cancel the job
-    const cancelled = cancelCoord.cancelRequest(888)
-    expect(cancelled).toBe(true)
+    // Job 2 is queued (since maxActiveJobs = 1)
+    const job2Promise = cancelCoord.requestThumbnail({
+      locationId: 882,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
 
-    const res = await jobPromise
-    expect(res.status).toBe('error')
-    if (res.status === 'error') {
-      expect(res.code).toBe('CANCELLED')
-    }
+    // Cancel queued job 882
+    const cancelQueued = cancelCoord.cancelRequest(882)
+    expect(cancelQueued).toBe(true)
+
+    // Cancel active job 881
+    const cancelActive = cancelCoord.cancelRequest(881)
+    expect(cancelActive).toBe(true)
+
+    const res1 = await job1Promise
+    const res2 = await job2Promise
+    expect(res1.status).toBe('error')
+    expect(res2.status).toBe('error')
+    if (res1.status === 'error') expect(res1.code).toBe('CANCELLED')
+    if (res2.status === 'error') expect(res2.code).toBe('CANCELLED')
+
+    // Diagnostics must show full capacity recovery
+    await new Promise((r) => setTimeout(r, 50))
+    const diag = cancelCoord.getDiagnostics()
+    expect(diag.activeWorkers).toBe(0)
+    expect(diag.queuedJobs).toBe(0)
+
+    // Subsequent request succeeds
+    const job3 = await cancelCoord.requestThumbnail({
+      locationId: 883,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+    expect(job3.status).toBe('ready')
 
     await cancelCoord.shutdown()
   })

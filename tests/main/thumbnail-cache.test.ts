@@ -5,6 +5,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import sharp from 'sharp'
 import { ThumbnailDiskCache } from '../../src/main/services/thumbnails/cache'
 
@@ -83,7 +84,7 @@ describe('ThumbnailDiskCache', () => {
 
   it('cleans up abandoned temporary staging files on initialization', async () => {
     new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
-    const abandonedTmp = join(cacheDir, '.thumb_tmp_abandoned_12345')
+    const abandonedTmp = join(cacheDir, `.thumb_tmp_${process.pid}_${randomUUID()}`)
     writeFileSync(abandonedTmp, 'stale')
 
     // Create a new instance pointing to same dir
@@ -163,21 +164,67 @@ describe('ThumbnailDiskCache', () => {
     }).toThrow(/overlap/i)
   })
 
-  it('cleans only demonstrably owned staging files and never touches unrelated files', async () => {
+  it('cleans only demonstrably owned staging files and never touches unrelated files, subdirectories, or files with matching prefix', async () => {
     const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
-    const ownedTmp = join(cacheDir, `.thumb_tmp_${process.pid}_validuuid`)
-    const unrelatedFile = join(cacheDir, 'unrelated_user_file.txt')
+    const ownedTmp = join(
+      cacheDir,
+      `.thumb_tmp_${process.pid}_11111111-2222-3333-4444-555555555555`
+    )
+    const unrelatedPrefixFile = join(cacheDir, '.thumb_tmp_important_document.pdf')
+    const unrelatedPrefixDir = join(cacheDir, '.thumb_tmp_directory')
     const otherTmp = join(cacheDir, 'other_file.tmp')
 
+    mkdirSync(unrelatedPrefixDir, { recursive: true })
     writeFileSync(ownedTmp, 'owned staging')
-    writeFileSync(unrelatedFile, 'keep this')
+    writeFileSync(unrelatedPrefixFile, 'keep this critical document')
     writeFileSync(otherTmp, 'keep this too')
 
     await cache.cleanupStagingFiles()
 
     expect(existsSync(ownedTmp)).toBe(false)
-    expect(existsSync(unrelatedFile)).toBe(true)
+    expect(existsSync(unrelatedPrefixFile)).toBe(true) // Filename prefix alone MUST NOT authorize deletion
+    expect(existsSync(unrelatedPrefixDir)).toBe(true) // Directories must never be deleted
     expect(existsSync(otherTmp)).toBe(true)
+  })
+
+  it('dynamically validates separation when sourceRoots or vaultPath changes after initialization', async () => {
+    let dynamicRoots = [join(tempDir, 'sources')]
+    let dynamicVault: string | null = null
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      sourceRoots: () => dynamicRoots,
+      vaultPath: () => dynamicVault
+    })
+
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 2, b: 3 } }
+    })
+      .webp()
+      .toBuffer()
+    const key = 'a'.repeat(64)
+    await cache.put(key, validWebp)
+    expect(await cache.get(key)).not.toBeNull()
+
+    // Dynamically change source roots to overlap with cacheDir
+    dynamicRoots = [cacheDir]
+
+    // Subsequent operations must strictly reject due to separation violation
+    await expect(cache.get(key)).rejects.toThrow(/overlaps/i)
+    await expect(cache.put(key, validWebp)).rejects.toThrow(/overlaps/i)
+    await expect(cache.cleanupStagingFiles()).rejects.toThrow(/overlaps/i)
+
+    // Revert source roots, now change vault to overlap with cacheDir
+    dynamicRoots = [join(tempDir, 'sources')]
+    dynamicVault = cacheDir
+
+    await expect(cache.get(key)).rejects.toThrow(/overlaps/i)
+    await expect(cache.put(key, validWebp)).rejects.toThrow(/overlaps/i)
+  })
+
+  it('rejects path traversal or symlinks inside cache directory', async () => {
+    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
+    await expect(cache.get('../traversal')).rejects.toThrow()
+    await expect(cache.get('valid64key/nested')).rejects.toThrow()
   })
 
   it('evicts oldest cache entries when budget is exceeded without touching unrelated files', async () => {

@@ -19,7 +19,7 @@ import {
   writeFileSync,
   realpathSync
 } from 'node:fs'
-import { join, resolve, dirname } from 'node:path'
+import { join, resolve, dirname, parse, relative, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   THUMBNAIL_LIMITS,
@@ -59,6 +59,27 @@ export function readWebPDimensions(buffer: Buffer): { width: number; height: num
     return { width, height }
   }
   return null
+}
+
+function assertCacheDirContainment(cacheDir: string): void {
+  const resolved = resolve(cacheDir)
+  const root = parse(resolved).root
+  let current = root
+  const rel = relative(root, resolved)
+  if (rel) {
+    const parts = rel.split(sep)
+    for (const part of parts) {
+      current = join(current, part)
+      if (existsSync(current)) {
+        const st = lstatSync(current)
+        if (st.isSymbolicLink()) {
+          throw new Error(
+            `Symlink or junction redirection rejected in cache path segment: "${current}"`
+          )
+        }
+      }
+    }
+  }
 }
 
 function validateCacheSeparation(
@@ -131,11 +152,16 @@ export class ThumbnailDiskCache {
     this.sourceRoots = options.sourceRoots
     this.vaultPath = options.vaultPath
 
-    validateCacheSeparation(this.cacheDir, this.sourceRoots, this.vaultPath)
+    this.assertSeparationAndContainment()
 
     if (!existsSync(this.cacheDir)) {
       mkdirSync(this.cacheDir, { recursive: true })
     }
+  }
+
+  private assertSeparationAndContainment(): void {
+    assertCacheDirContainment(this.cacheDir)
+    validateCacheSeparation(this.cacheDir, this.sourceRoots, this.vaultPath)
   }
 
   public getCacheDir(): string {
@@ -166,6 +192,7 @@ export class ThumbnailDiskCache {
    */
   public async get(key: string): Promise<Buffer | null> {
     this.assertValidKey(key)
+    this.assertSeparationAndContainment()
     const filePath = join(this.cacheDir, `${key}.thumb`)
 
     if (!existsSync(filePath)) {
@@ -221,6 +248,7 @@ export class ThumbnailDiskCache {
    */
   public async put(key: string, buffer: Buffer): Promise<void> {
     this.assertValidKey(key)
+    this.assertSeparationAndContainment()
     if (!buffer || buffer.length === 0) {
       throw new Error('Cannot cache empty thumbnail buffer')
     }
@@ -266,15 +294,21 @@ export class ThumbnailDiskCache {
    * Strictly never touches unrelated files, symlinks, or directories.
    */
   public async cleanupStagingFiles(): Promise<void> {
+    this.assertSeparationAndContainment()
     try {
       const files = readdirSync(this.cacheDir)
       for (const file of files) {
-        if (/^\.thumb_tmp_/.test(file)) {
+        // Strictly only target owned staging files matching .thumb_tmp_<pid>_<uuid>
+        if (
+          /^\.thumb_tmp_\d+_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+            file
+          )
+        ) {
           const fullPath = join(this.cacheDir, file)
           try {
             if (dirname(fullPath) === this.cacheDir) {
               const st = lstatSync(fullPath)
-              if (st.isFile() && !st.isSymbolicLink()) {
+              if (st.isFile() && !st.isSymbolicLink() && !st.isDirectory()) {
                 unlinkSync(fullPath)
               }
             }
