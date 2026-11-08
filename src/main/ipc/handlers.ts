@@ -60,8 +60,13 @@ import {
   GetPhotosPageResponseSchema,
   GetThumbnailRequestSchema,
   ThumbnailResultSchema,
+  CancelThumbnailRequestSchema,
+  CancelThumbnailResponseSchema,
+  PhotosDiagnosticsResponseSchema,
   type GetPhotosPageResponse,
-  type ThumbnailResult
+  type ThumbnailResult,
+  type CancelThumbnailResponse,
+  type PhotosDiagnosticsResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -678,6 +683,37 @@ export function registerIpcHandlers({
     const validated = validatePayload(ThumbnailResultSchema, res)
     if (!validated.success) {
       throw new Error(`Invalid outgoing ThumbnailResult in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.PHOTOS_CANCEL_THUMBNAIL, (raw: unknown): CancelThumbnailResponse => {
+    const parsed = validatePayload(CancelThumbnailRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelThumbnail request: ${parsed.error}`)
+    }
+    if (!thumbnailCoordinator) {
+      return { success: false, locationId: parsed.data.locationId }
+    }
+    const success = thumbnailCoordinator.cancelRequest(parsed.data.locationId)
+    const validated = validatePayload(CancelThumbnailResponseSchema, {
+      success,
+      locationId: parsed.data.locationId
+    })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing CancelThumbnailResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.PHOTOS_GET_DIAGNOSTICS, (): PhotosDiagnosticsResponse => {
+    if (!thumbnailCoordinator) {
+      return { activeWorkers: 0, queuedJobs: 0, totalDecodes: 0, cacheHits: 0, cacheMisses: 0 }
+    }
+    const diag = thumbnailCoordinator.getDiagnostics()
+    const validated = validatePayload(PhotosDiagnosticsResponseSchema, diag)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing PhotosDiagnosticsResponse: ${validated.error}`)
     }
     return validated.data
   })

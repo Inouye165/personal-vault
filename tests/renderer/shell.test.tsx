@@ -101,6 +101,14 @@ const healthyApi = (): VaultApi => ({
     status: 'missing' as const,
     locationId: 1,
     reason: 'mock'
+  })),
+  cancelThumbnail: vi.fn(async () => ({ success: true, locationId: 1 })),
+  getPhotosDiagnostics: vi.fn(async () => ({
+    activeWorkers: 0,
+    queuedJobs: 0,
+    totalDecodes: 0,
+    cacheHits: 0,
+    cacheMisses: 0
   }))
 })
 

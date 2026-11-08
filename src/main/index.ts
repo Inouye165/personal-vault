@@ -153,8 +153,10 @@ if (!app.requestSingleInstanceLock()) {
       thumbnailCoordinator = new ThumbnailCoordinator({
         cacheDir,
         approvedRoots: () =>
-          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : []
+          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : [],
+        vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
       })
+      await thumbnailCoordinator.initialize()
       logStartup('thumbnailCoordinator initialized')
 
       registerIpcHandlers({

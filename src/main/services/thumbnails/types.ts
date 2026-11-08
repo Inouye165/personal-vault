@@ -14,25 +14,39 @@ export const THUMBNAIL_LIMITS = {
 } as const
 
 export interface ThumbnailCacheKeyParams {
-  readonly sha256: string | null
+  readonly locationId?: number
+  readonly sourcePath?: string
+  readonly sha256?: string | null
   readonly byteSize: number
-  readonly mtimeMs: number | null
+  readonly mtimeMs?: number | null
 }
 
 export interface ThumbnailDiskCacheOptions {
   readonly cacheDir: string
   readonly maxSizeBytes?: number
+  readonly sourceRoots?: readonly string[] | (() => readonly string[])
+  readonly vaultPath?: string | (() => string | null)
+}
+
+export interface ThumbnailDiagnostics {
+  readonly activeWorkers: number
+  readonly queuedJobs: number
+  readonly totalDecodes: number
+  readonly cacheHits: number
+  readonly cacheMisses: number
 }
 
 export interface ThumbnailCoordinatorOptions {
   readonly cacheDir: string
   readonly approvedRoots?: readonly string[] | (() => readonly string[])
+  readonly vaultPath?: string | (() => string | null)
   readonly maxActiveJobs?: number
   readonly maxQueuedJobs?: number
   readonly jobTimeoutMs?: number
   readonly maxSourceSizeBytes?: number
   readonly maxInputPixels?: number
   readonly diskCacheBudget?: number
+  readonly workerScriptPath?: string
 }
 
 export interface ThumbnailRequestParams {

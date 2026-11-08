@@ -68,7 +68,9 @@ describe('preload bridge', () => {
         'getLatestImportJob',
         'onImportProgress',
         'getPhotosPage',
-        'getThumbnail'
+        'getThumbnail',
+        'cancelThumbnail',
+        'getPhotosDiagnostics'
       ].sort()
     )
   })

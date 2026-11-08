@@ -230,6 +230,7 @@ async function main() {
       const expectMethods = [
         'cancelImport',
         'cancelScan',
+        'cancelThumbnail',
         'dismissScanJob',
         'getActiveImportJob',
         'getActiveScanJob',
@@ -240,6 +241,7 @@ async function main() {
         'getImportCandidates',
         'getLatestImportJob',
         'getLatestScanJob',
+        'getPhotosDiagnostics',
         'getPhotosPage',
         'getThumbnail',
         'getVaultStatus',

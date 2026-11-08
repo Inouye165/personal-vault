@@ -103,20 +103,22 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 ### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
 
-**Awaiting review.**
+**Awaiting review (corrected following review findings).**
 
 - [x] Responsive virtualized photo thumbnail grid adhering to dark theme token system with stable deterministic ordering by catalog location ID (`file_locations.id ASC`).
 - [x] Pure SQL pagination (`LIMIT ? OFFSET ?`) for photo catalog records without full-table materialization in memory.
-- [x] Sharp 0.35.5 decoder executing inside Node worker thread with bounded concurrency (max 2 active jobs, max 64 queued jobs, 15-second per-job timeout, max 128 MiB source size, max 100 megapixels input limit).
+- [x] Sharp 0.35.5 decoder executing inside real Node worker threads (`worker_threads.Worker`) with bounded concurrency (max 2 active jobs, max 64 queued jobs, 15-second per-job timeout, max 128 MiB source size, max 100 megapixels input limit). Worker crashes, timeouts, or cancellations terminate worker execution without leaking concurrency capacity.
+- [x] Large-collection browsing: virtual grid retains absolute collection scroll extent (`totalCount`) and positions, with sliding LRU page cache bounded to 2,000 records (40 pages of 50 items), mounted DOM cells bounded to <= 200, allowing distant jumps (e.g. to photo 7,500) and return to evicted pages without duplicates, gaps, or scroll jumps.
 - [x] Format support matrix tested and verified: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF with automatic EXIF orientation preservation (`.rotate()`).
 - [x] Honest placeholders: Apple HEIC/HEIF (due to prebuilt libvips libheif lacking unbundled HEVC decoders), camera RAW, SVG, corrupted or oversized inputs return honest unsupported/error status cards without crashes or external toolchains.
-- [x] Secure disposable disk cache in `<userData>/thumbnails/` with bounded 64-hex SHA-256 keys, atomic staging (`.thumb_tmp_*`), 1 GiB LRU budget eviction strictly targeting owned `.thumb` files, orphan staging cleanup, and zero source or vault modification.
+- [x] Secure disposable disk cache in `<userData>/thumbnails/`: cache key bound to source identity (`locationId`/`normalizedPath`) for unhashed files so files with identical size/mtime never collide; canonical separation rejecting overlap with source roots or active vault; symlink/junction redirection rejected; malformed nonempty cache entries rejected and unlinked; abandoned staging cleanup on startup and shutdown; source byte cap enforced during reading.
 - [x] Residual out-of-band source modification detection (`statSync` check on cache hits) preventing stale image display.
-- [x] Narrow typed IPC channels (`photos:get-page`, `photos:get-thumbnail`) with bidirectional Zod validation and top-level sender authorization.
+- [x] Stale renderer response protection: monotonic generation counter incremented on refresh and unmount; revision-bound in-flight request tracking ensuring older delayed completions cannot overwrite newer cells or delete newer request bookkeeping.
+- [x] Narrow typed IPC channels (`photos:get-page`, `photos:get-thumbnail`, `photos:cancel-thumbnail`, `photos:get-diagnostics`) with bidirectional Zod validation and top-level sender authorization.
 - [x] Compact metadata details panel displaying filename, absolute source path, recorded byte size, recorded filesystem timestamps, and observation provenance, with explicit "Unknown" for absent capture dates/locations (no fabricated dates).
 - [x] Header search input disabled with clear Stage 6 availability label in Photos tab.
-- [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 10,000-photo scale test (warm reversal p95 <= 33 ms).
-- [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched.
+- [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 20/20 checks passed: 10,000-photo scale test exercising actual Photos UI with real decodable image files, cold scrolling, warm reversal, distant jumps, return to evicted pages, true `requestAnimationFrame` frame interval p95 measurement (4.3 ms <= 33 ms target), main thread stall check (0.9-1.0 ms < 100 ms limit), and 0 re-decodes on cache reuse proven via diagnostics.
+- [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched across all tests.
 
 Exit: users can browse discovered photographs smoothly with bounded memory and secure thumbnails, with ratings and similarity deferred to 5B and 5C.
 

@@ -35,7 +35,10 @@ import type {
   GetPhotosPageRequest,
   GetPhotosPageResponse,
   GetThumbnailRequest,
-  ThumbnailResult
+  ThumbnailResult,
+  CancelThumbnailRequest,
+  CancelThumbnailResponse,
+  PhotosDiagnosticsResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -70,6 +73,8 @@ export interface VaultApi {
   onImportProgress: (callback: (progress: VaultImportProgress) => void) => () => void
   getPhotosPage: (request: GetPhotosPageRequest) => Promise<GetPhotosPageResponse>
   getThumbnail: (request: GetThumbnailRequest) => Promise<ThumbnailResult>
+  cancelThumbnail: (request: CancelThumbnailRequest) => Promise<CancelThumbnailResponse>
+  getPhotosDiagnostics: () => Promise<PhotosDiagnosticsResponse>
 }
 
 declare global {

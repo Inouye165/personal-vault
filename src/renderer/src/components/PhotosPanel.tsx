@@ -1,5 +1,9 @@
 /**
  * Personal Vault — Virtualized Photo Browsing Panel (Stage 5A)
+ *
+ * Implements bounded, virtualized grid rendering with absolute catalog
+ * positions, full collection scroll extent, keyboard navigation,
+ * thumbnail decoding with honest placeholders, and factual details panel.
  */
 
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
@@ -43,7 +47,8 @@ export function PhotosPanel() {
     thumbnails,
     selectPhoto,
     refresh,
-    loadMore,
+    ensureRangeLoaded,
+    getPhoto,
     requestThumbnail
   } = usePhotos()
 
@@ -71,41 +76,41 @@ export function PhotosPanel() {
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget
     setScrollTop(target.scrollTop)
-
-    // Trigger loadMore near bottom
-    if (target.scrollHeight - target.scrollTop - target.clientHeight < 300) {
-      void loadMore()
-    }
   }
 
-  // Virtualization calculations
+  // Virtualization calculations based on totalCount for full extent
   const cellWidth = 180
   const cellHeight = 200
   const gap = 16
   const columns = Math.max(1, Math.floor((containerWidth + gap) / (cellWidth + gap)))
-  const totalRows = Math.ceil(photos.length / columns)
+  const totalRows = Math.ceil(totalCount / columns)
   const rowHeight = cellHeight + gap
+  const totalHeight = Math.max(0, totalRows * rowHeight - gap)
 
-  // Bounded visible window with overscan (max 200 cells)
-  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
-  const visibleRowCount = Math.ceil(containerHeight / rowHeight) + 4
+  // Visible window range calculation (bounded to max 200 cells)
+  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 1)
+  const visibleRowCount = Math.ceil(containerHeight / rowHeight) + 2
   const endRow = Math.min(totalRows, startRow + visibleRowCount)
 
   const startIndex = startRow * columns
   const rawEndIndex = endRow * columns
-  // Bound mounted cells to at most 200
   const endIndex = Math.min(
-    photos.length,
+    totalCount,
     Math.min(rawEndIndex, startIndex + PHOTO_BOUNDS.MAX_MOUNTED_CELLS)
   )
-  const visiblePhotos = photos.slice(startIndex, endIndex)
 
-  // Request thumbnails for visible cells
+  // Trigger loading of required page range
   useEffect(() => {
-    for (const photo of visiblePhotos) {
-      requestThumbnail(photo, 'high')
+    if (totalCount > 0) {
+      ensureRangeLoaded(startIndex, endIndex)
     }
-  }, [visiblePhotos, requestThumbnail])
+  }, [totalCount, startIndex, endIndex, ensureRangeLoaded])
+
+  // Build cell indices array for mounted range
+  const visibleIndices: number[] = []
+  for (let i = startIndex; i < endIndex; i++) {
+    visibleIndices.push(i)
+  }
 
   // Keyboard navigation within grid
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>, currentPhoto: PhotoItem) => {
@@ -141,7 +146,6 @@ export function PhotosPanel() {
       if (nextPhoto) {
         e.preventDefault()
         selectPhoto(nextPhoto.id)
-        // Focus target cell if DOM element exists
         const targetEl = document.getElementById(`photo-cell-${nextPhoto.id}`)
         targetEl?.focus()
       }
@@ -175,7 +179,7 @@ export function PhotosPanel() {
         </div>
 
         {/* Status Notices */}
-        {isLoading && photos.length === 0 && (
+        {isLoading && totalCount === 0 && (
           <div className="notice" role="status">
             <RefreshCw size={16} className="spin" />
             <span>Loading photographs…</span>
@@ -199,7 +203,7 @@ export function PhotosPanel() {
           </div>
         )}
 
-        {!isLoading && !error && photos.length === 0 && (
+        {!isLoading && !error && totalCount === 0 && (
           <div className="notice" role="status">
             <ImageIcon size={24} />
             <div className="notice-content">
@@ -210,86 +214,114 @@ export function PhotosPanel() {
         )}
 
         {/* Virtualized Grid Container */}
-        {photos.length > 0 && (
+        {totalCount > 0 && (
           <div
             ref={containerRef}
-            className="photos-grid-scroll-container"
+            className="photos-grid-scroll-container photos-grid-container"
             onScroll={handleScroll}
             tabIndex={-1}
             role="region"
             aria-label="Photographs Grid"
           >
             <div
-              className="photos-virtual-height-holder"
+              className="photos-virtual-height-holder photos-virtual-container"
               style={{
-                height: `${totalRows * rowHeight}px`,
-                position: 'relative'
+                height: `${totalHeight}px`,
+                position: 'relative',
+                width: '100%'
               }}
             >
-              <div
-                className="photos-grid"
-                style={{
-                  transform: `translateY(${startRow * rowHeight}px)`,
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  display: 'grid',
-                  gridTemplateColumns: `repeat(${columns}, ${cellWidth}px)`,
-                  gap: `${gap}px`
-                }}
-              >
-                {visiblePhotos.map((photo) => {
-                  const thumb = thumbnails.get(photo.id)
-                  const isSelected = selectedId === photo.id
+              {visibleIndices.map((index) => {
+                const photo = getPhoto(index)
+                const row = Math.floor(index / columns)
+                const col = index % columns
+                const top = row * rowHeight
+                const left = col * (cellWidth + gap)
 
+                if (!photo) {
                   return (
                     <div
-                      key={photo.id}
-                      id={`photo-cell-${photo.id}`}
-                      className={`photo-card ${isSelected ? 'selected' : ''}`}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}`}
-                      aria-pressed={isSelected}
-                      onClick={() => selectPhoto(photo.id)}
-                      onKeyDown={(e) => handleKeyDown(e, photo)}
+                      key={`placeholder-${index}`}
+                      className="photo-card photo-cell photo-skeleton"
+                      style={{
+                        position: 'absolute',
+                        top: `${top}px`,
+                        left: `${left}px`,
+                        width: `${cellWidth}px`,
+                        height: `${cellHeight}px`
+                      }}
                     >
                       <div className="photo-thumbnail-container">
-                        {thumb?.status === 'ready' ? (
-                          <img
-                            src={thumb.dataUrl}
-                            alt={photo.fileName}
-                            className="photo-thumbnail-img"
-                            loading="lazy"
-                          />
-                        ) : thumb?.status === 'unsupported' ? (
-                          <div className="thumbnail-placeholder unsupported">
-                            <FileQuestion size={32} />
-                            <span className="placeholder-tag">Unsupported</span>
-                          </div>
-                        ) : thumb?.status === 'error' ? (
-                          <div className="thumbnail-placeholder error">
-                            <AlertTriangle size={32} />
-                            <span className="placeholder-tag">Unavailable</span>
-                          </div>
-                        ) : (
-                          <div className="thumbnail-placeholder loading">
-                            <FileImage size={32} className="pulse" />
-                            <span className="placeholder-tag">Loading…</span>
-                          </div>
-                        )}
+                        <div className="thumbnail-placeholder loading">
+                          <FileImage size={28} className="pulse" />
+                        </div>
                       </div>
                       <div className="photo-card-info">
-                        <span className="photo-filename" title={photo.fileName}>
-                          {photo.fileName}
-                        </span>
-                        <span className="photo-size">{formatBytes(photo.byteSize)}</span>
+                        <span className="photo-filename">Loading…</span>
                       </div>
                     </div>
                   )
-                })}
-              </div>
+                }
+
+                const thumb = thumbnails.get(photo.id)
+                const isSelected = selectedId === photo.id
+
+                return (
+                  <div
+                    key={photo.id}
+                    id={`photo-cell-${photo.id}`}
+                    className={`photo-card photo-cell ${isSelected ? 'selected' : ''}`}
+                    style={{
+                      position: 'absolute',
+                      top: `${top}px`,
+                      left: `${left}px`,
+                      width: `${cellWidth}px`,
+                      height: `${cellHeight}px`
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}`}
+                    aria-pressed={isSelected}
+                    onClick={() => selectPhoto(photo.id)}
+                    onKeyDown={(e) => handleKeyDown(e, photo)}
+                    ref={() => {
+                      requestThumbnail(photo, 'high')
+                    }}
+                  >
+                    <div className="photo-thumbnail-container">
+                      {thumb?.status === 'ready' ? (
+                        <img
+                          src={thumb.dataUrl}
+                          alt={photo.fileName}
+                          className="photo-thumbnail-img"
+                          loading="lazy"
+                        />
+                      ) : thumb?.status === 'unsupported' ? (
+                        <div className="thumbnail-placeholder unsupported">
+                          <FileQuestion size={32} />
+                          <span className="placeholder-tag">Unsupported</span>
+                        </div>
+                      ) : thumb?.status === 'error' ? (
+                        <div className="thumbnail-placeholder error">
+                          <AlertTriangle size={32} />
+                          <span className="placeholder-tag">Unavailable</span>
+                        </div>
+                      ) : (
+                        <div className="thumbnail-placeholder loading">
+                          <FileImage size={32} className="pulse" />
+                          <span className="placeholder-tag">Loading…</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="photo-card-info">
+                      <span className="photo-filename" title={photo.fileName}>
+                        {photo.fileName}
+                      </span>
+                      <span className="photo-size">{formatBytes(photo.byteSize)}</span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}

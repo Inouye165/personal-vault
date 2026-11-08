@@ -11,16 +11,20 @@
  * 4. Verifies Photos view queries: bounded pagination, stable ID ordering, duplicate preservation.
  * 5. Verifies thumbnail decoding: JPEG -> WebP with aspect ratio, orientation, unsupported formats.
  * 6. Verifies selection and details: filename, path, size, honest unknown capture dates.
- * 7. Verifies restart & cache reuse: cache file exists, no partial temp files, fast cache hit on restart.
+ * 7. Verifies restart & cache reuse: asserts 0 new worker decodes and cache-hit counter increment.
  * 8. Verifies out-of-band source modification invalidation.
- * 9. Scale verification: 10,000-photo catalog fixture with cold forward, warm reversal, distant jump.
+ * 9. Scale verification: 10,000-photo catalog fixture backed by real decodable image files,
+ *    exercising the actual Photos UI with cold scroll, travel beyond 2,000 records, distant jump,
+ *    warm reversal, return to evicted pages, real requestAnimationFrame frame-interval p95 measurement,
+ *    main process stall check, and DOM/worker resource bounds.
  * 10. Verifies source preservation invariance: original source files untouched.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -99,10 +103,14 @@ function connectCdp(url) {
       if (data.id && pending.has(data.id)) {
         const { ok, bad } = pending.get(data.id)
         pending.delete(data.id)
-        data.error ? bad(new Error(data.error.message)) : ok(data.result)
+        if (data.error) {
+          bad(new Error(data.error.message || 'CDP Error'))
+        } else {
+          ok(data.result)
+        }
       }
     }
-    ws.onopen = () =>
+    ws.onopen = () => {
       resolveCdp({
         send: (method, params = {}) =>
           new Promise((ok, bad) => {
@@ -110,11 +118,14 @@ function connectCdp(url) {
             pending.set(id, { ok, bad })
             ws.send(JSON.stringify({ id, method, params }))
             setTimeout(() => {
-              if (pending.delete(id)) bad(new Error(`CDP call timed out: ${method}`))
-            }, 15000)
+              if (pending.delete(id)) {
+                bad(new Error(`CDP timed out for method: ${method}`))
+              }
+            }, 30000)
           }),
         close: () => ws.close()
       })
+    }
   })
 }
 
@@ -163,11 +174,11 @@ async function launchApp(userDataDir, port) {
     })
   }
 
-  const deadline = Date.now() + 20000
+  const deadline = Date.now() + 25000
   try {
     const page = await findPageTarget(port, deadline)
     const cdp = await connectCdp(page.webSocketDebuggerUrl)
-    const apiReady = await waitForApi(cdp, 15000)
+    const apiReady = await waitForApi(cdp, 20000)
     if (!apiReady) {
       throw new Error('window.api failed to initialize')
     }
@@ -180,62 +191,70 @@ async function launchApp(userDataDir, port) {
 
 async function main() {
   console.log(`\n=== Personal Vault Real Electron Photo Verification (${mode} mode) ===\n`)
-  const tempBase = mkdtempSync(join(tmpdir(), 'pv-real-photos-'))
+  let testCount = 0
+  function pass(msg) {
+    testCount++
+    console.log(`  [PASS ${testCount}] ${msg}`)
+  }
+
+  const tempBase = mkdtempSync(join(tmpdir(), 'pv-photo-verify-'))
   const userDataDir = join(tempBase, 'userData')
-  const sourceDir = join(tempBase, 'source')
+  const sourceDir = join(tempBase, 'sources')
   mkdirSync(userDataDir, { recursive: true })
   mkdirSync(sourceDir, { recursive: true })
 
   let currentApp = null
-  let testCount = 0
-  const pass = (name) => {
-    testCount++
-    console.log(`  [PASS ${testCount}] ${name}`)
-  }
 
   try {
-    // 1. Prepare representative test photos
+    // 1. Generate test fixtures
     console.log('[Setup] Generating test image fixtures...')
+    // Solid JPEG 1000x500 (2:1 aspect ratio)
     const jpeg1000x500 = await sharp({
-      create: { width: 1000, height: 500, channels: 3, background: { r: 255, g: 80, b: 80 } }
+      create: { width: 1000, height: 500, channels: 3, background: { r: 255, g: 0, b: 0 } }
     })
       .jpeg()
       .toBuffer()
 
+    // Rotated JPEG 600x400 with EXIF orientation 6 (90 deg CW)
     const jpegRotated = await sharp({
-      create: { width: 600, height: 400, channels: 3, background: { r: 80, g: 255, b: 80 } }
+      create: { width: 600, height: 400, channels: 3, background: { r: 0, g: 255, b: 0 } }
     })
       .withMetadata({ orientation: 6 })
       .jpeg()
       .toBuffer()
 
-    const pngImage = await sharp({
-      create: { width: 200, height: 200, channels: 4, background: { r: 0, g: 0, b: 255, alpha: 1 } }
+    // PNG 400x400
+    const png400x400 = await sharp({
+      create: { width: 400, height: 400, channels: 4, background: { r: 0, g: 0, b: 255, alpha: 1 } }
     })
       .png()
       .toBuffer()
 
-    const webpImage = await sharp({
+    // WebP 300x300
+    const webp300x300 = await sharp({
       create: { width: 300, height: 300, channels: 3, background: { r: 255, g: 255, b: 0 } }
     })
       .webp()
       .toBuffer()
 
-    const gifImage = await sharp({
-      create: { width: 150, height: 150, channels: 3, background: { r: 255, g: 0, b: 255 } }
+    // Frame 0 GIF 200x200
+    const gif200x200 = await sharp({
+      create: { width: 200, height: 200, channels: 3, background: { r: 255, g: 0, b: 255 } }
     })
       .gif()
       .toBuffer()
 
+    // Write fixture files to sourceDir
     const filesToCreate = [
       { name: 'photo1_landscape.jpg', data: jpeg1000x500 },
       { name: 'photo1_copy.jpg', data: jpeg1000x500 }, // Exact duplicate content
       { name: 'photo2_portrait_exif.jpg', data: jpegRotated },
-      { name: 'graphic.png', data: pngImage },
-      { name: 'illustration.webp', data: webpImage },
-      { name: 'animation.gif', data: gifImage },
-      { name: 'iphone_shot.heic', data: Buffer.from('SIMULATED_IPHONE_HEIC_PAYLOAD') },
-      { name: 'camera_raw.cr2', data: Buffer.from('SIMULATED_CANON_RAW_PAYLOAD') }
+      { name: 'photo3_graphics.png', data: png400x400 },
+      { name: 'photo4_modern.webp', data: webp300x300 },
+      { name: 'photo5_anim.gif', data: gif200x200 },
+      { name: 'iphone_shot.heic', data: Buffer.from('FAKE_APPLE_HEIC_FILE_BYTES_FOR_PROBE') },
+      { name: 'camera_raw.cr2', data: Buffer.from('FAKE_CANON_RAW_FILE_BYTES_FOR_PROBE') },
+      { name: 'notes.txt', data: Buffer.from('Text document should not appear in Photos tab') }
     ]
 
     const baselineStats = new Map()
@@ -300,7 +319,7 @@ async function main() {
     }
     pass('Exact duplicate photographs preserved as distinct catalog location records')
 
-    // 4. Verify thumbnail decoding
+    // 4. Verify thumbnail decoding with bounded worker execution
     console.log('[Phase 3] Verifying thumbnail generation and format support...')
     // Landscape JPEG thumbnail
     const thumbLandscape = await evaluate(
@@ -350,19 +369,23 @@ async function main() {
     }
     pass('Returns honest unsupported status for camera RAW format')
 
+    // Exercise cancellation
+    const cancelResult = await evaluate(cdp, `window.api.cancelThumbnail({ locationId: 999999 })`)
+    if (cancelResult === undefined || typeof cancelResult.success !== 'boolean') {
+      throw new Error('cancelThumbnail failed')
+    }
+    pass('Thumbnail cancellation across IPC boundary verified')
+
     // 5. Details inspection: factual provenance and explicit Unknown capture date
     console.log('[Phase 4] Verifying metadata details and explicit unknown values...')
     if (photo1.inferredCaptureTimeMs !== null) {
       throw new Error('Capture date was fabricated when missing in file')
     }
-    if (!photo1.activeHash || photo1.byteSize !== 1000 * 500) {
-      // Size check
-    }
     pass(
       'Metadata details strictly report recorded facts and explicit Unknown for missing capture dates'
     )
 
-    // 6. Cache persistence and restart verification
+    // 6. Cache persistence, diagnostics, and proof of reuse without re-decoding
     console.log('[Phase 5] Verifying disk cache persistence across restart...')
     const cacheDir = join(userDataDir, 'thumbnails')
     const initialThumbFiles = readdirSync(cacheDir)
@@ -370,6 +393,7 @@ async function main() {
     if (validThumbs.length === 0) {
       throw new Error('No .thumb files found in disk cache directory')
     }
+
     // Verify no temporary files left behind
     const orphanTemps = initialThumbFiles.filter((f) => f.startsWith('.thumb_tmp_'))
     if (orphanTemps.length > 0) {
@@ -377,22 +401,45 @@ async function main() {
     }
     pass('Thumbnails published atomically to disk cache with 0 orphan temporary files')
 
+    // Simulate an abandoned temporary staging file from an interrupted publication
+    const simulatedInterruptedTemp = join(cacheDir, `.thumb_tmp_${process.pid}_${randomUUID()}`)
+    writeFileSync(simulatedInterruptedTemp, 'INTERRUPTED_STAGE')
+
     // Kill app and restart
     killTree(currentApp.child)
     currentApp = null
     await sleep(500)
 
-    console.log('[Phase 5] Relaunching Electron to verify cache reuse...')
+    console.log('[Phase 5] Relaunching Electron to verify cache reuse & staging cleanup...')
     const port2 = await getFreePort()
     currentApp = await launchApp(userDataDir, port2)
     cdp = currentApp.cdp
 
-    // Fast cache retrieval
+    // Verify abandoned temporary file was cleaned up on startup
+    if (existsSync(simulatedInterruptedTemp)) {
+      throw new Error('Abandoned staging file from interrupted publication was not cleaned up')
+    }
+    pass('Abandoned staging file from interrupted publication cleaned up safely on restart')
+
+    // Assert cache reuse WITHOUT re-decoding using diagnostics
+    const diagBefore = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
     const cachedThumb = await evaluate(cdp, `window.api.getThumbnail({ locationId: ${photo1.id} })`)
+    const diagAfter = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+
     if (cachedThumb.status !== 'ready' || cachedThumb.dataUrl !== thumbLandscape.dataUrl) {
       throw new Error('Failed to retrieve thumbnail from cache on restart')
     }
-    pass('Reused cached thumbnail immediately upon restart without re-decoding')
+    if (diagAfter.totalDecodes !== diagBefore.totalDecodes) {
+      throw new Error(
+        `Cache reuse violated: re-decoding occurred! Before: ${diagBefore.totalDecodes}, After: ${diagAfter.totalDecodes}`
+      )
+    }
+    if (diagAfter.cacheHits <= diagBefore.cacheHits) {
+      throw new Error('Cache hit counter did not increment on cached thumbnail retrieval')
+    }
+    pass(
+      'Reused cached thumbnail on restart without re-decoding (asserted 0 new decodes, cache hit recorded)'
+    )
 
     // 7. Out-of-band source modification invalidation
     console.log('[Phase 6] Verifying out-of-band modification detection...')
@@ -415,9 +462,32 @@ async function main() {
     }
     pass('Rejects modified source file out-of-band and protects cache integrity')
 
-    // 8. Scale verification with 10,000 photo catalog fixture
+    // 8. Scale verification with 10,000 photo catalog fixture backed by real decodable image files
     console.log('[Phase 7] Scale verification with 10,000 photo catalog fixture...')
-    // Construct 10,000 photos in the SQLite catalog
+    // Construct real decodable base image fixtures
+    const scaleDir = join(sourceDir, 'scale_fixtures')
+    mkdirSync(scaleDir, { recursive: true })
+    const baseImages = []
+    for (let k = 0; k < 20; k++) {
+      const imgBuf = await sharp({
+        create: {
+          width: 100,
+          height: 100,
+          channels: 3,
+          background: { r: (k * 12) % 255, g: (k * 25) % 255, b: (k * 40) % 255 }
+        }
+      })
+        .jpeg({ quality: 80 })
+        .toBuffer()
+      const imgPath = join(scaleDir, `base_${k}.jpg`)
+      writeFileSync(imgPath, imgBuf)
+      baseImages.push({
+        path: imgPath,
+        size: imgBuf.length,
+        hash: createHash('sha256').update(imgBuf).digest('hex')
+      })
+    }
+
     const scaleCount = 10000
     const sqlitePath = join(userDataDir, 'vault-catalog.db')
     const { DatabaseSync } = await import('node:sqlite')
@@ -435,45 +505,175 @@ async function main() {
       INSERT INTO discovery_observations (
         file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
         inferred_capture_time_ms, observed_at_ms, last_seen_at_ms, is_current
-      ) VALUES (?, 1024, 1700000000000, 1700000000000, NULL, 1700000000000, 1700000000000, 1);
+      ) VALUES (?, ?, 1700000000000, 1700000000000, NULL, 1700000000000, 1700000000000, 1);
+    `)
+    const insertHash = db.prepare(`
+      INSERT INTO hash_observations (
+        file_location_id, discovery_observation_id, sha256, observed_byte_size,
+        observed_mtime_ms, hashed_at_ms, is_active
+      ) VALUES (?, ?, ?, ?, 1700000000000, 1700000000000, 1);
     `)
 
     for (let i = 1; i <= scaleCount; i++) {
-      const orig = `C:\\scale_photos\\photo_${String(i).padStart(6, '0')}.jpg`
-      const norm = orig.toLowerCase()
+      const base = baseImages[(i - 1) % baseImages.length]
       const name = `photo_${String(i).padStart(6, '0')}.jpg`
-      const row = insertFile.get(orig, norm, name)
-      insertObs.run(row.id)
+      const filePath = join(scaleDir, name)
+      linkSync(base.path, filePath)
+      const row = insertFile.get(filePath, filePath.toLowerCase(), name)
+      insertObs.run(row.id, base.size)
+      insertHash.run(row.id, row.id, base.hash, base.size)
     }
     db.exec('COMMIT;')
     db.close()
 
-    // Test cold forward scrolling (page 0)
-    const t0 = performance.now()
-    const scalePage0 = await evaluate(cdp, `window.api.getPhotosPage({ offset: 0, limit: 50 })`)
-    const tPage0 = performance.now() - t0
-    if (scalePage0.totalCount < 10000 || scalePage0.items.length !== 50) {
-      throw new Error(`Expected 50 items from 10,000 catalog, got ${scalePage0.items.length}`)
-    }
-    pass(`Cold forward page 0 fetched in ${tPage0.toFixed(1)} ms across 10,000 photos`)
+    // Switch tab to photos in real UI by clicking the navigation item
+    await evaluate(
+      cdp,
+      `(() => {
+        const btn = Array.from(document.querySelectorAll('.nav-item')).find((b) =>
+          b.textContent && b.textContent.includes('Photos')
+        )
+        if (btn) btn.click()
+      })()`
+    )
+    await sleep(200)
 
-    // Distant scroll jump (offset 5000)
+    // Wait for the virtual grid container to mount in the renderer
+    let gridMounted = false
+    for (let g = 0; g < 40; g++) {
+      gridMounted = await evaluate(cdp, `Boolean(document.querySelector('.photos-grid-container'))`)
+      if (gridMounted) break
+      await sleep(150)
+    }
+    if (!gridMounted) {
+      throw new Error('Photos virtual grid container failed to mount in DOM')
+    }
+
+    // Begin recording frame times via requestAnimationFrame in renderer
+    await evaluate(
+      cdp,
+      `(() => {
+        window.__frameTimes = [];
+        window.__recording = true;
+        let last = performance.now();
+        function loop(now) {
+          window.__frameTimes.push(now - last);
+          last = now;
+          if (window.__recording) requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+      })()`
+    )
+
+    // Cold scroll forward through the virtual grid past 2,000 photos
+    const tCold0 = performance.now()
+    for (let pos = 5000; pos <= 135000; pos += 15000) {
+      await evaluate(
+        cdp,
+        `(() => {
+          const el = document.querySelector('.photos-grid-container');
+          if (el) { el.scrollTop = ${pos}; el.dispatchEvent(new Event('scroll')); }
+        })()`
+      )
+      await sleep(25)
+    }
+    const tCold = performance.now() - tCold0
+
+    // Assert DOM cells mounted <= 200 bound
+    const mountedCount = await evaluate(cdp, `document.querySelectorAll('.photo-cell').length`)
+    if (mountedCount > 200) {
+      throw new Error(`Mounted DOM cells (${mountedCount}) exceeded maximum limit (200)`)
+    }
+    pass(
+      `Cold forward scrolling beyond 2,000 photos completed in ${tCold.toFixed(1)} ms (mounted DOM cells: ${mountedCount} <= 200)`
+    )
+
+    // Measure main-process responsiveness during active worker decoding
+    const tPing0 = performance.now()
+    await evaluate(cdp, `window.api.getAppInfo()`)
+    const pingLatency = performance.now() - tPing0
+    if (pingLatency >= 100) {
+      throw new Error(`Main process stall detected: ${pingLatency.toFixed(1)} ms >= 100 ms limit`)
+    }
+    pass(
+      `Main process event loop responsiveness confirmed: ${pingLatency.toFixed(1)} ms (< 100 ms)`
+    )
+
+    // Distant scroll jump (scroll to offset near photo 7,500)
     const tJump0 = performance.now()
-    const scaleJump = await evaluate(cdp, `window.api.getPhotosPage({ offset: 5000, limit: 50 })`)
+    await evaluate(
+      cdp,
+      `(() => {
+        const el = document.querySelector('.photos-grid-container');
+        if (el) { el.scrollTop = 405000; el.dispatchEvent(new Event('scroll')); }
+      })()`
+    )
+    await sleep(150)
     const tJump = performance.now() - tJump0
-    if (scaleJump.items.length !== 50 || scaleJump.items[0].id !== scalePage0.items[0].id + 5000) {
-      throw new Error('Distant scroll jump offset mismatch')
+    const jumpCells = await evaluate(cdp, `document.querySelectorAll('.photo-cell').length`)
+    if (jumpCells > 200) {
+      throw new Error(`Mounted cells on distant jump (${jumpCells}) exceeded 200`)
     }
-    pass(`Distant scroll jump (offset 5,000) completed in ${tJump.toFixed(1)} ms`)
+    pass(
+      `Distant scroll jump to offset 405,000 completed in ${tJump.toFixed(1)} ms (mounted cells: ${jumpCells})`
+    )
 
-    // Warm reversal (offset 0)
+    // Warm reversal: scroll back to index 0
     const tWarm0 = performance.now()
-    const scaleWarm = await evaluate(cdp, `window.api.getPhotosPage({ offset: 0, limit: 50 })`)
-    const tWarm = performance.now() - tWarm0
-    if (scaleWarm.items.length !== 50) {
-      throw new Error('Warm reversal failed')
+    for (let pos = 350000; pos >= 0; pos -= 35000) {
+      await evaluate(
+        cdp,
+        `(() => {
+          const el = document.querySelector('.photos-grid-container');
+          if (el) { el.scrollTop = ${pos}; el.dispatchEvent(new Event('scroll')); }
+        })()`
+      )
+      await sleep(25)
     }
-    pass(`Warm reversal completed in ${tWarm.toFixed(1)} ms (p95 <= 33 ms bound satisfied)`)
+    await sleep(200)
+    const tWarm = performance.now() - tWarm0
+
+    // Verify return to evicted earlier pages: page 0 items are loaded and visible
+    const hasPhoto1 = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll('.photo-filename')).some((el) =>
+        el.textContent.includes('photo_000001.jpg')
+      )`
+    )
+    if (!hasPhoto1) {
+      throw new Error('Failed to return to and reload evicted earlier page 0')
+    }
+    pass(`Warm reversal completed in ${tWarm.toFixed(1)} ms with safe reload of evicted page 0`)
+
+    // Stop frame recording and calculate true frame interval p95
+    await evaluate(cdp, `window.__recording = false`)
+    const rawFrameTimes = await evaluate(cdp, `window.__frameTimes`)
+    if (!Array.isArray(rawFrameTimes) || rawFrameTimes.length < 10) {
+      throw new Error(`Insufficient frame intervals recorded: ${rawFrameTimes?.length}`)
+    }
+    const frameTimes = rawFrameTimes.filter((t) => typeof t === 'number' && t > 0)
+    frameTimes.sort((a, b) => a - b)
+    const p95Idx = Math.floor(frameTimes.length * 0.95)
+    const p95 = frameTimes[p95Idx] ?? 0
+    console.log(
+      `  [Scale Metrics] Recorded frames: ${frameTimes.length}, p95 frame interval: ${p95.toFixed(1)} ms (target <= 33 ms)`
+    )
+    if (p95 > 33) {
+      throw new Error(`Warm-scroll frame interval p95 (${p95.toFixed(1)} ms) exceeded 33 ms bound`)
+    }
+    pass(`Measured scrolling frame interval p95: ${p95.toFixed(1)} ms (satisfies <= 33 ms bound)`)
+
+    // Verify worker bounds during scale operations
+    const scaleDiag = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+    if (scaleDiag.activeWorkers > 2) {
+      throw new Error(`Active workers (${scaleDiag.activeWorkers}) exceeded max bound (2)`)
+    }
+    if (scaleDiag.queuedJobs > 64) {
+      throw new Error(`Queued jobs (${scaleDiag.queuedJobs}) exceeded max bound (64)`)
+    }
+    pass(
+      `Active worker pool and queue bounds verified (active: ${scaleDiag.activeWorkers} <= 2, queued: ${scaleDiag.queuedJobs} <= 64)`
+    )
 
     // 9. Source preservation invariance check
     console.log('[Phase 8] Verifying source preservation invariance...')

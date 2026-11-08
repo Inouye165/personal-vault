@@ -494,6 +494,26 @@ export const ThumbnailResultSchema = z.discriminatedUnion('status', [
 ])
 export type ThumbnailResult = z.infer<typeof ThumbnailResultSchema>
 
+export const CancelThumbnailRequestSchema = z.object({
+  locationId: z.number().int().positive()
+})
+export type CancelThumbnailRequest = z.infer<typeof CancelThumbnailRequestSchema>
+
+export const CancelThumbnailResponseSchema = z.object({
+  success: z.boolean(),
+  locationId: z.number().int().positive()
+})
+export type CancelThumbnailResponse = z.infer<typeof CancelThumbnailResponseSchema>
+
+export const PhotosDiagnosticsResponseSchema = z.object({
+  activeWorkers: z.number().int().nonnegative(),
+  queuedJobs: z.number().int().nonnegative(),
+  totalDecodes: z.number().int().nonnegative(),
+  cacheHits: z.number().int().nonnegative(),
+  cacheMisses: z.number().int().nonnegative()
+})
+export type PhotosDiagnosticsResponse = z.infer<typeof PhotosDiagnosticsResponseSchema>
+
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,
   data: unknown

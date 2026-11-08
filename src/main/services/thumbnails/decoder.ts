@@ -6,7 +6,7 @@
  */
 
 import { open } from 'node:fs/promises'
-import { statSync, realpathSync } from 'node:fs'
+import { realpathSync, lstatSync } from 'node:fs'
 import { extname } from 'node:path'
 import { createHash } from 'node:crypto'
 import sharp from 'sharp'
@@ -150,7 +150,27 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
   // 3. Descriptor pre-read, streaming read, and post-read verification
   let handle
   let fileBuffer: Buffer
+  let canonicalPath: string
+  let preLstat: import('node:fs').Stats
   try {
+    preLstat = lstatSync(sourcePath)
+    if (preLstat.isSymbolicLink() || !preLstat.isFile()) {
+      return {
+        status: 'error',
+        code: 'NOT_A_REGULAR_FILE',
+        message: 'Source is not a regular file or is a symbolic link'
+      }
+    }
+    canonicalPath = realpathSync(sourcePath)
+
+    if (preLstat.size > maxSourceSizeBytes) {
+      return {
+        status: 'error',
+        code: 'OVERSIZED_SOURCE',
+        message: `Source file size (${preLstat.size} bytes) exceeds limit (${maxSourceSizeBytes} bytes)`
+      }
+    }
+
     handle = await open(sourcePath, 'r')
     const preStat = await handle.stat()
 
@@ -167,6 +187,16 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
         status: 'error',
         code: 'OVERSIZED_SOURCE',
         message: `Source file size (${preStat.size} bytes) exceeds limit (${maxSourceSizeBytes} bytes)`
+      }
+    }
+
+    if (preLstat.ino !== undefined && preStat.ino !== undefined) {
+      if (preLstat.ino !== preStat.ino || preLstat.dev !== preStat.dev) {
+        return {
+          status: 'error',
+          code: 'SOURCE_MODIFIED',
+          message: 'Source file identity changed between lstat and open'
+        }
       }
     }
 
@@ -188,7 +218,7 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
       }
     }
 
-    // Stream read into buffer while computing SHA-256
+    // Stream read into buffer while computing SHA-256 and enforcing source byte cap
     const hasher = createHash('sha256')
     const chunks: Buffer[] = []
     const chunkBuffer = Buffer.alloc(64 * 1024)
@@ -199,10 +229,17 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
       const readResult = await handle.read(chunkBuffer, 0, chunkBuffer.length, null)
       bytesRead = readResult.bytesRead
       if (bytesRead > 0) {
+        totalRead += bytesRead
+        if (totalRead > maxSourceSizeBytes) {
+          return {
+            status: 'error',
+            code: 'OVERSIZED_SOURCE',
+            message: `Source file exceeded max size limit (${maxSourceSizeBytes} bytes) during read`
+          }
+        }
         const slice = chunkBuffer.subarray(0, bytesRead)
         hasher.update(slice)
         chunks.push(Buffer.from(slice))
-        totalRead += bytesRead
       }
     } while (bytesRead > 0)
 
@@ -241,14 +278,39 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
     }
   }
 
-  // 4. Live disk stat verification
+  // 4. Post-read pathname and disk identity revalidation
   try {
-    const liveStat = statSync(sourcePath)
+    const postCanonical = realpathSync(sourcePath)
+    if (postCanonical !== canonicalPath) {
+      return {
+        status: 'error',
+        code: 'SOURCE_MODIFIED',
+        message: 'Source file canonical path shifted after read'
+      }
+    }
+
+    const liveStat = lstatSync(sourcePath)
+    if (liveStat.isSymbolicLink() || !liveStat.isFile()) {
+      return {
+        status: 'error',
+        code: 'SOURCE_MODIFIED',
+        message: 'Source file replaced by non-file or link after read'
+      }
+    }
     if (liveStat.size !== fileBuffer.length) {
       return {
         status: 'error',
         code: 'SOURCE_MODIFIED',
         message: 'Source file size changed after read'
+      }
+    }
+    if (preLstat.ino !== undefined && liveStat.ino !== undefined) {
+      if (liveStat.ino !== preLstat.ino || liveStat.dev !== preLstat.dev) {
+        return {
+          status: 'error',
+          code: 'SOURCE_MODIFIED',
+          message: 'Source file inode/device shifted after read'
+        }
       }
     }
   } catch (err: unknown) {

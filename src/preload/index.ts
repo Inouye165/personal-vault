@@ -41,6 +41,9 @@ import {
   GetPhotosPageResponseSchema,
   GetThumbnailRequestSchema,
   ThumbnailResultSchema,
+  CancelThumbnailRequestSchema,
+  CancelThumbnailResponseSchema,
+  PhotosDiagnosticsResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -78,7 +81,10 @@ import {
   type GetPhotosPageRequest,
   type GetPhotosPageResponse,
   type GetThumbnailRequest,
-  type ThumbnailResult
+  type ThumbnailResult,
+  type CancelThumbnailRequest,
+  type CancelThumbnailResponse,
+  type PhotosDiagnosticsResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -433,6 +439,28 @@ const api: VaultApi = {
     const result = validatePayload(ThumbnailResultSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getThumbnail response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelThumbnail(request: CancelThumbnailRequest): Promise<CancelThumbnailResponse> {
+    const parsed = validatePayload(CancelThumbnailRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelThumbnail request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_CANCEL_THUMBNAIL, parsed.data)
+    const result = validatePayload(CancelThumbnailResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelThumbnail response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getPhotosDiagnostics(): Promise<PhotosDiagnosticsResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_GET_DIAGNOSTICS)
+    const result = validatePayload(PhotosDiagnosticsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotosDiagnostics response from main: ${result.error}`)
     }
     return result.data
   }

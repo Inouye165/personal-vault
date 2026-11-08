@@ -1,9 +1,9 @@
 /**
  * Personal Vault — usePhotos Hook (Stage 5A)
  *
- * Provides bounded, virtualized photo catalog fetching, memory-bounded
- * metadata and thumbnail caches, monotonic async token guarding,
- * and selection state.
+ * Provides bounded, virtualized photo catalog fetching with absolute catalog positions,
+ * full collection scroll extent, LRU-bounded metadata and thumbnail caches,
+ * monotonic generation request guarding, and selection state.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -12,9 +12,16 @@ import type { PhotoItem, ThumbnailResult } from '../../../shared/validation/ipc-
 export const PHOTO_BOUNDS = {
   PAGE_SIZE: 50,
   MAX_METADATA_RECORDS: 2000,
+  MAX_PAGES: 40, // 40 * 50 = 2000 records
   MAX_THUMBNAIL_CACHE: 200,
   MAX_MOUNTED_CELLS: 200
 } as const
+
+interface InFlightThumbRequest {
+  readonly requestId: number
+  readonly generation: number
+  readonly revision: string
+}
 
 export interface UsePhotosResult {
   readonly photos: readonly PhotoItem[]
@@ -26,30 +33,34 @@ export interface UsePhotosResult {
   readonly thumbnails: ReadonlyMap<number, ThumbnailResult>
   readonly selectPhoto: (id: number | null) => void
   readonly refresh: () => Promise<void>
-  readonly loadMore: () => Promise<void>
-  readonly hasMore: boolean
+  readonly ensureRangeLoaded: (startIndex: number, endIndex: number) => void
+  readonly getPhoto: (index: number) => PhotoItem | undefined
   readonly requestThumbnail: (photo: PhotoItem, priority?: 'high' | 'normal' | 'low') => void
 }
 
 export function usePhotos(): UsePhotosResult {
-  const [photos, setPhotos] = useState<PhotoItem[]>([])
+  const [pages, setPages] = useState<Map<number, PhotoItem[]>>(new Map())
   const [totalCount, setTotalCount] = useState<number>(0)
   const [isLoading, setIsLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [thumbnails, setThumbnails] = useState<Map<number, ThumbnailResult>>(new Map())
-  const [hasMore, setHasMore] = useState<boolean>(false)
 
-  // Monotonic request tokens to guard out-of-order responses
-  const fetchTokenRef = useRef<number>(0)
-  const thumbTokensRef = useRef<Map<number, number>>(new Map())
-  // Track in-flight thumbnail requests to prevent duplicate requests
-  const inFlightThumbsRef = useRef<Set<number>>(new Set())
+  // Monotonic generation incremented on unmount and refresh
+  const generationRef = useRef<number>(1)
+  // Page LRU tracking
+  const pageLruRef = useRef<number[]>([])
+  // In-flight page requests: pageNumber -> generation
+  const inFlightPagesRef = useRef<Map<number, number>>(new Map())
+  // In-flight thumbnail requests: locationId -> InFlightThumbRequest
+  const inFlightThumbsRef = useRef<Map<number, InFlightThumbRequest>>(new Map())
+  const requestSeqRef = useRef<number>(0)
 
-  const loadPhotos = useCallback(async (offset: number, append: boolean) => {
-    const currentToken = ++fetchTokenRef.current
-    setIsLoading(true)
-    setError(null)
+  const loadPage = useCallback(async (pageIndex: number, currentGeneration: number) => {
+    if (inFlightPagesRef.current.get(pageIndex) === currentGeneration) {
+      return
+    }
+    inFlightPagesRef.current.set(pageIndex, currentGeneration)
 
     try {
       if (!window.api?.getPhotosPage) {
@@ -57,67 +68,113 @@ export function usePhotos(): UsePhotosResult {
       }
 
       const res = await window.api.getPhotosPage({
-        offset,
+        offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
         limit: PHOTO_BOUNDS.PAGE_SIZE
       })
 
-      if (fetchTokenRef.current !== currentToken) {
-        return // Stale response discarded
+      // Discard response if generation changed (e.g. refreshed or unmounted)
+      if (generationRef.current !== currentGeneration) {
+        return
       }
 
+      inFlightPagesRef.current.delete(pageIndex)
       setTotalCount(res.totalCount)
-      setHasMore(res.hasMore)
 
-      setPhotos((prev) => {
-        let next: PhotoItem[]
-        if (append) {
-          // Bounded deduplication by ID
-          const existingIds = new Set(prev.map((p) => p.id))
-          const newItems = res.items.filter((p) => !existingIds.has(p.id))
-          next = [...prev, ...newItems]
-        } else {
-          next = res.items
-        }
+      setPages((prev) => {
+        const next = new Map(prev)
+        next.set(pageIndex, res.items)
 
-        // Enforce max renderer metadata records bound (2,000)
-        if (next.length > PHOTO_BOUNDS.MAX_METADATA_RECORDS) {
-          next = next.slice(next.length - PHOTO_BOUNDS.MAX_METADATA_RECORDS)
+        // Update LRU tracking
+        const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+        lru.push(pageIndex)
+
+        // Evict oldest pages if exceeding MAX_PAGES (40 pages = 2000 records)
+        while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+          const evictedPage = lru.shift()
+          if (evictedPage !== undefined) {
+            next.delete(evictedPage)
+          }
         }
+        pageLruRef.current = lru
+
         return next
       })
     } catch (err: unknown) {
-      if (fetchTokenRef.current === currentToken) {
+      if (generationRef.current === currentGeneration) {
+        inFlightPagesRef.current.delete(pageIndex)
         setError(err instanceof Error ? err.message : 'Failed to load photographs')
       }
     } finally {
-      if (fetchTokenRef.current === currentToken) {
+      if (generationRef.current === currentGeneration && pageIndex === 0) {
         setIsLoading(false)
       }
     }
   }, [])
 
-  const refresh = useCallback(async () => {
-    inFlightThumbsRef.current.clear()
-    thumbTokensRef.current.clear()
-    setThumbnails(new Map())
-    await loadPhotos(0, false)
-  }, [loadPhotos])
+  const ensureRangeLoaded = useCallback(
+    (startIndex: number, endIndex: number) => {
+      const currentGen = generationRef.current
+      const startPage = Math.floor(startIndex / PHOTO_BOUNDS.PAGE_SIZE)
+      const endPage = Math.floor(Math.max(startIndex, endIndex - 1) / PHOTO_BOUNDS.PAGE_SIZE)
 
-  const loadMore = useCallback(async () => {
-    if (isLoading || !hasMore) return
-    await loadPhotos(photos.length, true)
-  }, [isLoading, hasMore, photos.length, loadPhotos])
+      // Prefetch visible pages and 1 adjacent page buffer
+      const minPage = Math.max(0, startPage - 1)
+      const maxPage = endPage + 1
+
+      for (let p = minPage; p <= maxPage; p++) {
+        if (!pages.has(p) && !inFlightPagesRef.current.has(p)) {
+          void loadPage(p, currentGen)
+        } else if (pages.has(p)) {
+          // Touch LRU
+          const lru = pageLruRef.current.filter((idx) => idx !== p)
+          lru.push(p)
+          pageLruRef.current = lru
+        }
+      }
+    },
+    [pages, loadPage]
+  )
+
+  const getPhoto = useCallback(
+    (index: number): PhotoItem | undefined => {
+      const pageIndex = Math.floor(index / PHOTO_BOUNDS.PAGE_SIZE)
+      const offsetInPage = index % PHOTO_BOUNDS.PAGE_SIZE
+      return pages.get(pageIndex)?.[offsetInPage]
+    },
+    [pages]
+  )
+
+  const refresh = useCallback(async () => {
+    // Monotonic generation increment prevents any pending async responses from repopulating
+    const nextGen = ++generationRef.current
+    pageLruRef.current = []
+    inFlightPagesRef.current.clear()
+    inFlightThumbsRef.current.clear()
+    setPages(new Map())
+    setThumbnails(new Map())
+    setIsLoading(true)
+    setError(null)
+    await loadPage(0, nextGen)
+  }, [loadPage])
 
   const requestThumbnail = useCallback(
     (photo: PhotoItem, priority: 'high' | 'normal' | 'low' = 'normal') => {
       if (!window.api?.getThumbnail) return
-      if (thumbnails.has(photo.id) || inFlightThumbsRef.current.has(photo.id)) {
-        return
+      if (thumbnails.has(photo.id)) return
+
+      const currentGen = generationRef.current
+      const existingReq = inFlightThumbsRef.current.get(photo.id)
+      if (existingReq && existingReq.generation === currentGen) {
+        return // Already in-flight for current generation
       }
 
-      inFlightThumbsRef.current.add(photo.id)
-      const currentToken = (thumbTokensRef.current.get(photo.id) ?? 0) + 1
-      thumbTokensRef.current.set(photo.id, currentToken)
+      const requestId = ++requestSeqRef.current
+      const revision = `${photo.id}:${photo.byteSize}:${photo.filesystemMtimeMs}`
+      inFlightThumbsRef.current.set(photo.id, {
+        requestId,
+        generation: currentGen,
+        revision
+      })
 
       void window.api
         .getThumbnail({
@@ -127,14 +184,23 @@ export function usePhotos(): UsePhotosResult {
           priority
         })
         .then((result) => {
-          inFlightThumbsRef.current.delete(photo.id)
-          if (thumbTokensRef.current.get(photo.id) !== currentToken) {
-            return // Obsolete response
+          const activeReq = inFlightThumbsRef.current.get(photo.id)
+          // Discard response if generation, request id, or revision mismatch
+          if (
+            !activeReq ||
+            activeReq.requestId !== requestId ||
+            activeReq.generation !== currentGen ||
+            activeReq.generation !== generationRef.current ||
+            activeReq.revision !== revision
+          ) {
+            return
           }
+
+          // Safe deletion: only delete if current active request matches this requestId
+          inFlightThumbsRef.current.delete(photo.id)
 
           setThumbnails((prev) => {
             const next = new Map(prev)
-            // Evict oldest entries if exceeding cache limit (200)
             if (next.size >= PHOTO_BOUNDS.MAX_THUMBNAIL_CACHE) {
               const firstKey = next.keys().next().value
               if (firstKey !== undefined) {
@@ -146,7 +212,9 @@ export function usePhotos(): UsePhotosResult {
           })
         })
         .catch(() => {
-          inFlightThumbsRef.current.delete(photo.id)
+          if (inFlightThumbsRef.current.get(photo.id)?.requestId === requestId) {
+            inFlightThumbsRef.current.delete(photo.id)
+          }
         })
     },
     [thumbnails]
@@ -158,7 +226,7 @@ export function usePhotos(): UsePhotosResult {
     const loadInitial = async () => {
       await Promise.resolve()
       if (active) {
-        void loadPhotos(0, false)
+        void loadPage(0, generationRef.current)
       }
     }
     void loadInitial()
@@ -166,8 +234,17 @@ export function usePhotos(): UsePhotosResult {
     return () => {
       active = false
     }
-  }, [loadPhotos])
+  }, [loadPage])
 
+  // Invalidate in-flight generation on unmount
+  useEffect(() => {
+    return () => {
+      generationRef.current += 1
+    }
+  }, [])
+
+  // Flatten currently retained photos for backwards compatibility and selection search
+  const photos = Array.from(pages.values()).flat()
   const selectedPhoto = photos.find((p) => p.id === selectedId) ?? null
 
   const selectPhoto = useCallback((id: number | null) => {
@@ -184,8 +261,8 @@ export function usePhotos(): UsePhotosResult {
     thumbnails,
     selectPhoto,
     refresh,
-    loadMore,
-    hasMore,
+    ensureRangeLoaded,
+    getPhoto,
     requestThumbnail
   }
 }

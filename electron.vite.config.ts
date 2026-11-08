@@ -46,7 +46,8 @@ export default defineConfig({
           index: resolve('src/main/index.ts'),
           catalog: resolve('src/main/services/catalog/index.ts'),
           jobs: resolve('src/main/services/jobs/index.ts'),
-          thumbnails: resolve('src/main/services/thumbnails/index.ts')
+          thumbnails: resolve('src/main/services/thumbnails/index.ts'),
+          thumbnail_worker: resolve('src/main/services/thumbnails/worker.ts')
         }
       }
     }

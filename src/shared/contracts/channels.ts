@@ -27,7 +27,9 @@ export const IPC_CHANNELS = {
   VAULT_GET_LATEST_IMPORT: 'vault:get-latest-import',
   VAULT_PROGRESS_EVENT: 'vault:progress-event',
   PHOTOS_GET_PAGE: 'photos:get-page',
-  PHOTOS_GET_THUMBNAIL: 'photos:get-thumbnail'
+  PHOTOS_GET_THUMBNAIL: 'photos:get-thumbnail',
+  PHOTOS_CANCEL_THUMBNAIL: 'photos:cancel-thumbnail',
+  PHOTOS_GET_DIAGNOSTICS: 'photos:get-diagnostics'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

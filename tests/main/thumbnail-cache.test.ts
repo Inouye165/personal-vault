@@ -2,9 +2,10 @@
  * @vitest-environment node
  */
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import sharp from 'sharp'
 import { ThumbnailDiskCache } from '../../src/main/services/thumbnails/cache'
 
 describe('ThumbnailDiskCache', () => {
@@ -64,7 +65,11 @@ describe('ThumbnailDiskCache', () => {
     const initial = await cache.get(key)
     expect(initial).toBeNull()
 
-    const thumbBytes = Buffer.from('FAKE_WEBP_THUMBNAIL_BYTES_FOR_TEST')
+    const thumbBytes = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 2, b: 3 } }
+    })
+      .webp()
+      .toBuffer()
     await cache.put(key, thumbBytes)
 
     const retrieved = await cache.get(key)
@@ -91,6 +96,8 @@ describe('ThumbnailDiskCache', () => {
   it('rejects corrupt zero-byte or malformed cache entries', async () => {
     const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
     const key = cache.computeCacheKey({
+      locationId: 10,
+      sourcePath: join(tempDir, 'photo.jpg'),
       sha256: 'c'.repeat(64),
       byteSize: 3000,
       mtimeMs: 1700000000000
@@ -99,29 +106,101 @@ describe('ThumbnailDiskCache', () => {
     const thumbFile = join(cacheDir, `${key}.thumb`)
     writeFileSync(thumbFile, Buffer.alloc(0)) // 0 bytes
 
-    const result = await cache.get(key)
-    expect(result).toBeNull()
-    // 0-byte file should be unlinked/discarded
+    const retrieved = await cache.get(key)
+    expect(retrieved).toBeNull()
     expect(existsSync(thumbFile)).toBe(false)
   })
 
+  it('unhashed files with matching size and mtime produce distinct cache keys', () => {
+    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
+    const key1 = cache.computeCacheKey({
+      locationId: 1,
+      sourcePath: join(tempDir, 'file1.jpg'),
+      sha256: null,
+      byteSize: 5000,
+      mtimeMs: 1700000000000
+    })
+    const key2 = cache.computeCacheKey({
+      locationId: 2,
+      sourcePath: join(tempDir, 'file2.jpg'),
+      sha256: null,
+      byteSize: 5000,
+      mtimeMs: 1700000000000
+    })
+
+    expect(key1).not.toBe(key2)
+  })
+
+  it('rejects corrupt non-empty cache entries and removes them from disk', async () => {
+    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
+    const key = cache.computeCacheKey({
+      locationId: 3,
+      sourcePath: join(tempDir, 'file3.jpg'),
+      sha256: 'd'.repeat(64),
+      byteSize: 4000,
+      mtimeMs: 1700000000000
+    })
+
+    const thumbFile = join(cacheDir, `${key}.thumb`)
+    writeFileSync(thumbFile, Buffer.from('NOT_A_VALID_WEBP_IMAGE_CORRUPT_BYTES'))
+
+    const retrieved = await cache.get(key)
+    expect(retrieved).toBeNull()
+    expect(existsSync(thumbFile)).toBe(false)
+  })
+
+  it('rejects cache directory if it overlaps with source root or vault directory', () => {
+    const sourceDir = join(tempDir, 'sources')
+    mkdirSync(sourceDir, { recursive: true })
+    const overlappingCache = join(sourceDir, 'cache')
+    mkdirSync(overlappingCache, { recursive: true })
+
+    expect(() => {
+      new ThumbnailDiskCache({
+        cacheDir: overlappingCache,
+        sourceRoots: [sourceDir]
+      })
+    }).toThrow(/overlap/i)
+  })
+
+  it('cleans only demonstrably owned staging files and never touches unrelated files', async () => {
+    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 1024 * 1024 })
+    const ownedTmp = join(cacheDir, `.thumb_tmp_${process.pid}_validuuid`)
+    const unrelatedFile = join(cacheDir, 'unrelated_user_file.txt')
+    const otherTmp = join(cacheDir, 'other_file.tmp')
+
+    writeFileSync(ownedTmp, 'owned staging')
+    writeFileSync(unrelatedFile, 'keep this')
+    writeFileSync(otherTmp, 'keep this too')
+
+    await cache.cleanupStagingFiles()
+
+    expect(existsSync(ownedTmp)).toBe(false)
+    expect(existsSync(unrelatedFile)).toBe(true)
+    expect(existsSync(otherTmp)).toBe(true)
+  })
+
   it('evicts oldest cache entries when budget is exceeded without touching unrelated files', async () => {
-    // Budget: 300 bytes. Each thumb is 100 bytes.
-    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: 300 })
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 5, g: 5, b: 5 } }
+    })
+      .webp()
+      .toBuffer()
+
+    // Budget: 3 times the size of one valid WebP
+    const cache = new ThumbnailDiskCache({ cacheDir, maxSizeBytes: validWebp.length * 3 })
 
     const key1 = '1'.repeat(64)
     const key2 = '2'.repeat(64)
     const key3 = '3'.repeat(64)
     const key4 = '4'.repeat(64)
 
-    const dummy100 = Buffer.alloc(100, 1)
-
-    await cache.put(key1, dummy100)
+    await cache.put(key1, validWebp)
     // small sleep to ensure distinct mtimes for LRU
-    await new Promise((r) => setTimeout(r, 15))
-    await cache.put(key2, dummy100)
-    await new Promise((r) => setTimeout(r, 15))
-    await cache.put(key3, dummy100)
+    await new Promise((r) => setTimeout(r, 20))
+    await cache.put(key2, validWebp)
+    await new Promise((r) => setTimeout(r, 20))
+    await cache.put(key3, validWebp)
 
     // Unrelated file in same directory that does NOT end in .thumb
     const unrelatedFile = join(cacheDir, 'unrelated-notes.txt')
@@ -129,9 +208,9 @@ describe('ThumbnailDiskCache', () => {
 
     expect(await cache.get(key1)).not.toBeNull()
 
-    // Adding key4 exceeds 300-byte budget; key1 is oldest and should be evicted
-    await new Promise((r) => setTimeout(r, 15))
-    await cache.put(key4, dummy100)
+    // Adding key4 exceeds 3-thumb budget; key1 is oldest and should be evicted
+    await new Promise((r) => setTimeout(r, 20))
+    await cache.put(key4, validWebp)
 
     expect(await cache.get(key4)).not.toBeNull()
     expect(existsSync(unrelatedFile)).toBe(true) // Unrelated file strictly preserved

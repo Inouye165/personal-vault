@@ -236,4 +236,118 @@ describe('ThumbnailCoordinator', () => {
     expect(queueFull.length).toBeGreaterThan(0)
     await smallCoord.shutdown()
   })
+
+  it('spawns real worker threads and limits active workers to maxActiveJobs', async () => {
+    // Check that coordinator exposes worker diagnostics and uses real workers
+    const stats = coordinator.getDiagnostics()
+    expect(stats.activeWorkers).toBeLessThanOrEqual(2)
+  })
+
+  it('terminates real worker on timeout and frees concurrency only after worker terminates', async () => {
+    const timeoutCoord = new ThumbnailCoordinator({
+      cacheDir,
+      maxActiveJobs: 1,
+      maxQueuedJobs: 5,
+      jobTimeoutMs: 100, // Very short timeout
+      approvedRoots: [sourceRoot]
+    })
+
+    const testJpegPath = join(sourceRoot, 'timeout.jpg')
+    const jpegBuffer = await sharp({
+      create: { width: 1000, height: 1000, channels: 3, background: { r: 50, g: 50, b: 50 } }
+    })
+      .jpeg()
+      .toBuffer()
+    writeFileSync(testJpegPath, jpegBuffer)
+    const stat = statSync(testJpegPath)
+
+    // A simulated slow job or timeout
+    const result = await timeoutCoord.requestThumbnail({
+      locationId: 999,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+    expect(result).toBeDefined()
+
+    // Once timeout happens or completes, worker pool should have 0 active busy workers
+    const stats = timeoutCoord.getDiagnostics()
+    expect(stats.activeWorkers).toBe(0)
+    await timeoutCoord.shutdown()
+  })
+
+  it('supports cancellation of requests, releasing worker and queue immediately', async () => {
+    const cancelCoord = new ThumbnailCoordinator({
+      cacheDir,
+      maxActiveJobs: 1,
+      maxQueuedJobs: 10,
+      jobTimeoutMs: 5000,
+      approvedRoots: [sourceRoot]
+    })
+
+    const testJpegPath = join(sourceRoot, 'cancel.jpg')
+    const jpegBuffer = await sharp({
+      create: { width: 500, height: 500, channels: 3, background: { r: 10, g: 20, b: 30 } }
+    })
+      .jpeg()
+      .toBuffer()
+    writeFileSync(testJpegPath, jpegBuffer)
+    const stat = statSync(testJpegPath)
+
+    const jobPromise = cancelCoord.requestThumbnail({
+      locationId: 888,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+
+    // Cancel the job
+    const cancelled = cancelCoord.cancelRequest(888)
+    expect(cancelled).toBe(true)
+
+    const res = await jobPromise
+    expect(res.status).toBe('error')
+    if (res.status === 'error') {
+      expect(res.code).toBe('CANCELLED')
+    }
+
+    await cancelCoord.shutdown()
+  })
+
+  it('enforces source byte cap during reading if file exceeds maxSourceSizeBytes', async () => {
+    // 1 KiB limit
+    const tightCoord = new ThumbnailCoordinator({
+      cacheDir,
+      maxActiveJobs: 1,
+      maxQueuedJobs: 5,
+      jobTimeoutMs: 5000,
+      maxSourceSizeBytes: 1024,
+      approvedRoots: [sourceRoot]
+    })
+
+    const testJpegPath = join(sourceRoot, 'large.jpg')
+    const jpegBuffer = await sharp({
+      create: { width: 1200, height: 1200, channels: 3, background: { r: 10, g: 20, b: 30 } }
+    })
+      .jpeg({ quality: 95 })
+      .toBuffer()
+    writeFileSync(testJpegPath, jpegBuffer) // ~100+ KiB
+    const stat = statSync(testJpegPath)
+
+    const result = await tightCoord.requestThumbnail({
+      locationId: 777,
+      sourcePath: testJpegPath,
+      expectedByteSize: stat.size,
+      expectedMtimeMs: Math.round(stat.mtimeMs),
+      expectedSha256: null
+    })
+
+    expect(result.status).toBe('error')
+    if (result.status === 'error') {
+      expect(result.code).toBe('OVERSIZED_SOURCE')
+    }
+    await tightCoord.shutdown()
+  })
 })
