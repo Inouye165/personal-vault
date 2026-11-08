@@ -24,8 +24,10 @@ export { readWebPDimensions }
 
 interface QueuedItem {
   id: number
+  action: 'decode' | 'validate_cache'
   params: ThumbnailRequestParams
   cacheKey: string
+  cachedBuf?: Buffer
   resolve: (res: ThumbnailResult) => void
   reject: (err: unknown) => void
   priorityOrder: number
@@ -109,7 +111,8 @@ export class ThumbnailCoordinator {
       cacheDir: options.cacheDir,
       maxSizeBytes: options.diskCacheBudget,
       sourceRoots: options.approvedRoots,
-      vaultPath: options.vaultPath
+      vaultPath: options.vaultPath,
+      validateBuffer: false
     })
     this.approvedRoots = options.approvedRoots
     this.maxActiveJobs = options.maxActiveJobs ?? THUMBNAIL_LIMITS.MAX_ACTIVE_JOBS
@@ -333,27 +336,19 @@ export class ThumbnailCoordinator {
       mtimeMs: params.expectedMtimeMs
     })
 
+    let candidateBuf: Buffer | null = null
     try {
       const cachedBuf = await this.cache.get(cacheKey)
       if (cachedBuf && cachedBuf.length > 0) {
-        const dims = readWebPDimensions(cachedBuf)
-        if (dims) {
-          this.cacheHits++
-          return {
-            status: 'ready',
-            locationId: params.locationId,
-            dataUrl: `data:image/webp;base64,${cachedBuf.toString('base64')}`,
-            mimeType: 'image/webp',
-            width: dims.width,
-            height: dims.height
-          }
-        }
+        candidateBuf = cachedBuf
       }
     } catch {
       // Non-fatal if cache read fails, proceed to decode
     }
 
-    this.cacheMisses++
+    if (!candidateBuf) {
+      this.cacheMisses++
+    }
 
     if (this.cancelledLocationIds.has(params.locationId)) {
       return {
@@ -381,8 +376,10 @@ export class ThumbnailCoordinator {
     return new Promise<ThumbnailResult>((resolve, reject) => {
       const item: QueuedItem = {
         id: this.nextJobId++,
+        action: candidateBuf ? 'validate_cache' : 'decode',
         params,
         cacheKey,
+        cachedBuf: candidateBuf ?? undefined,
         resolve,
         reject,
         priorityOrder
@@ -443,22 +440,33 @@ export class ThumbnailCoordinator {
       void this.handleWorkerTimeout(currentEntry)
     }, this.jobTimeoutMs)
 
-    this.totalDecodes++
+    if (item.action === 'validate_cache') {
+      currentEntry.worker.postMessage({
+        id: item.id,
+        action: 'validate_cache',
+        buffer: item.cachedBuf,
+        maxBytes: THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES,
+        stuck: process.env.PV_TEST_STUCK_VALIDATION === '1'
+      })
+    } else {
+      this.totalDecodes++
 
-    // Post decode task to worker thread
-    currentEntry.worker.postMessage({
-      id: item.id,
-      params: {
-        sourcePath: item.params.sourcePath,
-        expectedByteSize: item.params.expectedByteSize,
-        expectedMtimeMs: item.params.expectedMtimeMs,
-        expectedSha256: item.params.expectedSha256,
-        maxDimension: THUMBNAIL_LIMITS.MAX_DIMENSION_PX,
-        maxInputPixels: this.maxInputPixels,
-        maxSourceSizeBytes: this.maxSourceSizeBytes,
-        approvedRoots: this.getApprovedRoots()
-      }
-    })
+      // Post decode task to worker thread
+      currentEntry.worker.postMessage({
+        id: item.id,
+        action: 'decode',
+        params: {
+          sourcePath: item.params.sourcePath,
+          expectedByteSize: item.params.expectedByteSize,
+          expectedMtimeMs: item.params.expectedMtimeMs,
+          expectedSha256: item.params.expectedSha256,
+          maxDimension: THUMBNAIL_LIMITS.MAX_DIMENSION_PX,
+          maxInputPixels: this.maxInputPixels,
+          maxSourceSizeBytes: this.maxSourceSizeBytes,
+          approvedRoots: this.getApprovedRoots()
+        }
+      })
+    }
   }
 
   private spawnWorker(): ActiveWorkerEntry {
@@ -504,6 +512,44 @@ export class ThumbnailCoordinator {
     }
 
     const item = entry.item
+
+    if (item.action === 'validate_cache') {
+      if (msg.status === 'valid' && item.cachedBuf) {
+        entry.item = null
+        entry.jobId = null
+        entry.locationId = null
+
+        this.cacheHits++
+        const width = typeof msg.width === 'number' ? msg.width : 512
+        const height = typeof msg.height === 'number' ? msg.height : 512
+        item.resolve({
+          status: 'ready',
+          locationId: item.params.locationId,
+          dataUrl: `data:image/webp;base64,${item.cachedBuf.toString('base64')}`,
+          mimeType: 'image/webp',
+          width,
+          height
+        })
+        this.processNext()
+        return
+      } else {
+        // Cache entry is corrupt or validation failed! Discard and regenerate from source
+        this.cacheMisses++
+        this.cache.delete(item.cacheKey)
+
+        item.action = 'decode'
+        item.cachedBuf = undefined
+
+        entry.item = null
+        entry.jobId = null
+        entry.locationId = null
+
+        this.queue.unshift(item)
+        this.processNext()
+        return
+      }
+    }
+
     entry.item = null
     entry.jobId = null
     entry.locationId = null
@@ -575,11 +621,14 @@ export class ThumbnailCoordinator {
     this.removeWorker(entry)
 
     if (item) {
+      const isValidation = item.action === 'validate_cache'
       item.resolve({
         status: 'error',
         locationId: item.params.locationId,
         code: 'TIMEOUT',
-        message: `Thumbnail decode exceeded timeout limit (${this.jobTimeoutMs} ms)`
+        message: isValidation
+          ? `Thumbnail validation exceeded timeout limit (${this.jobTimeoutMs} ms)`
+          : `Thumbnail decode exceeded timeout limit (${this.jobTimeoutMs} ms)`
       })
     }
 

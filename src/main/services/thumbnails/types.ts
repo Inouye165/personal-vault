@@ -28,9 +28,14 @@ export interface ThumbnailDiskCacheOptions {
   readonly maxThumbnailSizeBytes?: number
   readonly sourceRoots?: readonly string[] | (() => readonly string[])
   readonly vaultPath?: string | (() => string | null)
-  readonly validateBuffer?: (
-    buffer: Buffer
-  ) => Promise<{ width: number; height: number } | null> | { width: number; height: number } | null
+  readonly validateBuffer?:
+    | ((
+        buffer: Buffer
+      ) =>
+        | Promise<{ width: number; height: number } | null>
+        | { width: number; height: number }
+        | null)
+    | false
 }
 
 export interface ThumbnailDiagnostics {

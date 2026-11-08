@@ -2,7 +2,15 @@
  * @vitest-environment node
  */
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs'
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  mkdirSync
+} from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -389,6 +397,41 @@ describe('ThumbnailDiskCache', () => {
       expect(files.filter((f) => f.startsWith('.thumb_tmp_'))).toHaveLength(0)
     } finally {
       delete process.env.PV_TEST_STAGING_FAILURE
+    }
+  })
+
+  it('counts existing target bytes plus staging bytes during replacement and keeps disk usage within budget before publication', async () => {
+    const validWebp = await sharp({
+      create: { width: 10, height: 10, channels: 3, background: { r: 10, g: 20, b: 30 } }
+    })
+      .webp()
+      .toBuffer()
+
+    const budget = validWebp.length
+    const cache = new ThumbnailDiskCache({
+      cacheDir,
+      maxSizeBytes: budget
+    })
+
+    const key = '1'.repeat(64)
+    await cache.put(key, validWebp)
+    expect(await cache.get(key)).not.toBeNull()
+
+    const recordFile = join(tempDir, 'staging_usage.txt')
+    process.env.PV_TEST_RECORD_STAGING_USAGE_FILE = recordFile
+
+    try {
+      // Put replacement
+      await cache.put(key, validWebp)
+
+      // Measure actual disk usage before publication
+      expect(existsSync(recordFile)).toBe(true)
+      const recordedUsage = parseInt(readFileSync(recordFile, 'utf8'), 10)
+
+      // Reviewer reproduction check: under 100-byte budget, replacing 100-byte file must NOT hit 200 bytes!
+      expect(recordedUsage).toBeLessThanOrEqual(budget)
+    } finally {
+      delete process.env.PV_TEST_RECORD_STAGING_USAGE_FILE
     }
   })
 })

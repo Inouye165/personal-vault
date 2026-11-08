@@ -541,4 +541,96 @@ describe('ThumbnailCoordinator', () => {
     const newStat = statSync(corruptThumbPath)
     expect(newStat.size).toBeGreaterThan(100)
   })
+
+  it('routes cache-hit integrity validation through bounded worker scheduling limiting active workers to maxActiveJobs', async () => {
+    // Generate and cache 5 distinct images
+    const keys = [101, 102, 103, 104, 105]
+    for (const id of keys) {
+      const p = join(sourceRoot, `hit_${id}.jpg`)
+      const buf = await sharp({
+        create: { width: 100, height: 100, channels: 3, background: { r: id, g: 0, b: 0 } }
+      })
+        .jpeg()
+        .toBuffer()
+      writeFileSync(p, buf)
+      const st = statSync(p)
+      const res = await coordinator.requestThumbnail({
+        locationId: id,
+        sourcePath: p,
+        expectedByteSize: st.size,
+        expectedMtimeMs: Math.round(st.mtimeMs),
+        expectedSha256: null
+      })
+      expect(res.status).toBe('ready')
+    }
+
+    // Now request all 5 simultaneously as cache hits
+    const promises = keys.map((id) => {
+      const p = join(sourceRoot, `hit_${id}.jpg`)
+      const st = statSync(p)
+      return coordinator.requestThumbnail({
+        locationId: id,
+        sourcePath: p,
+        expectedByteSize: st.size,
+        expectedMtimeMs: Math.round(st.mtimeMs),
+        expectedSha256: null
+      })
+    })
+
+    const diag = coordinator.getDiagnostics()
+    // Worker concurrency bound must hold during cache hit validation
+    expect(diag.activeWorkers).toBeLessThanOrEqual(2)
+
+    const results = await Promise.all(promises)
+    for (const r of results) {
+      expect(r.status).toBe('ready')
+    }
+  })
+
+  it('terminates worker and recovers capacity when a cache validation job gets stuck', async () => {
+    const stuckCoord = new ThumbnailCoordinator({
+      cacheDir,
+      maxActiveJobs: 1,
+      maxQueuedJobs: 5,
+      jobTimeoutMs: 150,
+      approvedRoots: [sourceRoot]
+    })
+
+    const p = join(sourceRoot, 'stuck_cache.jpg')
+    const buf = await sharp({
+      create: { width: 100, height: 100, channels: 3, background: { r: 50, g: 50, b: 50 } }
+    })
+      .jpeg()
+      .toBuffer()
+    writeFileSync(p, buf)
+    const st = statSync(p)
+    // Warm up cache
+    const warmup = await stuckCoord.requestThumbnail({
+      locationId: 777,
+      sourcePath: p,
+      expectedByteSize: st.size,
+      expectedMtimeMs: Math.round(st.mtimeMs),
+      expectedSha256: null
+    })
+    expect(warmup.status).toBe('ready')
+
+    // Simulate stuck validation in worker
+    process.env.PV_TEST_STUCK_VALIDATION = '1'
+    try {
+      const res = await stuckCoord.requestThumbnail({
+        locationId: 777,
+        sourcePath: p,
+        expectedByteSize: st.size,
+        expectedMtimeMs: Math.round(st.mtimeMs),
+        expectedSha256: null
+      })
+      expect(res.status).toBe('error')
+
+      const diag = stuckCoord.getDiagnostics()
+      expect(diag.activeWorkers).toBe(0)
+    } finally {
+      delete process.env.PV_TEST_STUCK_VALIDATION
+      await stuckCoord.shutdown()
+    }
+  })
 })

@@ -179,9 +179,15 @@ export class ThumbnailDiskCache {
   private readonly maxThumbnailSizeBytes: number
   private readonly sourceRoots?: readonly string[] | (() => readonly string[])
   private readonly vaultPath?: string | (() => string | null)
-  private readonly customValidator?: (
-    buffer: Buffer
-  ) => Promise<{ width: number; height: number } | null> | { width: number; height: number } | null
+  private readonly customValidator?:
+    | ((
+        buffer: Buffer
+      ) =>
+        | Promise<{ width: number; height: number } | null>
+        | { width: number; height: number }
+        | null)
+    | false
+  private putQueue: Promise<void> = Promise.resolve()
 
   constructor(options: ThumbnailDiskCacheOptions) {
     if (!options.cacheDir || typeof options.cacheDir !== 'string') {
@@ -205,7 +211,10 @@ export class ThumbnailDiskCache {
   private async validateIntegrity(
     buffer: Buffer
   ): Promise<{ width: number; height: number } | null> {
-    if (this.customValidator) {
+    if (this.customValidator === false) {
+      return readWebPDimensions(buffer)
+    }
+    if (typeof this.customValidator === 'function') {
       try {
         return await this.customValidator(buffer)
       } catch {
@@ -310,9 +319,40 @@ export class ThumbnailDiskCache {
   }
 
   /**
+   * Deletes a cached thumbnail file by key if it exists.
+   */
+  public delete(key: string): void {
+    this.assertValidKey(key)
+    this.assertSeparationAndContainment()
+    const filePath = join(this.cacheDir, `${key}.thumb`)
+    if (existsSync(filePath)) {
+      try {
+        unlinkSync(filePath)
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
    * Atomically stores a thumbnail buffer under the given key.
+   * Serializes concurrent put operations to prevent budget races.
    */
   public async put(key: string, buffer: Buffer): Promise<void> {
+    const previous = this.putQueue
+    let releaseLock!: () => void
+    this.putQueue = new Promise<void>((r) => {
+      releaseLock = r
+    })
+    try {
+      await previous
+      await this.executePut(key, buffer)
+    } finally {
+      releaseLock()
+    }
+  }
+
+  private async executePut(key: string, buffer: Buffer): Promise<void> {
     this.assertValidKey(key)
     this.assertSeparationAndContainment()
     if (!buffer || buffer.length === 0) {
@@ -331,8 +371,8 @@ export class ThumbnailDiskCache {
       throw new Error('Cannot cache invalid or corrupt WebP thumbnail buffer')
     }
 
-    // Reserve capacity before creating temporary staging files
-    this.reserveCapacity(buffer.length, key)
+    // Reserve capacity before creating temporary staging files (counts existing target and staging bytes)
+    this.reserveCapacity(buffer.length)
 
     const tempName = `.thumb_tmp_${process.pid}_${randomUUID()}`
     const tempPath = join(this.cacheDir, tempName)
@@ -350,6 +390,20 @@ export class ThumbnailDiskCache {
 
       if (process.env.PV_TEST_STAGING_FAILURE === '1') {
         throw new Error('Simulated staging disk failure: ENOSPC')
+      }
+
+      const usageRecordFile = process.env.PV_TEST_RECORD_STAGING_USAGE_FILE
+      if (usageRecordFile) {
+        try {
+          const files = readdirSync(this.cacheDir)
+          let currentBytes = 0
+          for (const f of files) {
+            currentBytes += statSync(join(this.cacheDir, f)).size
+          }
+          writeFileSync(usageRecordFile, String(currentBytes))
+        } catch {
+          // ignore
+        }
       }
 
       // Narrowly scoped test fixture barrier for deterministic publication interruption
@@ -372,8 +426,8 @@ export class ThumbnailDiskCache {
         }
       }
 
-      // Atomic publication
-      renameSync(tempPath, targetPath)
+      // Atomic publication with Windows retry for delete-pending / handle-release latency
+      this.publishFile(tempPath, targetPath)
     } catch (err) {
       try {
         if (existsSync(tempPath)) {
@@ -384,6 +438,32 @@ export class ThumbnailDiskCache {
       }
       throw err
     }
+  }
+
+  private publishFile(tempPath: string, targetPath: string): void {
+    const isWindows = process.platform === 'win32'
+    const maxAttempts = isWindows ? 8 : 1
+    let lastErr: unknown
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        renameSync(tempPath, targetPath)
+        return
+      } catch (err: unknown) {
+        lastErr = err
+        const code = (err as NodeJS.ErrnoException)?.code
+        if (
+          isWindows &&
+          (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') &&
+          attempt < maxAttempts - 1
+        ) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * (attempt + 1))
+          continue
+        }
+        throw err
+      }
+    }
+    throw lastErr
   }
 
   /**
@@ -420,89 +500,93 @@ export class ThumbnailDiskCache {
   }
 
   /**
-   * Returns all demonstrably app-owned `.thumb` files in cache directory.
+   * Returns all demonstrably app-owned disk entries (both .thumb and .thumb_tmp_ files)
+   * in the cache directory.
    */
-  private getOwnedThumbnailEntries(): Array<{
-    name: string
-    fullPath: string
-    size: number
-    mtimeMs: number
-  }> {
-    const entries: Array<{
-      name: string
-      fullPath: string
-      size: number
-      mtimeMs: number
-    }> = []
-    if (!existsSync(this.cacheDir)) return entries
+  private getOwnedDiskEntries(): {
+    thumbs: Array<{ name: string; fullPath: string; size: number; mtimeMs: number }>
+    stagingBytes: number
+    totalOwnedBytes: number
+  } {
+    const thumbs: Array<{ name: string; fullPath: string; size: number; mtimeMs: number }> = []
+    let stagingBytes = 0
+    let totalOwnedBytes = 0
+
+    if (!existsSync(this.cacheDir)) {
+      return { thumbs, stagingBytes, totalOwnedBytes: 0 }
+    }
 
     try {
       const files = readdirSync(this.cacheDir)
       for (const file of files) {
-        // Strictly only touch valid 64-hex .thumb files
         if (/^[0-9a-fA-F]{64}\.thumb$/.test(file)) {
           const fullPath = join(this.cacheDir, file)
           try {
             if (dirname(fullPath) === this.cacheDir) {
               const st = lstatSync(fullPath)
               if (st.isFile() && !st.isSymbolicLink() && !st.isDirectory()) {
-                entries.push({
+                thumbs.push({
                   name: file,
                   fullPath,
                   size: st.size,
                   mtimeMs: st.mtimeMs
                 })
+                totalOwnedBytes += st.size
               }
             }
           } catch {
-            // skip if stat fails
+            // skip
+          }
+        } else if (
+          /^\.thumb_tmp_\d+_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+            file
+          )
+        ) {
+          const fullPath = join(this.cacheDir, file)
+          try {
+            if (dirname(fullPath) === this.cacheDir) {
+              const st = lstatSync(fullPath)
+              if (st.isFile() && !st.isSymbolicLink() && !st.isDirectory()) {
+                stagingBytes += st.size
+                totalOwnedBytes += st.size
+              }
+            }
+          } catch {
+            // skip
           }
         }
       }
     } catch {
       // ignore
     }
-    return entries
+
+    return { thumbs, stagingBytes, totalOwnedBytes }
   }
 
   /**
    * Reserves capacity in the cache before staging/publication.
    * Evicts oldest app-owned `.thumb` files if needed.
+   * Counts existing target bytes and staging bytes.
    * Throws if the required capacity exceeds total budget or eviction fails to free enough space.
    */
-  private reserveCapacity(neededBytes: number, excludingKey?: string): void {
+  private reserveCapacity(neededBytes: number): void {
     if (neededBytes > this.maxSizeBytes) {
       throw new Error(
         `Required thumbnail capacity (${neededBytes} bytes) exceeds total disk cache budget (${this.maxSizeBytes} bytes)`
       )
     }
 
-    const entries = this.getOwnedThumbnailEntries()
-    let currentBytes = 0
-    const evictable: Array<{
-      name: string
-      fullPath: string
-      size: number
-      mtimeMs: number
-    }> = []
-
-    for (const entry of entries) {
-      if (excludingKey && entry.name === `${excludingKey}.thumb`) {
-        // Target entry will be overwritten atomically
-        continue
-      }
-      currentBytes += entry.size
-      evictable.push(entry)
-    }
+    const { thumbs, totalOwnedBytes } = this.getOwnedDiskEntries()
+    let currentBytes = totalOwnedBytes
 
     if (currentBytes + neededBytes <= this.maxSizeBytes) {
       return
     }
 
     // Sort by mtime ascending (oldest first)
-    evictable.sort((a, b) => a.mtimeMs - b.mtimeMs)
+    thumbs.sort((a, b) => a.mtimeMs - b.mtimeMs)
 
-    for (const entry of evictable) {
+    for (const entry of thumbs) {
       if (currentBytes + neededBytes <= this.maxSizeBytes) {
         break
       }
