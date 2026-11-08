@@ -1686,3 +1686,267 @@ input:focus-visible {
   font-style: italic;
   font-size: 11px;
 }
+
+/* Stage 5B: Photo Review, Ratings, Flags & Collections */
+
+.photo-badges-overlay {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: flex;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.badge-rating {
+  background-color: rgba(0, 0, 0, 0.75);
+  color: #e5c07b;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.badge-flag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badge-flag-pick {
+  background-color: rgba(35, 134, 54, 0.9);
+  color: #ffffff;
+}
+
+.badge-flag-reject {
+  background-color: rgba(218, 54, 51, 0.9);
+  color: #ffffff;
+}
+
+.photos-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.filter-select {
+  background-color: var(--bg-input);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.filter-select:focus {
+  border-color: var(--accent-primary);
+}
+
+.review-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.review-control-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.control-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.rating-star-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-star {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease;
+}
+
+.btn-star:hover {
+  color: #e5c07b;
+}
+
+.btn-star.active {
+  color: #e5c07b;
+}
+
+.btn-clear-rating {
+  background: none;
+  border: none;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: underline;
+  margin-left: 8px;
+}
+
+.btn-clear-rating:hover {
+  color: var(--text-main);
+}
+
+.flag-buttons-group {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-flag {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s ease;
+}
+
+.btn-flag:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.btn-flag.active {
+  border-color: var(--accent-primary);
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.btn-flag-pick.active {
+  background-color: rgba(35, 134, 54, 0.2);
+  border-color: #238636;
+  color: #3fb950;
+}
+
+.btn-flag-reject.active {
+  background-color: rgba(218, 54, 51, 0.2);
+  border-color: #da3633;
+  color: #f85149;
+}
+
+.collections-row {
+  margin-top: 4px;
+}
+
+.collections-management {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memberships-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.membership-tag {
+  background-color: var(--bg-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-main);
+}
+
+.btn-remove-membership {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.btn-remove-membership:hover {
+  color: #f85149;
+}
+
+.no-memberships {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.add-membership-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.select-collection {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  flex: 1;
+}
+
+.create-collection-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.input-collection-name {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  flex: 1;
+}
+
+.error-text {
+  color: #f85149;
+  font-size: 11px;
+}

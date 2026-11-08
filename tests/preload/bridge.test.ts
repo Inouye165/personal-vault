@@ -70,7 +70,15 @@ describe('preload bridge', () => {
         'getPhotosPage',
         'getThumbnail',
         'cancelThumbnail',
-        'getPhotosDiagnostics'
+        'getPhotosDiagnostics',
+        'setPhotoAnnotation',
+        'getPhotoAnnotation',
+        'listCollections',
+        'createCollection',
+        'renameCollection',
+        'addCollectionMember',
+        'removeCollectionMember',
+        'getPhotoMemberships'
       ].sort()
     )
   })

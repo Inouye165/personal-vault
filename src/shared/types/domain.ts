@@ -52,3 +52,6 @@ export interface SourceDirectory {
   readonly lastScanAt?: string | null
   readonly isReadOnly: true
 }
+
+export type PhotoRating = 1 | 2 | 3 | 4 | 5 | null
+export type PhotoFlag = 'none' | 'pick' | 'reject'

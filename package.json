@@ -22,6 +22,8 @@
     "verify:vault:unpacked": "node scripts/verify-electron-vault-import.mjs --mode=unpacked",
     "verify:photos": "node scripts/verify-electron-photos.mjs",
     "verify:photos:unpacked": "node scripts/verify-electron-photos.mjs --mode=unpacked",
+    "verify:photo-review": "node scripts/verify-electron-photo-review.mjs",
+    "verify:photo-review:unpacked": "node scripts/verify-electron-photo-review.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

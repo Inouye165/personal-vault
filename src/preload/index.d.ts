@@ -38,7 +38,23 @@ import type {
   ThumbnailResult,
   CancelThumbnailRequest,
   CancelThumbnailResponse,
-  PhotosDiagnosticsResponse
+  PhotosDiagnosticsResponse,
+  SetPhotoAnnotationRequest,
+  SetPhotoAnnotationResponse,
+  GetPhotoAnnotationRequest,
+  GetPhotoAnnotationResponse,
+  CreateCollectionRequest,
+  CreateCollectionResponse,
+  RenameCollectionRequest,
+  RenameCollectionResponse,
+  ListCollectionsRequest,
+  ListCollectionsResponse,
+  AddCollectionMemberRequest,
+  AddCollectionMemberResponse,
+  RemoveCollectionMemberRequest,
+  RemoveCollectionMemberResponse,
+  GetPhotoMembershipsRequest,
+  GetPhotoMembershipsResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -75,6 +91,16 @@ export interface VaultApi {
   getThumbnail: (request: GetThumbnailRequest) => Promise<ThumbnailResult>
   cancelThumbnail: (request: CancelThumbnailRequest) => Promise<CancelThumbnailResponse>
   getPhotosDiagnostics: () => Promise<PhotosDiagnosticsResponse>
+  setPhotoAnnotation: (request: SetPhotoAnnotationRequest) => Promise<SetPhotoAnnotationResponse>
+  getPhotoAnnotation: (request: GetPhotoAnnotationRequest) => Promise<GetPhotoAnnotationResponse>
+  listCollections: (request?: ListCollectionsRequest) => Promise<ListCollectionsResponse>
+  createCollection: (request: CreateCollectionRequest) => Promise<CreateCollectionResponse>
+  renameCollection: (request: RenameCollectionRequest) => Promise<RenameCollectionResponse>
+  addCollectionMember: (request: AddCollectionMemberRequest) => Promise<AddCollectionMemberResponse>
+  removeCollectionMember: (
+    request: RemoveCollectionMemberRequest
+  ) => Promise<RemoveCollectionMemberResponse>
+  getPhotoMemberships: (request: GetPhotoMembershipsRequest) => Promise<GetPhotoMembershipsResponse>
 }
 
 declare global {

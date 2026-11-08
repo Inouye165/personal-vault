@@ -353,3 +353,30 @@ src/
       - Monotonic generation tokens incremented on refresh and unmount, with revision-bound in-flight request tracking ensuring older delayed completions cannot overwrite newer cells or clear newer request bookkeeping.
       - Selection state and compact metadata details panel reporting recorded facts (filename, absolute source path, byte size, filesystem times, hash provenance) and explicit "Unknown" for absent capture dates/locations.
       - Header search disabled with clear Stage 6 availability label.
+
+13. **User Review Tools: Ratings, Flags, and Custom Collections (Stage 5B)**:
+    - **Inviolable Principle — Source Preservation**:
+      - Rating, flagging, or adding/removing collection memberships alters organization metadata only.
+      - Reject is strictly a review annotation; source photographs and vault copies are never touched, altered, moved, or deleted.
+    - **Separation of Facts vs. Inferences**:
+      - Recorded facts (filename, source path, sizes, filesystem timestamps, verified SHA-256) remain immutable.
+      - Ratings (1–5 stars or null) and review flags (Pick, Reject, None) are explicit user review annotations.
+    - **Catalog Schema Expansion (Migration 7)**:
+      - `photo_annotations`: tracks `file_location_id`, `discovery_observation_id`, `content_sha256`, `rating`, `flag`, monotonic `version`, and `is_current`.
+      - `collections`: stores custom named collections with `name`, `normalized_name` (1–80 chars, trimmed, no control characters, case-insensitive unique constraint).
+      - `collection_memberships`: records active memberships (`collection_id`, `file_location_id`, `discovery_observation_id`, `content_sha256`, `is_current`).
+    - **Portable Review Journal**:
+      - Stored in app-owned storage (`<userData>/annotations/review-journal.jsonl`) with ownership marker (`.pv_annotations_owner`).
+      - Append-only JSONL format recording all annotation and collection lifecycle events with full provenance and fsync durability.
+      - Crash recovery: truncates trailing malformed/interrupted lines upon startup.
+      - Atomicity: synchronous SQLite transactions and journal appends execute together in try/catch blocks; if journal write fails (`ENOSPC`), SQLite transaction rolls back completely.
+    - **Concurrency & Rescan Reconciliation**:
+      - Annotations bound to location and content revision: `rev:<discoveryId>:<byteSize>:<mtime>:<hash>`.
+      - Unchanged rescan: annotations preserved without version change.
+      - Touched without change: verified content SHA-256 match preserves active annotation across discovery observations.
+      - Changed content: invalidated active annotation presents photo as unreviewed, while preserving historical records.
+      - Optimistic concurrency: `setPhotoAnnotation` verifies expected revision string and expected version; stale requests reject atomically with conflict errors.
+    - **Pure SQL Filtering & Grid Refill**:
+      - Rating filter (`all`, `unrated`, `1`..`5` stars), Flag filter (`all`, `none`, `pick`, `reject`), and Collection filter combined with `AND` in SQL before pagination.
+      - Out-of-filter edit handling: editing rating or flag under an active filter immediately updates the item, smoothly removes it from the filtered view, clears/updates selection, and refills the page from the next matching database record so the grid remains full.
+      - Explicit "Reset filters" action returning directly to unfiltered browsing.

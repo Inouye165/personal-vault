@@ -29,7 +29,15 @@ export const IPC_CHANNELS = {
   PHOTOS_GET_PAGE: 'photos:get-page',
   PHOTOS_GET_THUMBNAIL: 'photos:get-thumbnail',
   PHOTOS_CANCEL_THUMBNAIL: 'photos:cancel-thumbnail',
-  PHOTOS_GET_DIAGNOSTICS: 'photos:get-diagnostics'
+  PHOTOS_GET_DIAGNOSTICS: 'photos:get-diagnostics',
+  PHOTOS_SET_ANNOTATION: 'photos:set-annotation',
+  PHOTOS_GET_ANNOTATION: 'photos:get-annotation',
+  COLLECTIONS_LIST: 'collections:list',
+  COLLECTIONS_CREATE: 'collections:create',
+  COLLECTIONS_RENAME: 'collections:rename',
+  COLLECTIONS_ADD_MEMBER: 'collections:add-member',
+  COLLECTIONS_REMOVE_MEMBER: 'collections:remove-member',
+  COLLECTIONS_GET_MEMBERSHIPS_FOR_PHOTO: 'collections:get-memberships-for-photo'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

@@ -28,6 +28,7 @@ export interface CatalogDatabaseOptions {
    * Defaults to false.
    */
   readonly readOnly?: boolean
+  readonly journal?: import('../annotations/journal').AnnotationJournal
 }
 
 export interface SourceRecord {
@@ -55,6 +56,9 @@ export interface CatalogFileRecord {
   readonly lastSeenAtMs: number
   readonly activeHash: string | null
   readonly activeHashVerifiedAtMs: number | null
+  readonly rating?: number | null
+  readonly flag?: 'none' | 'pick' | 'reject'
+  readonly annotationVersion?: number
 }
 
 export interface DiscoveryObservationRecord {
@@ -116,6 +120,9 @@ export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly category?: 'photo' | 'document'
   readonly hasActiveHash?: boolean
   readonly sha256?: string
+  readonly ratingFilter?: 'all' | 'unrated' | '1' | '2' | '3' | '4' | '5'
+  readonly flagFilter?: 'all' | 'none' | 'pick' | 'reject'
+  readonly collectionId?: number | null
 }
 
 export type ScanJobStatus =
@@ -434,4 +441,65 @@ export interface VaultImportItemDetail {
   readonly isDiscoveryCurrent: boolean
   readonly isHashActive: boolean
   readonly isPreferred?: boolean
+}
+
+// ==========================================
+// Stage 5B: Photo Review & Collections Types
+// ==========================================
+
+export interface CreateCollectionInput {
+  readonly name: string
+}
+
+export interface RenameCollectionInput {
+  readonly collectionId: number
+  readonly name: string
+}
+
+export interface CatalogCollectionRecord {
+  readonly id: number
+  readonly name: string
+  readonly normalizedName: string
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+  readonly photoCount?: number
+}
+
+export interface AddCollectionMemberInput {
+  readonly collectionId: number
+  readonly fileLocationId: number
+}
+
+export interface RemoveCollectionMemberInput {
+  readonly collectionId: number
+  readonly fileLocationId: number
+}
+
+export interface CatalogCollectionMembershipRecord {
+  readonly id: number
+  readonly collectionId: number
+  readonly collectionName?: string
+  readonly fileLocationId: number
+  readonly createdAtMs: number
+}
+
+export interface SetPhotoAnnotationInput {
+  readonly fileLocationId: number
+  readonly expectedRevision: string
+  readonly expectedVersion: number
+  readonly rating: number | null
+  readonly flag: 'none' | 'pick' | 'reject'
+}
+
+export interface CatalogPhotoAnnotationRecord {
+  readonly id: number
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly contentSha256: string | null
+  readonly rating: number | null
+  readonly flag: 'none' | 'pick' | 'reject'
+  readonly version: number
+  readonly isCurrent: boolean
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
 }

@@ -114,9 +114,22 @@ Verification (Substage 5A): reviewer verification passed at `951fd25`: **503 pas
 - [x] Comprehensive verification suite in built and unpacked modes (`scripts/verify-electron-photos.mjs`, `verify:photos`, `verify:photos:unpacked`) with 19/19 checks passed: 10,000-photo scale test exercising actual Photos UI with real decodable image files and actual fixture timestamps, cold scrolling, warm reversal, distant jumps, return to evicted pages with verified image loading (`complete && naturalWidth > 0`) matched to expected cells and zero pending/error cards at each checkpoint, true `requestAnimationFrame` frame interval p95 measurement (4.30 ms <= 33 ms target) continuously sampled across the scroll workload, continuous main process event-loop delay measurement inside main (p95 57.38 ms [built] / 52.20 ms [unpacked] <= 100 ms limit), terminating worker capacity counting ensuring live workers never exceed 2, real active/queued cancellation capacity recovery, deterministic publication interruption observed at boundary with clean restart, new decode, and subsequent cache reuse, hardened cache root/ancestor containment and dynamic separation validation, and 0 re-decodes on cache reuse proven via diagnostics.
 - [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched.
 
-### Substage 5B: Ratings, Flags, and Custom Collections (Planned)
+### Substage 5B: Ratings, Flags, and Custom Collections
 
-- [ ] User review tools: flags, 1–5 star ratings, and custom collections.
+Status: **implementation complete; awaiting independent review on `feat/stage-5b-photo-review`**.
+
+Verification: 595 passed across 36 test files (exit code 0), strict typecheck (exit code 0), ESLint (exit code 0), Prettier formatting check (exit code 0), production bundle build (exit code 0), unpacked binary build (exit code 0), real Electron photo review verification in built and unpacked modes (`verify:photo-review`, `verify:photo-review:unpacked` — 13/13 checks passed each, exit code 0), photo browsing verification (`verify:photos`, `verify:photos:unpacked` — 19/19 checks passed each, exit code 0), duplicate review (`verify:duplicates` — 18/18 checks passed, exit code 0), scan workflow (`verify:scan` — 14/14 checks passed, exit code 0), SQLite catalog (`verify:sqlite` — 8/8 checks passed, exit code 0), real Electron smoke checks in built and unpacked modes (`smoke:built`, `smoke:unpacked` — passed, exit code 0), and source preservation invariance confirmed across all checks.
+
+- [x] Photo ratings: unrated (null) or 1–5 stars with toggle/clearing, optimistic UI updates, and monotonic version increments.
+- [x] Review flags: mutually exclusive None, Pick, Reject. Reject is strictly a review annotation; source photographs and vault copies are never touched, altered, moved, or deleted.
+- [x] Custom collections: create (1–80 chars, trimmed, no control characters, case-insensitive unique constraint), rename, add photo membership, and remove membership. Removing membership alters organization metadata only.
+- [x] Pure SQL filtering before pagination: Rating filter (`all`, `unrated`, `1`..`5` stars), Flag filter (`all`, `none`, `pick`, `reject`), and Collection filter (`all` or selected collection ID), combined with `AND` in SQL.
+- [x] Out-of-filter edit handling: editing rating or flag under an active filter immediately updates the item, smoothly removes it from the filtered view, clears/updates selection, and refills the grid from the next matching database record.
+- [x] Explicit "Reset filters" action returning directly to unfiltered browsing.
+- [x] Portable review journal (`<userData>/annotations/review-journal.jsonl`) with ownership marker (`.pv_annotations_owner`), append-only JSONL format, fsync durability, crash recovery from trailing partial writes, and transaction atomicity with SQLite rollback on journal failure.
+- [x] Concurrency and rescan reconciliation: annotations bound to location and content revision (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`); unchanged rescan preserves annotations; touched with identical verified hash preserves; changed content invalidates active annotation and presents as unreviewed while preserving prior history; unhashed binds to observation. Stale writes rejected atomically with conflict errors.
+- [x] Comprehensive real Electron verification suite in built and unpacked modes (`scripts/verify-electron-photo-review.mjs`, `verify:photo-review`, `verify:photo-review:unpacked` — 13/13 checks passed each, exit code 0).
+- [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched across all tests (including rejected items).
 
 ### Substage 5C: Visual Similarity Review (Planned)
 

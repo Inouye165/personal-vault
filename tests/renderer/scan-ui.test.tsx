@@ -7,138 +7,139 @@ import type { ScanJobProgress } from '../../src/shared/validation/ipc-schemas.js
 describe('Stage 2D — Scan Job UI Integration', () => {
   let progressCallback: ((progress: ScanJobProgress) => void) | null = null
 
-  const mockApi = (): VaultApi => ({
-    getAppInfo: vi.fn(async () => ({
-      name: 'Personal Vault',
-      version: '0.1.0',
-      platform: 'win32',
-      isPackaged: false
-    })),
-    getVaultStatus: vi.fn(async () => ({ sourceCount: 0, itemCount: 0, isReady: true })),
-    setTab: vi.fn(async () => true),
-    selectRoots: vi.fn(async () => ({ cancelled: false, rootPaths: ['D:/photos'] })),
-    startScan: vi.fn(async () => ({
-      success: true,
-      job: {
-        jobId: 1,
-        status: 'running' as const,
-        phase: 'discovery' as const,
-        roots: ['D:/photos'],
-        discoveredCount: 0,
-        hashedCount: 0,
-        totalFilesToHash: 0,
-        totalBytes: 0,
-        hashedBytes: 0,
-        skippedCount: 0,
-        errorCount: 0,
-        errors: [],
-        startedAtMs: 1000,
-        updatedAtMs: 1000,
-        completedAtMs: null
-      }
-    })),
-    pauseScan: vi.fn(async () => ({ success: true })),
-    resumeScan: vi.fn(async () => ({ success: true })),
-    cancelScan: vi.fn(async () => ({ success: true })),
-    getActiveScanJob: vi.fn(async () => ({ job: null })),
-    getLatestScanJob: vi.fn(async () => ({ job: null })),
-    dismissScanJob: vi.fn(async () => ({ success: true })),
-    onScanProgress: vi.fn((cb) => {
-      progressCallback = cb
-      return () => {
-        progressCallback = null
-      }
-    }),
-    getDuplicateGroups: vi.fn(async () => ({
-      items: [],
-      totalCount: 0,
-      offset: 0,
-      limit: 20,
-      hasMore: false
-    })),
-    getDuplicateGroupMembers: vi.fn(async () => ({
-      sha256: 'a'.repeat(64),
-      byteSize: 100,
-      groupSignature: 'sig',
-      reviewStatus: 'unreviewed' as const,
-      preferredLocationId: null,
-      hasStaleDecision: false,
-      items: [],
-      totalCount: 0,
-      offset: 0,
-      limit: 50,
-      hasMore: false
-    })),
-    setDuplicateReview: vi.fn(async () => ({
-      sha256: 'a'.repeat(64),
-      byteSize: 100,
-      status: 'reviewed' as const,
-      preferredLocationId: null,
-      groupSignature: 'sig',
-      reviewedAtMs: 1000
-    })),
-    selectVaultDirectory: vi.fn(async () => ({ selectedDirectory: null })),
-    initializeVault: vi.fn(async () => ({
-      vault: {
-        formatVersion: 1 as const,
-        vaultId: 'v-1',
-        vaultName: 'Vault',
-        createdAtMs: Date.now(),
-        appVersion: '0.1.0'
-      }
-    })),
-    getActiveVault: vi.fn(async () => ({ vault: null })),
-    setActiveVault: vi.fn(async () => ({
-      vault: { vaultId: 'v-1', vaultPath: 'D:/vault', name: 'Vault', createdAtMs: Date.now() }
-    })),
-    getImportCandidates: vi.fn(async () => ({
-      items: [],
-      totalCount: 0,
-      offset: 0,
-      limit: 50,
-      hasMore: false
-    })),
-    startImport: vi.fn(async () => ({
-      job: {
-        id: 'j-1',
-        vaultId: 'v-1',
-        status: 'running' as const,
-        totalFiles: 0,
-        totalBytes: 0,
-        copiedFiles: 0,
-        copiedBytes: 0,
-        verifiedFiles: 0,
-        failedFiles: 0,
-        startedAtMs: Date.now()
-      }
-    })),
-    pauseImport: vi.fn(async () => ({ success: true })),
-    resumeImport: vi.fn(async () => ({ success: true })),
-    cancelImport: vi.fn(async () => ({ success: true })),
-    getActiveImportJob: vi.fn(async () => ({ job: null })),
-    getLatestImportJob: vi.fn(async () => ({ job: null })),
-    onImportProgress: vi.fn(() => () => {}),
-    getPhotosPage: vi.fn(async () => ({
-      items: [],
-      totalCount: 0,
-      offset: 0,
-      limit: 50,
-      hasMore: false
-    })),
-    getThumbnail: vi.fn(async () => ({
-      status: 'missing' as const,
-      locationId: 1,
-      reason: 'mock'
-    })),
-    cancelThumbnail: vi.fn(async () => ({ success: true, locationId: 1 })),
-    getPhotosDiagnostics: vi.fn(async () => ({
-      activeWorkers: 0,
-      queuedJobs: 0,
-      totalDecodes: 0,
-      cacheHits: 0,
-      cacheMisses: 0
-    }))
-  })
+  const mockApi = (): VaultApi =>
+    ({
+      getAppInfo: vi.fn(async () => ({
+        name: 'Personal Vault',
+        version: '0.1.0',
+        platform: 'win32',
+        isPackaged: false
+      })),
+      getVaultStatus: vi.fn(async () => ({ sourceCount: 0, itemCount: 0, isReady: true })),
+      setTab: vi.fn(async () => true),
+      selectRoots: vi.fn(async () => ({ cancelled: false, rootPaths: ['D:/photos'] })),
+      startScan: vi.fn(async () => ({
+        success: true,
+        job: {
+          jobId: 1,
+          status: 'running' as const,
+          phase: 'discovery' as const,
+          roots: ['D:/photos'],
+          discoveredCount: 0,
+          hashedCount: 0,
+          totalFilesToHash: 0,
+          totalBytes: 0,
+          hashedBytes: 0,
+          skippedCount: 0,
+          errorCount: 0,
+          errors: [],
+          startedAtMs: 1000,
+          updatedAtMs: 1000,
+          completedAtMs: null
+        }
+      })),
+      pauseScan: vi.fn(async () => ({ success: true })),
+      resumeScan: vi.fn(async () => ({ success: true })),
+      cancelScan: vi.fn(async () => ({ success: true })),
+      getActiveScanJob: vi.fn(async () => ({ job: null })),
+      getLatestScanJob: vi.fn(async () => ({ job: null })),
+      dismissScanJob: vi.fn(async () => ({ success: true })),
+      onScanProgress: vi.fn((cb) => {
+        progressCallback = cb
+        return () => {
+          progressCallback = null
+        }
+      }),
+      getDuplicateGroups: vi.fn(async () => ({
+        items: [],
+        totalCount: 0,
+        offset: 0,
+        limit: 20,
+        hasMore: false
+      })),
+      getDuplicateGroupMembers: vi.fn(async () => ({
+        sha256: 'a'.repeat(64),
+        byteSize: 100,
+        groupSignature: 'sig',
+        reviewStatus: 'unreviewed' as const,
+        preferredLocationId: null,
+        hasStaleDecision: false,
+        items: [],
+        totalCount: 0,
+        offset: 0,
+        limit: 50,
+        hasMore: false
+      })),
+      setDuplicateReview: vi.fn(async () => ({
+        sha256: 'a'.repeat(64),
+        byteSize: 100,
+        status: 'reviewed' as const,
+        preferredLocationId: null,
+        groupSignature: 'sig',
+        reviewedAtMs: 1000
+      })),
+      selectVaultDirectory: vi.fn(async () => ({ selectedDirectory: null })),
+      initializeVault: vi.fn(async () => ({
+        vault: {
+          formatVersion: 1 as const,
+          vaultId: 'v-1',
+          vaultName: 'Vault',
+          createdAtMs: Date.now(),
+          appVersion: '0.1.0'
+        }
+      })),
+      getActiveVault: vi.fn(async () => ({ vault: null })),
+      setActiveVault: vi.fn(async () => ({
+        vault: { vaultId: 'v-1', vaultPath: 'D:/vault', name: 'Vault', createdAtMs: Date.now() }
+      })),
+      getImportCandidates: vi.fn(async () => ({
+        items: [],
+        totalCount: 0,
+        offset: 0,
+        limit: 50,
+        hasMore: false
+      })),
+      startImport: vi.fn(async () => ({
+        job: {
+          id: 'j-1',
+          vaultId: 'v-1',
+          status: 'running' as const,
+          totalFiles: 0,
+          totalBytes: 0,
+          copiedFiles: 0,
+          copiedBytes: 0,
+          verifiedFiles: 0,
+          failedFiles: 0,
+          startedAtMs: Date.now()
+        }
+      })),
+      pauseImport: vi.fn(async () => ({ success: true })),
+      resumeImport: vi.fn(async () => ({ success: true })),
+      cancelImport: vi.fn(async () => ({ success: true })),
+      getActiveImportJob: vi.fn(async () => ({ job: null })),
+      getLatestImportJob: vi.fn(async () => ({ job: null })),
+      onImportProgress: vi.fn(() => () => {}),
+      getPhotosPage: vi.fn(async () => ({
+        items: [],
+        totalCount: 0,
+        offset: 0,
+        limit: 50,
+        hasMore: false
+      })),
+      getThumbnail: vi.fn(async () => ({
+        status: 'missing' as const,
+        locationId: 1,
+        reason: 'mock'
+      })),
+      cancelThumbnail: vi.fn(async () => ({ success: true, locationId: 1 })),
+      getPhotosDiagnostics: vi.fn(async () => ({
+        activeWorkers: 0,
+        queuedJobs: 0,
+        totalDecodes: 0,
+        cacheHits: 0,
+        cacheMisses: 0
+      }))
+    }) as unknown as VaultApi
 
   beforeEach(() => {
     progressCallback = null

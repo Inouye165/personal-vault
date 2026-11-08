@@ -9,6 +9,7 @@ import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
 import { VaultImportCoordinator } from './services/vault'
 import { ThumbnailCoordinator } from './services/thumbnails'
+import { AnnotationJournal } from './services/annotations'
 
 function logStartup(message: string): void {
   try {
@@ -136,9 +137,14 @@ if (!app.requestSingleInstanceLock()) {
       setupSecurityPolicies(location)
       logStartup('setupSecurityPolicies completed')
 
+      const annotationsDir = join(app.getPath('userData'), 'annotations')
+      const journal = new AnnotationJournal({ storageDir: annotationsDir })
+      await journal.initialize()
+      logStartup('journal.initialize completed')
+
       const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
       logStartup(`Opening catalog at ${catalogPath}`)
-      catalog = CatalogDatabase.open({ catalogPath })
+      catalog = CatalogDatabase.open({ catalogPath, journal })
       logStartup('CatalogDatabase.open completed')
 
       coordinator = new ScanJobCoordinator({ catalog })

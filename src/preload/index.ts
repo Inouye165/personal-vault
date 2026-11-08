@@ -44,6 +44,22 @@ import {
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
+  SetPhotoAnnotationRequestSchema,
+  SetPhotoAnnotationResponseSchema,
+  GetPhotoAnnotationRequestSchema,
+  GetPhotoAnnotationResponseSchema,
+  CreateCollectionRequestSchema,
+  CreateCollectionResponseSchema,
+  RenameCollectionRequestSchema,
+  RenameCollectionResponseSchema,
+  ListCollectionsRequestSchema,
+  ListCollectionsResponseSchema,
+  AddCollectionMemberRequestSchema,
+  AddCollectionMemberResponseSchema,
+  RemoveCollectionMemberRequestSchema,
+  RemoveCollectionMemberResponseSchema,
+  GetPhotoMembershipsRequestSchema,
+  GetPhotoMembershipsResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -84,7 +100,23 @@ import {
   type ThumbnailResult,
   type CancelThumbnailRequest,
   type CancelThumbnailResponse,
-  type PhotosDiagnosticsResponse
+  type PhotosDiagnosticsResponse,
+  type SetPhotoAnnotationRequest,
+  type SetPhotoAnnotationResponse,
+  type GetPhotoAnnotationRequest,
+  type GetPhotoAnnotationResponse,
+  type CreateCollectionRequest,
+  type CreateCollectionResponse,
+  type RenameCollectionRequest,
+  type RenameCollectionResponse,
+  type ListCollectionsRequest,
+  type ListCollectionsResponse,
+  type AddCollectionMemberRequest,
+  type AddCollectionMemberResponse,
+  type RemoveCollectionMemberRequest,
+  type RemoveCollectionMemberResponse,
+  type GetPhotoMembershipsRequest,
+  type GetPhotoMembershipsResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -461,6 +493,123 @@ const api: VaultApi = {
     const result = validatePayload(PhotosDiagnosticsResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getPhotosDiagnostics response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async setPhotoAnnotation(
+    request: SetPhotoAnnotationRequest
+  ): Promise<SetPhotoAnnotationResponse> {
+    const parsed = validatePayload(SetPhotoAnnotationRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid setPhotoAnnotation request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_SET_ANNOTATION, parsed.data)
+    const result = validatePayload(SetPhotoAnnotationResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid setPhotoAnnotation response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getPhotoAnnotation(
+    request: GetPhotoAnnotationRequest
+  ): Promise<GetPhotoAnnotationResponse> {
+    const parsed = validatePayload(GetPhotoAnnotationRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getPhotoAnnotation request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_GET_ANNOTATION, parsed.data)
+    const result = validatePayload(GetPhotoAnnotationResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotoAnnotation response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listCollections(request: ListCollectionsRequest = {}): Promise<ListCollectionsResponse> {
+    const parsed = validatePayload(ListCollectionsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid listCollections request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.COLLECTIONS_LIST, parsed.data)
+    const result = validatePayload(ListCollectionsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listCollections response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async createCollection(request: CreateCollectionRequest): Promise<CreateCollectionResponse> {
+    const parsed = validatePayload(CreateCollectionRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid createCollection request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.COLLECTIONS_CREATE, parsed.data)
+    const result = validatePayload(CreateCollectionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid createCollection response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async renameCollection(request: RenameCollectionRequest): Promise<RenameCollectionResponse> {
+    const parsed = validatePayload(RenameCollectionRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid renameCollection request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.COLLECTIONS_RENAME, parsed.data)
+    const result = validatePayload(RenameCollectionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid renameCollection response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async addCollectionMember(
+    request: AddCollectionMemberRequest
+  ): Promise<AddCollectionMemberResponse> {
+    const parsed = validatePayload(AddCollectionMemberRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid addCollectionMember request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.COLLECTIONS_ADD_MEMBER, parsed.data)
+    const result = validatePayload(AddCollectionMemberResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid addCollectionMember response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async removeCollectionMember(
+    request: RemoveCollectionMemberRequest
+  ): Promise<RemoveCollectionMemberResponse> {
+    const parsed = validatePayload(RemoveCollectionMemberRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid removeCollectionMember request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.COLLECTIONS_REMOVE_MEMBER, parsed.data)
+    const result = validatePayload(RemoveCollectionMemberResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid removeCollectionMember response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getPhotoMemberships(
+    request: GetPhotoMembershipsRequest
+  ): Promise<GetPhotoMembershipsResponse> {
+    const parsed = validatePayload(GetPhotoMembershipsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getPhotoMemberships request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(
+      IPC_CHANNELS.COLLECTIONS_GET_MEMBERSHIPS_FOR_PHOTO,
+      parsed.data
+    )
+    const result = validatePayload(GetPhotoMembershipsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotoMemberships response from main: ${result.error}`)
     }
     return result.data
   }

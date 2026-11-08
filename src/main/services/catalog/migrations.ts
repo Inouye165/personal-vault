@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 6
+export const CURRENT_SCHEMA_VERSION = 7
 
 interface Migration {
   readonly version: number
@@ -381,6 +381,63 @@ const MIGRATIONS: readonly Migration[] = [
         );
 
         CREATE INDEX IF NOT EXISTS idx_vault_import_items_lookup ON vault_import_items(import_id, file_location_id);
+      `)
+    }
+  },
+  {
+    version: 7,
+    name: 'photo_annotations_and_collections',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_annotations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          content_sha256 TEXT CHECK (content_sha256 IS NULL OR length(content_sha256) = 64),
+          rating INTEGER CHECK (rating IS NULL OR (rating >= 1 AND rating <= 5)),
+          flag TEXT NOT NULL DEFAULT 'none' CHECK (flag IN ('none', 'pick', 'reject')),
+          version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_annotations_unique_current
+          ON photo_annotations(file_location_id) WHERE is_current = 1;
+        CREATE INDEX IF NOT EXISTS idx_photo_annotations_current_rating
+          ON photo_annotations(is_current, rating);
+        CREATE INDEX IF NOT EXISTS idx_photo_annotations_current_flag
+          ON photo_annotations(is_current, flag);
+        CREATE INDEX IF NOT EXISTS idx_photo_annotations_location_discovery
+          ON photo_annotations(file_location_id, discovery_observation_id);
+
+        CREATE TABLE IF NOT EXISTS collections (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL UNIQUE,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_collections_name ON collections(name);
+
+        CREATE TABLE IF NOT EXISTS collection_memberships (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          content_sha256 TEXT CHECK (content_sha256 IS NULL OR length(content_sha256) = 64),
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_memberships_unique_current
+          ON collection_memberships(collection_id, file_location_id) WHERE is_current = 1;
+        CREATE INDEX IF NOT EXISTS idx_collection_memberships_location
+          ON collection_memberships(file_location_id, is_current);
+        CREATE INDEX IF NOT EXISTS idx_collection_memberships_collection
+          ON collection_memberships(collection_id, is_current);
       `)
     }
   }

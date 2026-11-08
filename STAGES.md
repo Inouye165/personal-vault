@@ -95,11 +95,11 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 **In progress; Substage 5A complete; independently accepted at `951fd25`.**
 
-| Substage | Deliverable                                                               | Status   | Submission reference | Acceptance reference |
-| -------- | ------------------------------------------------------------------------- | -------- | -------------------- | -------------------- |
-| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete | `5258b0a`            | `951fd25`            |
-| 5B       | User review tools: ratings, flags, and custom collections                 | Planned  | Pending              | Pending              |
-| 5C       | Perceptual hashing and visual similarity review                           | Planned  | Pending              | Pending              |
+| Substage | Deliverable                                                               | Status          | Submission reference         | Acceptance reference |
+| -------- | ------------------------------------------------------------------------- | --------------- | ---------------------------- | -------------------- |
+| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete        | `5258b0a`                    | `951fd25`            |
+| 5B       | User review tools: ratings, flags, and custom collections                 | Awaiting review | `feat/stage-5b-photo-review` | Pending              |
+| 5C       | Perceptual hashing and visual similarity review                           | Planned         | Pending                      | Pending              |
 
 ### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
 
@@ -122,6 +122,22 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 - [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched across all tests.
 
 Exit: users can browse discovered photographs smoothly with bounded memory and secure thumbnails, with ratings and similarity deferred to 5B and 5C.
+
+### Stage 5B - User review tools: ratings, flags, and custom collections
+
+**Awaiting review.** Implemented on `feat/stage-5b-photo-review`.
+
+- [x] Photo ratings: unrated (null) or 1–5 stars with toggle/clearing, optimistic UI updates, and monotonic version increments.
+- [x] Review flags: mutually exclusive None, Pick, Reject. Reject is strictly a review annotation; source photographs and vault copies are never touched, altered, moved, or deleted.
+- [x] Custom collections: create (1–80 chars, trimmed, no control characters, case-insensitive unique constraint), rename, add photo membership, and remove membership. Removing membership alters organization metadata only.
+- [x] Pure SQL filtering before pagination: Rating filter (`all`, `unrated`, `1`..`5` stars), Flag filter (`all`, `none`, `pick`, `reject`), and Collection filter (`all` or selected collection ID), combined with `AND` in SQL.
+- [x] Out-of-filter edit handling: editing rating or flag under an active filter immediately updates the item, smoothly removes it from the filtered view, clears/updates selection, and refills the grid from the next matching database record.
+- [x] Explicit "Reset filters" action returning directly to unfiltered browsing.
+- [x] Portable review journal (`<userData>/annotations/review-journal.jsonl`) with ownership marker (`.pv_annotations_owner`), append-only JSONL format, fsync durability, crash recovery from trailing partial writes, and transaction atomicity with SQLite rollback on journal failure.
+- [x] Concurrency and rescan reconciliation: annotations bound to location and content revision (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`); unchanged rescan preserves annotations; touched with identical verified hash preserves; changed content invalidates active annotation and presents as unreviewed while preserving prior history; unhashed binds to observation. Stale writes rejected atomically with conflict errors.
+- [x] Comprehensive real Electron verification suite in built and unpacked modes (`scripts/verify-electron-photo-review.mjs`, `verify:photo-review`, `verify:photo-review:unpacked` — 13/13 checks passed each, exit code 0): scan -> rate/flag -> collections -> combined filters -> out-of-filter edit -> restart persistence -> rescan simulation (unchanged, touched, changed) -> optimistic write rejection -> disk journal inspection -> source preservation invariance. All 595 tests pass across 36 test files.
+
+Exit: users can rate, flag, group, and filter photos with persistent, portable annotations and guaranteed source file preservation.
 
 ## Stage 6 - Semantic photo search
 

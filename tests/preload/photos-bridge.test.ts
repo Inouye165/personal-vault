@@ -49,7 +49,13 @@ describe('Preload Photos Bridge', () => {
     const res = await api.getPhotosPage({ offset: 0, limit: 50 })
     expect(res.totalCount).toBe(1)
     expect(res.items[0]!.fileName).toBe('photo.jpg')
-    expect(mockIpcRenderer.invoke).toHaveBeenCalledWith('photos:get-page', { offset: 0, limit: 50 })
+    expect(mockIpcRenderer.invoke).toHaveBeenCalledWith('photos:get-page', {
+      offset: 0,
+      limit: 50,
+      ratingFilter: 'all',
+      flagFilter: 'all',
+      collectionId: null
+    })
   })
 
   it('rejects invalid getPhotosPage response from main process', async () => {
@@ -99,5 +105,65 @@ describe('Preload Photos Bridge', () => {
     if (res.status === 'ready') {
       expect(res.dataUrl).toBe('data:image/webp;base64,AAA=')
     }
+  })
+
+  it('validates window.api.setPhotoAnnotation and collection methods across IPC', async () => {
+    const mockIpcRenderer = {
+      invoke: vi.fn().mockImplementation((channel: string) => {
+        if (channel === 'photos:set-annotation') {
+          return Promise.resolve({
+            success: true,
+            annotation: {
+              id: 1,
+              fileLocationId: 10,
+              discoveryObservationId: 100,
+              contentSha256: 'a'.repeat(64),
+              rating: 5,
+              flag: 'pick',
+              version: 1,
+              isCurrent: true,
+              createdAtMs: 1700000000000,
+              updatedAtMs: 1700000000000
+            }
+          })
+        }
+        if (channel === 'collections:create') {
+          return Promise.resolve({
+            collection: {
+              id: 1,
+              name: 'Portraits',
+              normalizedName: 'portraits',
+              createdAtMs: 1700000000000,
+              updatedAtMs: 1700000000000
+            }
+          })
+        }
+        return Promise.resolve({})
+      })
+    }
+
+    vi.doMock('electron', () => ({
+      ipcRenderer: mockIpcRenderer,
+      contextBridge: {
+        exposeInMainWorld: vi.fn()
+      }
+    }))
+
+    const { createPhotosApi } = await import('../../src/preload/photos-api')
+    const api = createPhotosApi(mockIpcRenderer as unknown as IpcRenderer)
+
+    const annRes = await api.setPhotoAnnotation({
+      fileLocationId: 10,
+      expectedRevision: 'rev:1',
+      expectedVersion: 0,
+      rating: 5,
+      flag: 'pick'
+    })
+    expect(annRes.success).toBe(true)
+    expect(annRes.annotation.rating).toBe(5)
+    expect(annRes.annotation.flag).toBe('pick')
+
+    const colRes = await api.createCollection({ name: 'Portraits' })
+    expect(colRes.collection.name).toBe('Portraits')
   })
 })

@@ -66,7 +66,31 @@ import {
   type GetPhotosPageResponse,
   type ThumbnailResult,
   type CancelThumbnailResponse,
-  type PhotosDiagnosticsResponse
+  type PhotosDiagnosticsResponse,
+  SetPhotoAnnotationRequestSchema,
+  SetPhotoAnnotationResponseSchema,
+  GetPhotoAnnotationRequestSchema,
+  GetPhotoAnnotationResponseSchema,
+  CreateCollectionRequestSchema,
+  CreateCollectionResponseSchema,
+  RenameCollectionRequestSchema,
+  RenameCollectionResponseSchema,
+  ListCollectionsRequestSchema,
+  ListCollectionsResponseSchema,
+  AddCollectionMemberRequestSchema,
+  AddCollectionMemberResponseSchema,
+  RemoveCollectionMemberRequestSchema,
+  RemoveCollectionMemberResponseSchema,
+  GetPhotoMembershipsRequestSchema,
+  GetPhotoMembershipsResponseSchema,
+  type SetPhotoAnnotationResponse,
+  type GetPhotoAnnotationResponse,
+  type CreateCollectionResponse,
+  type RenameCollectionResponse,
+  type ListCollectionsResponse,
+  type AddCollectionMemberResponse,
+  type RemoveCollectionMemberResponse,
+  type GetPhotoMembershipsResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -638,7 +662,10 @@ export function registerIpcHandlers({
     const res = catalog.queryFileLocations({
       category: 'photo',
       offset: parsed.data.offset,
-      limit: parsed.data.limit
+      limit: parsed.data.limit,
+      ratingFilter: parsed.data.ratingFilter,
+      flagFilter: parsed.data.flagFilter,
+      collectionId: parsed.data.collectionId
     })
     const validated = validatePayload(GetPhotosPageResponseSchema, res)
     if (!validated.success) {
@@ -717,6 +744,187 @@ export function registerIpcHandlers({
     }
     return validated.data
   })
+
+  // --- Stage 5B: Photo Review & Collections Handlers ---
+
+  handle(IPC_CHANNELS.PHOTOS_SET_ANNOTATION, (raw: unknown): SetPhotoAnnotationResponse => {
+    const parsed = validatePayload(SetPhotoAnnotationRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming SetPhotoAnnotationRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      throw new Error('Catalog unavailable')
+    }
+    const ann = catalog.setPhotoAnnotation({
+      fileLocationId: parsed.data.fileLocationId,
+      expectedRevision: parsed.data.expectedRevision,
+      expectedVersion: parsed.data.expectedVersion,
+      rating: parsed.data.rating,
+      flag: parsed.data.flag
+    })
+    const res: SetPhotoAnnotationResponse = {
+      success: true,
+      annotation: ann
+    }
+    const validated = validatePayload(SetPhotoAnnotationResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SetPhotoAnnotationResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.PHOTOS_GET_ANNOTATION, (raw: unknown): GetPhotoAnnotationResponse => {
+    const parsed = validatePayload(GetPhotoAnnotationRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming GetPhotoAnnotationRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      return { annotation: null }
+    }
+    const ann = catalog.getPhotoAnnotation(parsed.data.fileLocationId)
+    const res: GetPhotoAnnotationResponse = {
+      annotation: ann
+    }
+    const validated = validatePayload(GetPhotoAnnotationResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetPhotoAnnotationResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.COLLECTIONS_LIST, (raw: unknown): ListCollectionsResponse => {
+    const parsed = validatePayload(ListCollectionsRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming ListCollectionsRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      return {
+        items: [],
+        totalCount: 0,
+        offset: parsed.data.offset ?? 0,
+        limit: parsed.data.limit ?? 50,
+        hasMore: false
+      }
+    }
+    const res = catalog.listCollections({
+      offset: parsed.data.offset,
+      limit: parsed.data.limit
+    })
+    const validated = validatePayload(ListCollectionsResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing ListCollectionsResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.COLLECTIONS_CREATE, (raw: unknown): CreateCollectionResponse => {
+    const parsed = validatePayload(CreateCollectionRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming CreateCollectionRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      throw new Error('Catalog unavailable')
+    }
+    const collection = catalog.createCollection({ name: parsed.data.name })
+    const res: CreateCollectionResponse = { collection }
+    const validated = validatePayload(CreateCollectionResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing CreateCollectionResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.COLLECTIONS_RENAME, (raw: unknown): RenameCollectionResponse => {
+    const parsed = validatePayload(RenameCollectionRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming RenameCollectionRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      throw new Error('Catalog unavailable')
+    }
+    const collection = catalog.renameCollection({
+      collectionId: parsed.data.collectionId,
+      name: parsed.data.name
+    })
+    const res: RenameCollectionResponse = { collection }
+    const validated = validatePayload(RenameCollectionResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing RenameCollectionResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.COLLECTIONS_ADD_MEMBER, (raw: unknown): AddCollectionMemberResponse => {
+    const parsed = validatePayload(AddCollectionMemberRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming AddCollectionMemberRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      throw new Error('Catalog unavailable')
+    }
+    const result = catalog.addCollectionMember({
+      collectionId: parsed.data.collectionId,
+      fileLocationId: parsed.data.fileLocationId
+    })
+    const validated = validatePayload(AddCollectionMemberResponseSchema, result)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing AddCollectionMemberResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.COLLECTIONS_REMOVE_MEMBER, (raw: unknown): RemoveCollectionMemberResponse => {
+    const parsed = validatePayload(RemoveCollectionMemberRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming RemoveCollectionMemberRequest in main: ${parsed.error}`)
+    }
+    if (!catalog) {
+      throw new Error('Catalog unavailable')
+    }
+    const result = catalog.removeCollectionMember({
+      collectionId: parsed.data.collectionId,
+      fileLocationId: parsed.data.fileLocationId
+    })
+    const validated = validatePayload(RemoveCollectionMemberResponseSchema, result)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing RemoveCollectionMemberResponse in main: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(
+    IPC_CHANNELS.COLLECTIONS_GET_MEMBERSHIPS_FOR_PHOTO,
+    (raw: unknown): GetPhotoMembershipsResponse => {
+      const parsed = validatePayload(GetPhotoMembershipsRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming GetPhotoMembershipsRequest in main: ${parsed.error}`)
+      }
+      if (!catalog) {
+        return { items: [], totalCount: 0, hasMore: false }
+      }
+      const res = catalog.getCollectionMembershipsForPhoto({
+        fileLocationId: parsed.data.fileLocationId,
+        offset: parsed.data.offset,
+        limit: parsed.data.limit
+      })
+      const mapped = {
+        items: res.items.map((i) => ({
+          id: i.id,
+          collectionId: i.collectionId,
+          collectionName: i.collectionName ?? '',
+          fileLocationId: i.fileLocationId,
+          createdAtMs: i.createdAtMs
+        })),
+        totalCount: res.totalCount,
+        hasMore: res.hasMore
+      }
+      const validated = validatePayload(GetPhotoMembershipsResponseSchema, mapped)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing GetPhotoMembershipsResponse in main: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
 
   if (vaultCoordinator && getMainWindow) {
     vaultCoordinator.onProgress((progress) => {

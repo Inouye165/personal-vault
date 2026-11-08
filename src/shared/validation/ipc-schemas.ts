@@ -428,15 +428,27 @@ export const PhotoItemSchema = z.object({
     .string()
     .regex(/^[a-f0-9]{64}$/i)
     .nullable(),
-  activeHashVerifiedAtMs: z.number().nullable()
+  activeHashVerifiedAtMs: z.number().nullable(),
+  rating: z.number().int().min(1).max(5).nullable().default(null),
+  flag: z.enum(['none', 'pick', 'reject']).default('none'),
+  annotationVersion: z.number().int().nonnegative().default(0)
 })
 export type PhotoItem = z.infer<typeof PhotoItemSchema>
 
+export const PhotoRatingFilterSchema = z.enum(['all', 'unrated', '1', '2', '3', '4', '5'])
+export type PhotoRatingFilter = z.infer<typeof PhotoRatingFilterSchema>
+
+export const PhotoFlagFilterSchema = z.enum(['all', 'none', 'pick', 'reject'])
+export type PhotoFlagFilter = z.infer<typeof PhotoFlagFilterSchema>
+
 export const GetPhotosPageRequestSchema = z.object({
   offset: z.number().int().nonnegative(),
-  limit: z.number().int().positive().max(200)
+  limit: z.number().int().positive().max(200),
+  ratingFilter: PhotoRatingFilterSchema.default('all'),
+  flagFilter: PhotoFlagFilterSchema.default('all'),
+  collectionId: z.number().int().positive().nullable().default(null)
 })
-export type GetPhotosPageRequest = z.infer<typeof GetPhotosPageRequestSchema>
+export type GetPhotosPageRequest = z.input<typeof GetPhotosPageRequestSchema>
 
 export const GetPhotosPageResponseSchema = z.object({
   items: z.array(PhotoItemSchema),
@@ -518,6 +530,224 @@ export const PhotosDiagnosticsResponseSchema = z.object({
   mainEventLoopDelayMeanMs: z.number().nonnegative().optional()
 })
 export type PhotosDiagnosticsResponse = z.infer<typeof PhotosDiagnosticsResponseSchema>
+
+// --- Stage 5B: Photo Review, Annotations, and Custom Collections ---
+
+export const PhotoAnnotationSchema = z.object({
+  id: z.number().int().positive(),
+  fileLocationId: z.number().int().positive(),
+  discoveryObservationId: z.number().int().positive(),
+  contentSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i)
+    .nullable(),
+  rating: z.number().int().min(1).max(5).nullable(),
+  flag: z.enum(['none', 'pick', 'reject']),
+  version: z.number().int().positive(),
+  isCurrent: z.boolean(),
+  createdAtMs: z.number().int().positive(),
+  updatedAtMs: z.number().int().positive()
+})
+export type PhotoAnnotation = z.infer<typeof PhotoAnnotationSchema>
+
+export const SetPhotoAnnotationRequestSchema = z.object({
+  fileLocationId: z.number().int().positive(),
+  expectedRevision: z.string().min(1),
+  expectedVersion: z.number().int().nonnegative(),
+  rating: z.number().int().min(1).max(5).nullable(),
+  flag: z.enum(['none', 'pick', 'reject'])
+})
+export type SetPhotoAnnotationRequest = z.infer<typeof SetPhotoAnnotationRequestSchema>
+
+export const SetPhotoAnnotationResponseSchema = z.object({
+  success: z.boolean(),
+  annotation: PhotoAnnotationSchema
+})
+export type SetPhotoAnnotationResponse = z.infer<typeof SetPhotoAnnotationResponseSchema>
+
+export const GetPhotoAnnotationRequestSchema = z.object({
+  fileLocationId: z.number().int().positive()
+})
+export type GetPhotoAnnotationRequest = z.infer<typeof GetPhotoAnnotationRequestSchema>
+
+export const GetPhotoAnnotationResponseSchema = z.object({
+  annotation: PhotoAnnotationSchema.nullable()
+})
+export type GetPhotoAnnotationResponse = z.infer<typeof GetPhotoAnnotationResponseSchema>
+
+export const CollectionNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .refine(
+    (name) => {
+      for (let i = 0; i < name.length; i++) {
+        const code = name.charCodeAt(i)
+        if ((code >= 0 && code <= 31) || (code >= 127 && code <= 159)) return false
+      }
+      return true
+    },
+    {
+      message: 'Collection name must not contain control characters'
+    }
+  )
+
+export const CollectionItemSchema = z.object({
+  id: z.number().int().positive(),
+  name: CollectionNameSchema,
+  normalizedName: z.string().min(1),
+  createdAtMs: z.number().int().positive(),
+  updatedAtMs: z.number().int().positive(),
+  photoCount: z.number().int().nonnegative().optional()
+})
+export type CollectionItem = z.infer<typeof CollectionItemSchema>
+
+export const CreateCollectionRequestSchema = z.object({
+  name: CollectionNameSchema
+})
+export type CreateCollectionRequest = z.infer<typeof CreateCollectionRequestSchema>
+
+export const CreateCollectionResponseSchema = z.object({
+  collection: CollectionItemSchema
+})
+export type CreateCollectionResponse = z.infer<typeof CreateCollectionResponseSchema>
+
+export const RenameCollectionRequestSchema = z.object({
+  collectionId: z.number().int().positive(),
+  name: CollectionNameSchema
+})
+export type RenameCollectionRequest = z.infer<typeof RenameCollectionRequestSchema>
+
+export const RenameCollectionResponseSchema = z.object({
+  collection: CollectionItemSchema
+})
+export type RenameCollectionResponse = z.infer<typeof RenameCollectionResponseSchema>
+
+export const ListCollectionsRequestSchema = z.object({
+  offset: z.number().int().nonnegative().optional().default(0),
+  limit: z.number().int().positive().max(200).optional().default(50)
+})
+export type ListCollectionsRequest = z.input<typeof ListCollectionsRequestSchema>
+
+export const ListCollectionsResponseSchema = z.object({
+  items: z.array(CollectionItemSchema),
+  totalCount: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  hasMore: z.boolean()
+})
+export type ListCollectionsResponse = z.infer<typeof ListCollectionsResponseSchema>
+
+export const AddCollectionMemberRequestSchema = z.object({
+  collectionId: z.number().int().positive(),
+  fileLocationId: z.number().int().positive()
+})
+export type AddCollectionMemberRequest = z.infer<typeof AddCollectionMemberRequestSchema>
+
+export const AddCollectionMemberResponseSchema = z.object({
+  success: z.boolean(),
+  isNew: z.boolean()
+})
+export type AddCollectionMemberResponse = z.infer<typeof AddCollectionMemberResponseSchema>
+
+export const RemoveCollectionMemberRequestSchema = z.object({
+  collectionId: z.number().int().positive(),
+  fileLocationId: z.number().int().positive()
+})
+export type RemoveCollectionMemberRequest = z.infer<typeof RemoveCollectionMemberRequestSchema>
+
+export const RemoveCollectionMemberResponseSchema = z.object({
+  success: z.boolean()
+})
+export type RemoveCollectionMemberResponse = z.infer<typeof RemoveCollectionMemberResponseSchema>
+
+export const PhotoMembershipItemSchema = z.object({
+  id: z.number().int().positive(),
+  collectionId: z.number().int().positive(),
+  collectionName: z.string().min(1),
+  fileLocationId: z.number().int().positive(),
+  createdAtMs: z.number().int().positive()
+})
+export type PhotoMembershipItem = z.infer<typeof PhotoMembershipItemSchema>
+
+export const GetPhotoMembershipsRequestSchema = z.object({
+  fileLocationId: z.number().int().positive(),
+  offset: z.number().int().nonnegative().optional().default(0),
+  limit: z.number().int().positive().max(200).optional().default(50)
+})
+export type GetPhotoMembershipsRequest = z.input<typeof GetPhotoMembershipsRequestSchema>
+
+export const GetPhotoMembershipsResponseSchema = z.object({
+  items: z.array(PhotoMembershipItemSchema),
+  totalCount: z.number().int().nonnegative(),
+  hasMore: z.boolean()
+})
+export type GetPhotoMembershipsResponse = z.infer<typeof GetPhotoMembershipsResponseSchema>
+
+export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
+  z.object({
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    kind: z.literal('photo_annotation'),
+    locationId: z.number().int().positive(),
+    normalizedPath: z.string().min(1),
+    originalPath: z.string().min(1),
+    byteSize: z.number().int().nonnegative(),
+    filesystemMtimeMs: z.number().nullable(),
+    activeHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/i)
+      .nullable(),
+    discoveryObservationId: z.number().int().positive(),
+    expectedRevision: z.string().min(1),
+    version: z.number().int().positive(),
+    rating: z.number().int().min(1).max(5).nullable(),
+    flag: z.enum(['none', 'pick', 'reject'])
+  }),
+  z.object({
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    kind: z.literal('collection_created'),
+    collectionId: z.number().int().positive(),
+    name: z.string().min(1).max(80),
+    normalizedName: z.string().min(1).max(80)
+  }),
+  z.object({
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    kind: z.literal('collection_renamed'),
+    collectionId: z.number().int().positive(),
+    oldName: z.string().min(1).max(80),
+    newName: z.string().min(1).max(80),
+    normalizedName: z.string().min(1).max(80)
+  }),
+  z.object({
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    kind: z.literal('membership_added'),
+    collectionId: z.number().int().positive(),
+    collectionName: z.string().min(1),
+    locationId: z.number().int().positive(),
+    normalizedPath: z.string().min(1),
+    byteSize: z.number().int().nonnegative(),
+    activeHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/i)
+      .nullable(),
+    discoveryObservationId: z.number().int().positive()
+  }),
+  z.object({
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    kind: z.literal('membership_removed'),
+    collectionId: z.number().int().positive(),
+    collectionName: z.string().min(1),
+    locationId: z.number().int().positive(),
+    normalizedPath: z.string().min(1)
+  })
+])
+export type AnnotationJournalEntry = z.infer<typeof AnnotationJournalEntrySchema>
 
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,

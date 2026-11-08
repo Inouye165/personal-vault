@@ -64,8 +64,17 @@ import type {
   GetImportCandidatesOptions,
   ImportCandidateItem,
   VaultImportItemDetail,
-  ImportCandidatesResult
+  ImportCandidatesResult,
+  CreateCollectionInput,
+  RenameCollectionInput,
+  CatalogCollectionRecord,
+  AddCollectionMemberInput,
+  RemoveCollectionMemberInput,
+  CatalogCollectionMembershipRecord,
+  SetPhotoAnnotationInput,
+  CatalogPhotoAnnotationRecord
 } from './types'
+import type { AnnotationJournal } from '../annotations/journal'
 
 interface RawFileRow {
   id: number
@@ -84,6 +93,9 @@ interface RawFileRow {
   last_seen_at_ms: number
   active_hash: string | null
   active_hash_verified_at_ms: number | null
+  annotation_rating?: number | null
+  annotation_flag?: 'none' | 'pick' | 'reject' | null
+  annotation_version?: number | null
 }
 
 interface RawObservationRow {
@@ -350,10 +362,17 @@ export function isObservationTimestampMatching(
 
 export class CatalogDatabase {
   private readonly db: DatabaseSync
+  private readonly journal?: AnnotationJournal
   private closed = false
 
-  private constructor(db: DatabaseSync) {
+  private constructor(db: DatabaseSync, journal?: AnnotationJournal) {
     this.db = db
+    this.journal = journal
+  }
+
+  public getRawDb(): DatabaseSync {
+    this.assertOpen()
+    return this.db
   }
 
   /**
@@ -385,7 +404,7 @@ export class CatalogDatabase {
         runMigrations(rawDb)
       }
 
-      return new CatalogDatabase(rawDb)
+      return new CatalogDatabase(rawDb, options.journal)
     } catch (error) {
       if (rawDb) {
         try {
@@ -697,6 +716,7 @@ export class CatalogDatabase {
               candidate.discoveredAtMs
             )
             updateFileLocationStmt.run(now, existingFile.id)
+            this.reconcilePhotoAnnotations(existingFile.id)
             updatedCount++
           } else {
             updateObsLastSeenStmt.run(candidate.discoveredAtMs, currentObs.id)
@@ -851,6 +871,7 @@ export class CatalogDatabase {
         ) as unknown as RawHashRow
 
         results.push(this.mapHashRow(row))
+        this.reconcilePhotoAnnotations(fileAndObs.file_id)
       }
 
       this.db.exec('COMMIT;')
@@ -1014,6 +1035,43 @@ export class CatalogDatabase {
       params.push(options.sha256.toLowerCase())
     }
 
+    if (options.ratingFilter && options.ratingFilter !== 'all') {
+      if (options.ratingFilter === 'unrated') {
+        conditions.push('(a.rating IS NULL OR a.id IS NULL)')
+      } else if (options.ratingFilter === '1') {
+        conditions.push('a.rating >= 1')
+      } else if (options.ratingFilter === '2') {
+        conditions.push('a.rating >= 2')
+      } else if (options.ratingFilter === '3') {
+        conditions.push('a.rating >= 3')
+      } else if (options.ratingFilter === '4') {
+        conditions.push('a.rating >= 4')
+      } else if (options.ratingFilter === '5') {
+        conditions.push('a.rating = 5')
+      }
+    }
+
+    if (options.flagFilter && options.flagFilter !== 'all') {
+      if (options.flagFilter === 'none') {
+        conditions.push("(a.flag = 'none' OR a.flag IS NULL OR a.id IS NULL)")
+      } else if (options.flagFilter === 'pick') {
+        conditions.push("a.flag = 'pick'")
+      } else if (options.flagFilter === 'reject') {
+        conditions.push("a.flag = 'reject'")
+      }
+    }
+
+    if (typeof options.collectionId === 'number') {
+      conditions.push(`
+        EXISTS (
+          SELECT 1 FROM collection_memberships cm
+          WHERE cm.file_location_id = f.id AND cm.collection_id = ? AND cm.is_current = 1
+            AND (cm.discovery_observation_id = d.id OR (cm.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND cm.content_sha256 = h.sha256))
+        )
+      `)
+      params.push(options.collectionId)
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
 
     // 1. Total count query
@@ -1022,6 +1080,8 @@ export class CatalogDatabase {
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
+        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       ${whereClause};
     `
     const countRow = this.db.prepare(countSql).get(...params) as unknown as { total: number }
@@ -1035,10 +1095,15 @@ export class CatalogDatabase {
         d.byte_size, d.filesystem_birthtime_ms, d.filesystem_mtime_ms, d.inferred_capture_time_ms,
         d.observed_at_ms as first_discovered_at_ms, d.last_seen_at_ms,
         h.sha256 as active_hash,
-        h.hashed_at_ms as active_hash_verified_at_ms
+        h.hashed_at_ms as active_hash_verified_at_ms,
+        a.rating as annotation_rating,
+        a.flag as annotation_flag,
+        a.version as annotation_version
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
+        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       ${whereClause}
       ORDER BY f.id ASC
       LIMIT ? OFFSET ?;
@@ -1647,7 +1712,10 @@ export class CatalogDatabase {
       firstDiscoveredAtMs: row.first_discovered_at_ms,
       lastSeenAtMs: row.last_seen_at_ms,
       activeHash: row.active_hash,
-      activeHashVerifiedAtMs: row.active_hash_verified_at_ms
+      activeHashVerifiedAtMs: row.active_hash_verified_at_ms,
+      rating: row.annotation_rating !== undefined ? row.annotation_rating : null,
+      flag: (row.annotation_flag as 'none' | 'pick' | 'reject') || 'none',
+      annotationVersion: row.annotation_version ?? 0
     }
   }
 
@@ -2779,4 +2847,815 @@ export class CatalogDatabase {
       isPreferred: r.is_preferred === 1
     }))
   }
+
+  // ==========================================
+  // Stage 5B: Photo Review & Collections Methods
+  // ==========================================
+
+  public createCollection(input: CreateCollectionInput): CatalogCollectionRecord {
+    this.assertOpen()
+    const normalizedName = normalizeCollectionName(input.name)
+    const name = input.name.trim()
+    const now = Date.now()
+
+    const existing = this.db
+      .prepare('SELECT id FROM collections WHERE normalized_name = ?;')
+      .get(normalizedName)
+    if (existing) {
+      throw new Error(`Collection with name '${name}' already exists`)
+    }
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO collections (name, normalized_name, created_at_ms, updated_at_ms)
+        VALUES (?, ?, ?, ?)
+        RETURNING id, name, normalized_name, created_at_ms, updated_at_ms;
+      `)
+      const row = stmt.get(name, normalizedName, now, now) as {
+        id: number
+        name: string
+        normalized_name: string
+        created_at_ms: number
+        updated_at_ms: number
+      }
+
+      if (this.journal) {
+        this.journal.appendCollectionCreatedSync({
+          collectionId: row.id,
+          name: row.name,
+          normalizedName: row.normalized_name
+        })
+      }
+
+      this.db.exec('COMMIT;')
+      return {
+        id: row.id,
+        name: row.name,
+        normalizedName: row.normalized_name,
+        createdAtMs: row.created_at_ms,
+        updatedAtMs: row.updated_at_ms,
+        photoCount: 0
+      }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public renameCollection(input: RenameCollectionInput): CatalogCollectionRecord {
+    this.assertOpen()
+    if (!input.collectionId || input.collectionId <= 0) {
+      throw new TypeError('collectionId must be a positive integer')
+    }
+    const normalizedName = normalizeCollectionName(input.name)
+    const name = input.name.trim()
+    const now = Date.now()
+
+    const current = this.db
+      .prepare('SELECT id, name FROM collections WHERE id = ?;')
+      .get(input.collectionId) as { id: number; name: string } | undefined
+    if (!current) {
+      throw new Error(`Collection with ID ${input.collectionId} not found`)
+    }
+
+    const conflict = this.db
+      .prepare('SELECT id FROM collections WHERE normalized_name = ? AND id != ?;')
+      .get(normalizedName, input.collectionId)
+    if (conflict) {
+      throw new Error(`Collection with name '${name}' already exists`)
+    }
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      const stmt = this.db.prepare(`
+        UPDATE collections
+        SET name = ?, normalized_name = ?, updated_at_ms = ?
+        WHERE id = ?
+        RETURNING id, name, normalized_name, created_at_ms, updated_at_ms;
+      `)
+      const row = stmt.get(name, normalizedName, now, input.collectionId) as {
+        id: number
+        name: string
+        normalized_name: string
+        created_at_ms: number
+        updated_at_ms: number
+      }
+
+      if (this.journal) {
+        this.journal.appendCollectionRenamedSync({
+          collectionId: row.id,
+          oldName: current.name,
+          newName: row.name,
+          normalizedName: row.normalized_name
+        })
+      }
+
+      this.db.exec('COMMIT;')
+      return {
+        id: row.id,
+        name: row.name,
+        normalizedName: row.normalized_name,
+        createdAtMs: row.created_at_ms,
+        updatedAtMs: row.updated_at_ms
+      }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public listCollections(options?: PaginationOptions): PaginatedResult<CatalogCollectionRecord> {
+    this.assertOpen()
+    const limit = options?.limit ?? 50
+    const offset = options?.offset ?? 0
+
+    const countRow = this.db.prepare('SELECT COUNT(*) as total FROM collections;').get() as {
+      total: number
+    }
+    const totalCount = countRow.total
+
+    const rows = this.db
+      .prepare(
+        `
+        SELECT c.id, c.name, c.normalized_name, c.created_at_ms, c.updated_at_ms,
+               COUNT(cm.id) as photo_count
+        FROM collections c
+        LEFT JOIN collection_memberships cm ON cm.collection_id = c.id AND cm.is_current = 1
+        GROUP BY c.id
+        ORDER BY c.name COLLATE NOCASE ASC
+        LIMIT ? OFFSET ?;
+      `
+      )
+      .all(limit, offset) as Array<{
+      id: number
+      name: string
+      normalized_name: string
+      created_at_ms: number
+      updated_at_ms: number
+      photo_count: number
+    }>
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      normalizedName: r.normalized_name,
+      createdAtMs: r.created_at_ms,
+      updatedAtMs: r.updated_at_ms,
+      photoCount: r.photo_count
+    }))
+
+    return {
+      items,
+      totalCount,
+      offset,
+      limit,
+      hasMore: offset + items.length < totalCount
+    }
+  }
+
+  public getCollectionById(id: number): CatalogCollectionRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT c.id, c.name, c.normalized_name, c.created_at_ms, c.updated_at_ms,
+               COUNT(cm.id) as photo_count
+        FROM collections c
+        LEFT JOIN collection_memberships cm ON cm.collection_id = c.id AND cm.is_current = 1
+        WHERE c.id = ?
+        GROUP BY c.id;
+      `
+      )
+      .get(id) as
+      | {
+          id: number
+          name: string
+          normalized_name: string
+          created_at_ms: number
+          updated_at_ms: number
+          photo_count: number
+        }
+      | undefined
+
+    if (!row) return null
+    return {
+      id: row.id,
+      name: row.name,
+      normalizedName: row.normalized_name,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      photoCount: row.photo_count
+    }
+  }
+
+  public addCollectionMember(input: AddCollectionMemberInput): {
+    success: boolean
+    isNew: boolean
+  } {
+    this.assertOpen()
+    if (!input.collectionId || input.collectionId <= 0) {
+      throw new TypeError('collectionId must be a positive integer')
+    }
+    if (!input.fileLocationId || input.fileLocationId <= 0) {
+      throw new TypeError('fileLocationId must be a positive integer')
+    }
+
+    const collection = this.getCollectionById(input.collectionId)
+    if (!collection) {
+      throw new Error(`Collection with ID ${input.collectionId} not found`)
+    }
+
+    this.reconcilePhotoAnnotations(input.fileLocationId)
+
+    const obs = this.db
+      .prepare(
+        `
+        SELECT f.original_path, f.normalized_path, d.id as discovery_id, d.byte_size, h.sha256 as active_hash
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        WHERE f.id = ?;
+      `
+      )
+      .get(input.fileLocationId) as
+      | {
+          original_path: string
+          normalized_path: string
+          discovery_id: number
+          byte_size: number
+          active_hash: string | null
+        }
+      | undefined
+
+    if (!obs) {
+      throw new Error(`File location with ID ${input.fileLocationId} not found`)
+    }
+
+    const existing = this.db
+      .prepare(
+        'SELECT id FROM collection_memberships WHERE collection_id = ? AND file_location_id = ? AND is_current = 1;'
+      )
+      .get(input.collectionId, input.fileLocationId)
+    if (existing) {
+      return { success: true, isNew: false }
+    }
+
+    const now = Date.now()
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          INSERT INTO collection_memberships (
+            collection_id, file_location_id, discovery_observation_id, content_sha256, is_current, created_at_ms, updated_at_ms
+          ) VALUES (?, ?, ?, ?, 1, ?, ?);
+        `
+        )
+        .run(input.collectionId, input.fileLocationId, obs.discovery_id, obs.active_hash, now, now)
+
+      if (this.journal) {
+        this.journal.appendMembershipAddedSync({
+          collectionId: input.collectionId,
+          collectionName: collection.name,
+          locationId: input.fileLocationId,
+          normalizedPath: obs.normalized_path,
+          byteSize: obs.byte_size,
+          activeHash: obs.active_hash,
+          discoveryObservationId: obs.discovery_id
+        })
+      }
+
+      this.db.exec('COMMIT;')
+      return { success: true, isNew: true }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public removeCollectionMember(input: RemoveCollectionMemberInput): { success: boolean } {
+    this.assertOpen()
+    const collection = this.getCollectionById(input.collectionId)
+    if (!collection) {
+      throw new Error(`Collection with ID ${input.collectionId} not found`)
+    }
+
+    const file = this.getFileLocationById(input.fileLocationId)
+    if (!file) {
+      throw new Error(`File location with ID ${input.fileLocationId} not found`)
+    }
+
+    const now = Date.now()
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          UPDATE collection_memberships
+          SET is_current = 0, updated_at_ms = ?
+          WHERE collection_id = ? AND file_location_id = ? AND is_current = 1;
+        `
+        )
+        .run(now, input.collectionId, input.fileLocationId)
+
+      if (this.journal) {
+        this.journal.appendMembershipRemovedSync({
+          collectionId: input.collectionId,
+          collectionName: collection.name,
+          locationId: input.fileLocationId,
+          normalizedPath: file.normalizedPath
+        })
+      }
+
+      this.db.exec('COMMIT;')
+      return { success: true }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getCollectionMembershipsForPhoto(options: {
+    fileLocationId: number
+    offset?: number
+    limit?: number
+  }): PaginatedResult<CatalogCollectionMembershipRecord> {
+    this.assertOpen()
+    this.reconcilePhotoAnnotations(options.fileLocationId)
+
+    const limit = options.limit ?? 50
+    const offset = options.offset ?? 0
+
+    const countRow = this.db
+      .prepare(
+        'SELECT COUNT(*) as total FROM collection_memberships WHERE file_location_id = ? AND is_current = 1;'
+      )
+      .get(options.fileLocationId) as { total: number }
+    const totalCount = countRow.total
+
+    const rows = this.db
+      .prepare(
+        `
+        SELECT cm.id, cm.collection_id, c.name as collection_name, cm.file_location_id, cm.created_at_ms
+        FROM collection_memberships cm
+        JOIN collections c ON c.id = cm.collection_id
+        WHERE cm.file_location_id = ? AND cm.is_current = 1
+        ORDER BY c.name COLLATE NOCASE ASC
+        LIMIT ? OFFSET ?;
+      `
+      )
+      .all(options.fileLocationId, limit, offset) as Array<{
+      id: number
+      collection_id: number
+      collection_name: string
+      file_location_id: number
+      created_at_ms: number
+    }>
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      collectionId: r.collection_id,
+      collectionName: r.collection_name,
+      fileLocationId: r.file_location_id,
+      createdAtMs: r.created_at_ms
+    }))
+
+    return {
+      items,
+      totalCount,
+      offset,
+      limit,
+      hasMore: offset + items.length < totalCount
+    }
+  }
+
+  public getPhotoRevisionString(fileLocationId: number): string {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT d.id as discovery_id, d.byte_size, d.filesystem_mtime_ms, h.sha256 as active_hash
+        FROM discovery_observations d
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        WHERE d.file_location_id = ? AND d.is_current = 1;
+      `
+      )
+      .get(fileLocationId) as
+      | {
+          discovery_id: number
+          byte_size: number
+          filesystem_mtime_ms: number | null
+          active_hash: string | null
+        }
+      | undefined
+
+    if (!row) {
+      throw new Error(
+        `File location with ID ${fileLocationId} not found or has no current discovery observation`
+      )
+    }
+
+    return `rev:${row.discovery_id}:${row.byte_size}:${row.filesystem_mtime_ms ?? 'null'}:${row.active_hash ?? 'unhashed'}`
+  }
+
+  public reconcilePhotoAnnotations(fileLocationId: number): void {
+    this.assertOpen()
+    const currentObs = this.db
+      .prepare(
+        `
+        SELECT d.id as discovery_id, d.byte_size, d.filesystem_mtime_ms, h.sha256 as active_hash
+        FROM discovery_observations d
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        WHERE d.file_location_id = ? AND d.is_current = 1;
+      `
+      )
+      .get(fileLocationId) as
+      | {
+          discovery_id: number
+          byte_size: number
+          filesystem_mtime_ms: number | null
+          active_hash: string | null
+        }
+      | undefined
+
+    if (!currentObs) return
+
+    // 1. Reconcile current annotation
+    const ann = this.db
+      .prepare(
+        `
+        SELECT a.id, a.discovery_observation_id, a.content_sha256, d.byte_size as old_byte_size
+        FROM photo_annotations a
+        JOIN discovery_observations d ON d.id = a.discovery_observation_id
+        WHERE a.file_location_id = ? AND a.is_current = 1;
+      `
+      )
+      .get(fileLocationId) as
+      | {
+          id: number
+          discovery_observation_id: number
+          content_sha256: string | null
+          old_byte_size: number
+        }
+      | undefined
+
+    if (ann && ann.discovery_observation_id !== currentObs.discovery_id) {
+      if (ann.old_byte_size !== currentObs.byte_size) {
+        // Size changed: content definitely changed
+        this.db
+          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
+          .run(Date.now(), ann.id)
+      } else if (
+        ann.content_sha256 &&
+        currentObs.active_hash &&
+        ann.content_sha256 === currentObs.active_hash
+      ) {
+        // Hash matches: advance to new observation
+        this.db
+          .prepare(
+            'UPDATE photo_annotations SET discovery_observation_id = ?, updated_at_ms = ? WHERE id = ?;'
+          )
+          .run(currentObs.discovery_id, Date.now(), ann.id)
+      } else if (
+        ann.content_sha256 &&
+        currentObs.active_hash &&
+        ann.content_sha256 !== currentObs.active_hash
+      ) {
+        // Hash differed: invalidate
+        this.db
+          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
+          .run(Date.now(), ann.id)
+      } else if (!ann.content_sha256) {
+        // Unhashed annotation bound to observation
+        this.db
+          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
+          .run(Date.now(), ann.id)
+      }
+    }
+
+    // 2. Reconcile collection memberships
+    const memberships = this.db
+      .prepare(
+        `
+        SELECT cm.id, cm.discovery_observation_id, cm.content_sha256, d.byte_size as old_byte_size
+        FROM collection_memberships cm
+        JOIN discovery_observations d ON d.id = cm.discovery_observation_id
+        WHERE cm.file_location_id = ? AND cm.is_current = 1;
+      `
+      )
+      .all(fileLocationId) as Array<{
+      id: number
+      discovery_observation_id: number
+      content_sha256: string | null
+      old_byte_size: number
+    }>
+
+    for (const mem of memberships) {
+      if (mem.discovery_observation_id !== currentObs.discovery_id) {
+        if (mem.old_byte_size !== currentObs.byte_size) {
+          this.db
+            .prepare(
+              'UPDATE collection_memberships SET is_current = 0, updated_at_ms = ? WHERE id = ?;'
+            )
+            .run(Date.now(), mem.id)
+        } else if (
+          mem.content_sha256 &&
+          currentObs.active_hash &&
+          mem.content_sha256 === currentObs.active_hash
+        ) {
+          this.db
+            .prepare(
+              'UPDATE collection_memberships SET discovery_observation_id = ?, updated_at_ms = ? WHERE id = ?;'
+            )
+            .run(currentObs.discovery_id, Date.now(), mem.id)
+        } else if (
+          mem.content_sha256 &&
+          currentObs.active_hash &&
+          mem.content_sha256 !== currentObs.active_hash
+        ) {
+          this.db
+            .prepare(
+              'UPDATE collection_memberships SET is_current = 0, updated_at_ms = ? WHERE id = ?;'
+            )
+            .run(Date.now(), mem.id)
+        } else if (!mem.content_sha256) {
+          this.db
+            .prepare(
+              'UPDATE collection_memberships SET is_current = 0, updated_at_ms = ? WHERE id = ?;'
+            )
+            .run(Date.now(), mem.id)
+        }
+      }
+    }
+  }
+
+  public setPhotoAnnotation(input: SetPhotoAnnotationInput): CatalogPhotoAnnotationRecord {
+    this.assertOpen()
+    if (!input.fileLocationId || input.fileLocationId <= 0) {
+      throw new TypeError('fileLocationId must be a positive integer')
+    }
+    if (!input.expectedRevision || typeof input.expectedRevision !== 'string') {
+      throw new TypeError('expectedRevision must be a non-empty string')
+    }
+    if (typeof input.expectedVersion !== 'number' || input.expectedVersion < 0) {
+      throw new TypeError('expectedVersion must be a non-negative integer')
+    }
+    if (
+      input.rating !== null &&
+      (input.rating < 1 || input.rating > 5 || !Number.isInteger(input.rating))
+    ) {
+      throw new RangeError('rating must be null or an integer between 1 and 5')
+    }
+    if (input.flag !== 'none' && input.flag !== 'pick' && input.flag !== 'reject') {
+      throw new RangeError("flag must be 'none', 'pick', or 'reject'")
+    }
+
+    this.reconcilePhotoAnnotations(input.fileLocationId)
+
+    const currentRev = this.getPhotoRevisionString(input.fileLocationId)
+    if (currentRev !== input.expectedRevision) {
+      throw new Error(
+        `STALE_REVISION: Photo revision ${currentRev} does not match expected revision ${input.expectedRevision}`
+      )
+    }
+
+    const obs = this.db
+      .prepare(
+        `
+        SELECT f.original_path, f.normalized_path, d.id as discovery_id, d.byte_size, d.filesystem_mtime_ms, h.sha256 as active_hash
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        WHERE f.id = ?;
+      `
+      )
+      .get(input.fileLocationId) as
+      | {
+          original_path: string
+          normalized_path: string
+          discovery_id: number
+          byte_size: number
+          filesystem_mtime_ms: number | null
+          active_hash: string | null
+        }
+      | undefined
+
+    if (!obs) {
+      throw new Error(`File location with ID ${input.fileLocationId} not found`)
+    }
+
+    const currentAnn = this.db
+      .prepare(
+        'SELECT id, version FROM photo_annotations WHERE file_location_id = ? AND is_current = 1;'
+      )
+      .get(input.fileLocationId) as { id: number; version: number } | undefined
+
+    const currentVersion = currentAnn ? currentAnn.version : 0
+    if (currentVersion !== input.expectedVersion) {
+      throw new Error(
+        `STALE_ANNOTATION_VERSION: Expected version ${input.expectedVersion} does not match current version ${currentVersion}`
+      )
+    }
+
+    const nextVersion = currentVersion + 1
+    const now = Date.now()
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      if (currentAnn) {
+        this.db
+          .prepare('UPDATE photo_annotations SET is_current = 0, updated_at_ms = ? WHERE id = ?;')
+          .run(now, currentAnn.id)
+      }
+
+      const insertStmt = this.db.prepare(`
+        INSERT INTO photo_annotations (
+          file_location_id, discovery_observation_id, content_sha256,
+          rating, flag, version, is_current, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+        RETURNING id, file_location_id, discovery_observation_id, content_sha256,
+                  rating, flag, version, is_current, created_at_ms, updated_at_ms;
+      `)
+
+      const row = insertStmt.get(
+        input.fileLocationId,
+        obs.discovery_id,
+        obs.active_hash,
+        input.rating,
+        input.flag,
+        nextVersion,
+        now,
+        now
+      ) as unknown as {
+        id: number
+        file_location_id: number
+        discovery_observation_id: number
+        content_sha256: string | null
+        rating: number | null
+        flag: 'none' | 'pick' | 'reject'
+        version: number
+        is_current: number
+        created_at_ms: number
+        updated_at_ms: number
+      }
+
+      if (this.journal) {
+        this.journal.appendPhotoAnnotationSync({
+          locationId: input.fileLocationId,
+          normalizedPath: obs.normalized_path,
+          originalPath: obs.original_path,
+          byteSize: obs.byte_size,
+          filesystemMtimeMs: obs.filesystem_mtime_ms,
+          activeHash: obs.active_hash,
+          discoveryObservationId: obs.discovery_id,
+          expectedRevision: input.expectedRevision,
+          version: nextVersion,
+          rating: input.rating,
+          flag: input.flag
+        })
+      }
+
+      this.db.exec('COMMIT;')
+      return {
+        id: row.id,
+        fileLocationId: row.file_location_id,
+        discoveryObservationId: row.discovery_observation_id,
+        contentSha256: row.content_sha256,
+        rating: row.rating,
+        flag: row.flag,
+        version: row.version,
+        isCurrent: row.is_current === 1,
+        createdAtMs: row.created_at_ms,
+        updatedAtMs: row.updated_at_ms
+      }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getPhotoAnnotation(fileLocationId: number): CatalogPhotoAnnotationRecord | null {
+    this.assertOpen()
+    this.reconcilePhotoAnnotations(fileLocationId)
+
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, file_location_id, discovery_observation_id, content_sha256,
+               rating, flag, version, is_current, created_at_ms, updated_at_ms
+        FROM photo_annotations
+        WHERE file_location_id = ? AND is_current = 1;
+      `
+      )
+      .get(fileLocationId) as
+      | {
+          id: number
+          file_location_id: number
+          discovery_observation_id: number
+          content_sha256: string | null
+          rating: number | null
+          flag: 'none' | 'pick' | 'reject'
+          version: number
+          is_current: number
+          created_at_ms: number
+          updated_at_ms: number
+        }
+      | undefined
+
+    if (!row) return null
+    return {
+      id: row.id,
+      fileLocationId: row.file_location_id,
+      discoveryObservationId: row.discovery_observation_id,
+      contentSha256: row.content_sha256,
+      rating: row.rating,
+      flag: row.flag,
+      version: row.version,
+      isCurrent: row.is_current === 1,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms
+    }
+  }
+
+  public getPhotoAnnotationHistory(fileLocationId: number): CatalogPhotoAnnotationRecord[] {
+    this.assertOpen()
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, file_location_id, discovery_observation_id, content_sha256,
+               rating, flag, version, is_current, created_at_ms, updated_at_ms
+        FROM photo_annotations
+        WHERE file_location_id = ?
+        ORDER BY version ASC;
+      `
+      )
+      .all(fileLocationId) as Array<{
+      id: number
+      file_location_id: number
+      discovery_observation_id: number
+      content_sha256: string | null
+      rating: number | null
+      flag: 'none' | 'pick' | 'reject'
+      version: number
+      is_current: number
+      created_at_ms: number
+      updated_at_ms: number
+    }>
+
+    return rows.map((r) => ({
+      id: r.id,
+      fileLocationId: r.file_location_id,
+      discoveryObservationId: r.discovery_observation_id,
+      contentSha256: r.content_sha256,
+      rating: r.rating,
+      flag: r.flag,
+      version: r.version,
+      isCurrent: r.is_current === 1,
+      createdAtMs: r.created_at_ms,
+      updatedAtMs: r.updated_at_ms
+    }))
+  }
+}
+
+function hasControlChars(str: string): boolean {
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i)
+    if ((code >= 0 && code <= 31) || (code >= 127 && code <= 159)) return true
+  }
+  return false
+}
+
+export function normalizeCollectionName(name: string): string {
+  if (!name || typeof name !== 'string') {
+    throw new TypeError('Collection name must be a non-empty string')
+  }
+  const trimmed = name.trim()
+  if (trimmed.length < 1 || trimmed.length > 80) {
+    throw new RangeError('Collection name must be between 1 and 80 characters')
+  }
+  if (hasControlChars(trimmed)) {
+    throw new RangeError('Collection name must not contain control characters')
+  }
+  return trimmed.toLowerCase()
 }

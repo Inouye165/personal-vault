@@ -1,13 +1,19 @@
 /**
- * Personal Vault — usePhotos Hook (Stage 5A)
+ * Personal Vault — usePhotos Hook (Stage 5A/5B)
  *
  * Provides bounded, virtualized photo catalog fetching with absolute catalog positions,
  * full collection scroll extent, LRU-bounded metadata and thumbnail caches,
- * monotonic generation request guarding, and selection state.
+ * SQL-level rating/flag/collection filtering, optimistic annotation updates,
+ * filter refill on out-of-filter edits, and selection state.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PhotoItem, ThumbnailResult } from '../../../shared/validation/ipc-schemas'
+import type {
+  PhotoFlagFilter,
+  PhotoItem,
+  PhotoRatingFilter,
+  ThumbnailResult
+} from '../../../shared/validation/ipc-schemas'
 
 export const PHOTO_BOUNDS = {
   PAGE_SIZE: 50,
@@ -31,7 +37,21 @@ export interface UsePhotosResult {
   readonly selectedPhoto: PhotoItem | null
   readonly selectedId: number | null
   readonly thumbnails: ReadonlyMap<number, ThumbnailResult>
+  readonly ratingFilter: PhotoRatingFilter
+  readonly flagFilter: PhotoFlagFilter
+  readonly collectionId: number | null
   readonly selectPhoto: (id: number | null) => void
+  readonly setRatingFilter: (filter: PhotoRatingFilter) => void
+  readonly setFlagFilter: (filter: PhotoFlagFilter) => void
+  readonly setCollectionId: (collectionId: number | null) => void
+  readonly resetFilters: () => void
+  readonly updatePhotoLocal: (
+    photoId: number,
+    rating: number | null,
+    flag: 'none' | 'pick' | 'reject',
+    version: number
+  ) => void
+  readonly removePhotoFromFilterView: (photoId: number) => void
   readonly refresh: () => Promise<void>
   readonly ensureRangeLoaded: (startIndex: number, endIndex: number) => void
   readonly getPhoto: (index: number) => PhotoItem | undefined
@@ -48,11 +68,26 @@ export function usePhotos(): UsePhotosResult {
   const [thumbnails, setThumbnails] = useState<Map<number, ThumbnailResult>>(new Map())
   const thumbnailsRef = useRef(thumbnails)
 
+  // Filters state
+  const [ratingFilter, setRatingFilterState] = useState<PhotoRatingFilter>('all')
+  const [flagFilter, setFlagFilterState] = useState<PhotoFlagFilter>('all')
+  const [collectionId, setCollectionIdState] = useState<number | null>(null)
+
+  const ratingFilterRef = useRef(ratingFilter)
+  const flagFilterRef = useRef(flagFilter)
+  const collectionIdRef = useRef(collectionId)
+
+  useEffect(() => {
+    ratingFilterRef.current = ratingFilter
+    flagFilterRef.current = flagFilter
+    collectionIdRef.current = collectionId
+  }, [ratingFilter, flagFilter, collectionId])
+
   useEffect(() => {
     thumbnailsRef.current = thumbnails
   }, [thumbnails])
 
-  // Monotonic generation incremented on unmount and refresh
+  // Monotonic generation incremented on unmount, refresh, and filter change
   const generationRef = useRef<number>(1)
   // Page LRU tracking
   const pageLruRef = useRef<number[]>([])
@@ -62,60 +97,130 @@ export function usePhotos(): UsePhotosResult {
   const inFlightThumbsRef = useRef<Map<number, InFlightThumbRequest>>(new Map())
   const requestSeqRef = useRef<number>(0)
 
-  const loadPage = useCallback(async (pageIndex: number, currentGeneration: number) => {
-    if (inFlightPagesRef.current.get(pageIndex) === currentGeneration) {
-      return
-    }
-    inFlightPagesRef.current.set(pageIndex, currentGeneration)
-
-    try {
-      if (!window.api?.getPhotosPage) {
-        throw new Error('Photos API unavailable')
+  const loadPage = useCallback(
+    async (
+      pageIndex: number,
+      currentGeneration: number,
+      activeFilters?: {
+        rating: PhotoRatingFilter
+        flag: PhotoFlagFilter
+        collection: number | null
       }
-
-      const res = await window.api.getPhotosPage({
-        offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
-        limit: PHOTO_BOUNDS.PAGE_SIZE
-      })
-
-      // Discard response if generation changed (e.g. refreshed or unmounted)
-      if (generationRef.current !== currentGeneration) {
+    ) => {
+      if (inFlightPagesRef.current.get(pageIndex) === currentGeneration) {
         return
       }
+      inFlightPagesRef.current.set(pageIndex, currentGeneration)
 
-      inFlightPagesRef.current.delete(pageIndex)
-      setTotalCount(res.totalCount)
+      const filters = activeFilters ?? {
+        rating: ratingFilterRef.current,
+        flag: flagFilterRef.current,
+        collection: collectionIdRef.current
+      }
 
-      setPages((prev) => {
-        const next = new Map(prev)
-        next.set(pageIndex, res.items)
-
-        // Update LRU tracking
-        const lru = pageLruRef.current.filter((p) => p !== pageIndex)
-        lru.push(pageIndex)
-
-        // Evict oldest pages if exceeding MAX_PAGES (40 pages = 2000 records)
-        while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
-          const evictedPage = lru.shift()
-          if (evictedPage !== undefined) {
-            next.delete(evictedPage)
-          }
+      try {
+        if (!window.api?.getPhotosPage) {
+          throw new Error('Photos API unavailable')
         }
-        pageLruRef.current = lru
 
-        return next
-      })
-    } catch (err: unknown) {
-      if (generationRef.current === currentGeneration) {
+        const res = await window.api.getPhotosPage({
+          offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
+          limit: PHOTO_BOUNDS.PAGE_SIZE,
+          ratingFilter: filters.rating,
+          flagFilter: filters.flag,
+          collectionId: filters.collection
+        })
+
+        // Discard response if generation changed
+        if (generationRef.current !== currentGeneration) {
+          return
+        }
+
         inFlightPagesRef.current.delete(pageIndex)
-        setError(err instanceof Error ? err.message : 'Failed to load photographs')
+        setTotalCount(res.totalCount)
+
+        setPages((prev) => {
+          const next = new Map(prev)
+          next.set(pageIndex, res.items)
+
+          // Update LRU tracking
+          const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+          lru.push(pageIndex)
+
+          // Evict oldest pages if exceeding MAX_PAGES
+          while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+            const evictedPage = lru.shift()
+            if (evictedPage !== undefined) {
+              next.delete(evictedPage)
+            }
+          }
+          pageLruRef.current = lru
+
+          return next
+        })
+      } catch (err: unknown) {
+        if (generationRef.current === currentGeneration) {
+          inFlightPagesRef.current.delete(pageIndex)
+          setError(err instanceof Error ? err.message : 'Failed to load photographs')
+        }
+      } finally {
+        if (generationRef.current === currentGeneration && pageIndex === 0) {
+          setIsLoading(false)
+        }
       }
-    } finally {
-      if (generationRef.current === currentGeneration && pageIndex === 0) {
-        setIsLoading(false)
-      }
-    }
-  }, [])
+    },
+    []
+  )
+
+  const applyFilters = useCallback(
+    (newRating: PhotoRatingFilter, newFlag: PhotoFlagFilter, newCollection: number | null) => {
+      const nextGen = ++generationRef.current
+      pageLruRef.current = []
+      inFlightPagesRef.current.clear()
+      inFlightThumbsRef.current.clear()
+      setPages(new Map())
+      setThumbnails(new Map())
+      setIsLoading(true)
+      setError(null)
+      void loadPage(0, nextGen, {
+        rating: newRating,
+        flag: newFlag,
+        collection: newCollection
+      })
+    },
+    [loadPage]
+  )
+
+  const setRatingFilter = useCallback(
+    (newRating: PhotoRatingFilter) => {
+      setRatingFilterState(newRating)
+      applyFilters(newRating, flagFilterRef.current, collectionIdRef.current)
+    },
+    [applyFilters]
+  )
+
+  const setFlagFilter = useCallback(
+    (newFlag: PhotoFlagFilter) => {
+      setFlagFilterState(newFlag)
+      applyFilters(ratingFilterRef.current, newFlag, collectionIdRef.current)
+    },
+    [applyFilters]
+  )
+
+  const setCollectionId = useCallback(
+    (newCollection: number | null) => {
+      setCollectionIdState(newCollection)
+      applyFilters(ratingFilterRef.current, flagFilterRef.current, newCollection)
+    },
+    [applyFilters]
+  )
+
+  const resetFilters = useCallback(() => {
+    setRatingFilterState('all')
+    setFlagFilterState('all')
+    setCollectionIdState(null)
+    applyFilters('all', 'all', null)
+  }, [applyFilters])
 
   const ensureRangeLoaded = useCallback(
     (startIndex: number, endIndex: number) => {
@@ -151,7 +256,6 @@ export function usePhotos(): UsePhotosResult {
   )
 
   const refresh = useCallback(async () => {
-    // Monotonic generation increment prevents any pending async responses from repopulating
     const nextGen = ++generationRef.current
     pageLruRef.current = []
     inFlightPagesRef.current.clear()
@@ -163,6 +267,66 @@ export function usePhotos(): UsePhotosResult {
     await loadPage(0, nextGen)
   }, [loadPage])
 
+  const matchesCurrentFilters = useCallback(
+    (rating: number | null, flag: 'none' | 'pick' | 'reject'): boolean => {
+      const rF = ratingFilterRef.current
+      if (rF === 'unrated' && rating !== null) return false
+      if (rF === '1' && (rating === null || rating < 1)) return false
+      if (rF === '2' && (rating === null || rating < 2)) return false
+      if (rF === '3' && (rating === null || rating < 3)) return false
+      if (rF === '4' && (rating === null || rating < 4)) return false
+      if (rF === '5' && (rating === null || rating !== 5)) return false
+
+      const fF = flagFilterRef.current
+      if (fF === 'none' && flag !== 'none') return false
+      if (fF === 'pick' && flag !== 'pick') return false
+      if (fF === 'reject' && flag !== 'reject') return false
+
+      return true
+    },
+    []
+  )
+
+  const removePhotoFromFilterView = useCallback(
+    (photoId: number) => {
+      setSelectedId((prev) => (prev === photoId ? null : prev))
+      void refresh()
+    },
+    [refresh]
+  )
+
+  const updatePhotoLocal = useCallback(
+    (photoId: number, rating: number | null, flag: 'none' | 'pick' | 'reject', version: number) => {
+      if (!matchesCurrentFilters(rating, flag)) {
+        removePhotoFromFilterView(photoId)
+        return
+      }
+
+      setPages((prev) => {
+        let changed = false
+        const next = new Map(prev)
+        for (const [pageIdx, items] of next.entries()) {
+          const itemIdx = items.findIndex((i) => i.id === photoId)
+          if (itemIdx !== -1) {
+            const updatedItems = [...items]
+            const existing = updatedItems[itemIdx]!
+            updatedItems[itemIdx] = {
+              ...existing,
+              rating,
+              flag,
+              annotationVersion: version
+            }
+            next.set(pageIdx, updatedItems)
+            changed = true
+            break
+          }
+        }
+        return changed ? next : prev
+      })
+    },
+    [matchesCurrentFilters, removePhotoFromFilterView]
+  )
+
   const requestThumbnail = useCallback(
     (photo: PhotoItem, priority: 'high' | 'normal' | 'low' = 'normal') => {
       if (!window.api?.getThumbnail) return
@@ -171,7 +335,7 @@ export function usePhotos(): UsePhotosResult {
       const currentGen = generationRef.current
       const existingReq = inFlightThumbsRef.current.get(photo.id)
       if (existingReq && existingReq.generation === currentGen) {
-        return // Already in-flight for current generation
+        return
       }
 
       const requestId = ++requestSeqRef.current
@@ -191,7 +355,6 @@ export function usePhotos(): UsePhotosResult {
         })
         .then((result) => {
           const activeReq = inFlightThumbsRef.current.get(photo.id)
-          // Discard response if generation, request id, or revision mismatch
           if (
             !activeReq ||
             activeReq.requestId !== requestId ||
@@ -202,10 +365,8 @@ export function usePhotos(): UsePhotosResult {
             return
           }
 
-          // Safe deletion: only delete if current active request matches this requestId
           inFlightThumbsRef.current.delete(photo.id)
 
-          // Do not cache transient queue pressure or cancellation as permanent error states
           if (
             result.status === 'error' &&
             (result.code === 'QUEUE_FULL' || result.code === 'CANCELLED')
@@ -262,7 +423,6 @@ export function usePhotos(): UsePhotosResult {
     }
   }, [])
 
-  // Flatten currently retained photos for backwards compatibility and selection search
   const photos = Array.from(pages.values()).flat()
   const selectedPhoto = photos.find((p) => p.id === selectedId) ?? null
 
@@ -278,7 +438,16 @@ export function usePhotos(): UsePhotosResult {
     selectedPhoto,
     selectedId,
     thumbnails,
+    ratingFilter,
+    flagFilter,
+    collectionId,
     selectPhoto,
+    setRatingFilter,
+    setFlagFilter,
+    setCollectionId,
+    resetFilters,
+    updatePhotoLocal,
+    removePhotoFromFilterView,
     refresh,
     ensureRangeLoaded,
     getPhoto,
