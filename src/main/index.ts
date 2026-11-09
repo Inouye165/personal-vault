@@ -9,6 +9,7 @@ import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
 import { VaultImportCoordinator } from './services/vault'
 import { ThumbnailCoordinator } from './services/thumbnails'
+import { SimilarityCoordinator } from './services/similarity'
 import { AnnotationJournal } from './services/annotations'
 
 function logStartup(message: string): void {
@@ -44,6 +45,7 @@ let catalog: CatalogDatabase | null = null
 let coordinator: ScanJobCoordinator | null = null
 let vaultCoordinator: VaultImportCoordinator | null = null
 let thumbnailCoordinator: ThumbnailCoordinator | null = null
+let similarityCoordinator: SimilarityCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -172,6 +174,13 @@ if (!app.requestSingleInstanceLock()) {
       await thumbnailCoordinator.initialize()
       logStartup('thumbnailCoordinator initialized')
 
+      similarityCoordinator = new SimilarityCoordinator({
+        catalog,
+        thumbnailCoordinator
+      })
+      await similarityCoordinator.initialize()
+      logStartup('similarityCoordinator initialized')
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -181,6 +190,7 @@ if (!app.requestSingleInstanceLock()) {
         coordinator,
         vaultCoordinator,
         thumbnailCoordinator,
+        similarityCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -221,6 +231,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down thumbnail coordinator')
             await thumbnailCoordinator.shutdown()
             logStartup('thumbnail coordinator shutdown done')
+          }
+          if (similarityCoordinator) {
+            logStartup('shutting down similarity coordinator')
+            await similarityCoordinator.shutdown()
+            logStartup('similarity coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

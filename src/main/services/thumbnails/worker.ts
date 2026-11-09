@@ -3,7 +3,7 @@
  */
 
 import { parentPort } from 'node:worker_threads'
-import { decodeThumbnail, type DecodeInputParams } from './decoder'
+import { decodeThumbnail, decodeFingerprint, type DecodeInputParams } from './decoder'
 import { validateWebPIntegrity } from './cache'
 
 if (parentPort) {
@@ -11,7 +11,7 @@ if (parentPort) {
     'message',
     async (message: {
       id: number
-      action?: 'decode' | 'validate_cache'
+      action?: 'decode' | 'validate_cache' | 'fingerprint'
       params?: DecodeInputParams
       buffer?: Buffer | Uint8Array
       maxBytes?: number
@@ -40,6 +40,12 @@ if (parentPort) {
               status: 'corrupt'
             })
           }
+          return
+        }
+
+        if (message.action === 'fingerprint') {
+          const result = await decodeFingerprint(message.params!)
+          parentPort!.postMessage({ id: message.id, ...result })
           return
         }
 

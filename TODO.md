@@ -143,11 +143,44 @@ Verification: independent review verification passed at `4071948`: 657 passed ac
 - [x] Comprehensive real Electron verification suite in built and unpacked modes (`scripts/verify-electron-photo-review.mjs`, `verify:photo-review`, `verify:photo-review:unpacked` — 12/12 checks passed each, exit code 0).
 - [x] Source preservation invariance verified: original source bytes, sizes, and timestamps remain completely untouched across all tests (including rejected items).
 
-### Substage 5C: Visual Similarity Review (Planned)
+### Substage 5C: Visual Similarity Review
 
-Status: **planned; not started.**
+Status: **complete; awaiting independent review.**
 
-- [ ] Perceptual hashing and visual similarity review (distinguishing edited copies from similar photos).
+Design & Numerical Resource Bounds:
+
+- Module separation:
+  - `src/main/services/similarity/fingerprint.ts`: Deterministic versioned perceptual fingerprinting (`dhash64_v1`, 64 bits, 9x8 grayscale) and Hamming distance comparison outside Electron main.
+  - `src/main/services/similarity/candidate-search.ts`: Indexed/partitioned candidate search using 4x16-bit bucket sub-keys avoiding all-pairs comparisons, with candidate caps against dense similarity.
+  - `src/main/services/similarity/coordinator.ts`: Resumable background analysis orchestrator (`SimilarityCoordinator`), snapshotting authorized job scope in `similarity_job_items`, tracking truthful progress, cancellation, unsupported/error counts, and restart recovery.
+  - `src/main/services/catalog/migrations.ts` (Migration 8): Tables for `photo_perceptual_hashes`, `similarity_candidate_pairs`, `similarity_decisions`, `similarity_jobs`, and `similarity_job_items`.
+  - `src/main/services/annotations/journal.ts`: Durable portable persistence of `similarity_decision` records with two-phase commit, fsync durability, and bounded startup reconciliation.
+  - `src/shared/contracts/channels.ts` & `src/shared/validation/ipc-schemas.ts`: Narrow typed IPC contracts with bidirectional Zod validation and top-level sender checks.
+  - `src/renderer/src/components/SimilarityReviewPanel.tsx` & `src/renderer/src/hooks/useSimilarityReview.ts`: Side-by-side comparison cards, paginated candidate pairs, decision controls, progress/cancellation/resume banners, and stale response guards.
+- Numerical resource bounds:
+  - Aggregate decode workers: <= 2 live workers (including terminating workers) shared with thumbnail decoding.
+  - Queued decode jobs: <= 64 jobs; interactive thumbnails get high priority, similarity analysis gets low priority.
+  - Per-job execution timeout: 15,000 ms with worker termination and concurrency recovery.
+  - Source file size cap: <= 128 MiB (`MAX_SOURCE_SIZE_BYTES`).
+  - Max input pixels: <= 100 megapixels (`MAX_INPUT_PIXELS`).
+  - Renderer mounted cells: <= 200 mounted DOM cells.
+  - Retained browsing metadata: <= 2,000 items.
+  - Fingerprint algorithm: `dhash64_v1` (64 bits, 9x8 grayscale raw matrix).
+  - Algorithmic similarity threshold: Hamming distance <= 10 / 64 bits (>= 84.375% algorithmic similarity).
+  - Dense candidate limits: max 50 candidates per photo, max 10,000 candidate pairs persisted per run to prevent memory and quadratic storage explosion.
+  - Candidate pagination: 10 pairs per page with absolute offsets and monotonic request tokens.
+
+Tasks:
+
+- [x] Migration 8: SQLite schema for perceptual hashes, candidate pairs, similarity decisions, and jobs.
+- [x] Perceptual fingerprinting module (`dhash64_v1`) in worker threads with source containment, pre/post descriptor checks, and revision tracking.
+- [x] Partitioned candidate search with bucket indexing, distance thresholding, exact duplicate exclusion, and dense candidate bounds.
+- [x] Durable portable journal persistence for similarity review decisions (`edited_version`, `similar_scene`, `unrelated`, `unreviewed`) with two-phase SQLite commit.
+- [x] SimilarityCoordinator: Resumable analysis jobs, progress streaming, cancellation, restart recovery, and scope preservation.
+- [x] Narrow typed IPC channels (`similarity:*`) with bidirectional Zod validation and sender authorization.
+- [x] Renderer UI: `SimilarityReviewPanel` and `useSimilarityReview` hook with side-by-side comparison, recorded facts, pagination, decision buttons, progress/cancellation, and stale guards.
+- [x] Comprehensive unit and integration test suite with failing behavior tests first.
+- [x] Real Electron verification scripts (`verify:similarity` and `verify:similarity:unpacked`).
 
 ---
 

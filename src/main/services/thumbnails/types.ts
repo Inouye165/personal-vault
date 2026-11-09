@@ -75,3 +75,29 @@ export interface ThumbnailRequestParams {
   readonly expectedSha256: string | null
   readonly priority?: 'high' | 'normal' | 'low'
 }
+
+export type FingerprintJobResult =
+  | {
+      readonly status: 'ready'
+      readonly locationId: number
+      readonly fingerprint: string
+      readonly bucket0: number
+      readonly bucket1: number
+      readonly bucket2: number
+      readonly bucket3: number
+      readonly width: number
+      readonly height: number
+      readonly algorithmVersion: string
+      readonly computedSha256: string
+    }
+  | {
+      readonly status: 'unsupported'
+      readonly locationId: number
+      readonly reason: string
+    }
+  | {
+      readonly status: 'error'
+      readonly locationId: number
+      readonly code: string
+      readonly message: string
+    }

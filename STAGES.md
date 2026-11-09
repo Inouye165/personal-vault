@@ -95,11 +95,11 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 **In progress; Substage 5A and 5B complete; independently accepted at `951fd25` and `4071948`.**
 
-| Substage | Deliverable                                                               | Status   | Submission reference         | Acceptance reference |
-| -------- | ------------------------------------------------------------------------- | -------- | ---------------------------- | -------------------- |
-| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete | `5258b0a`                    | `951fd25`            |
-| 5B       | User review tools: ratings, flags, and custom collections                 | Complete | `feat/stage-5b-photo-review` | `4071948`            |
-| 5C       | Perceptual hashing and visual similarity review                           | Planned  | Pending                      | Pending              |
+| Substage | Deliverable                                                               | Status          | Submission reference              | Acceptance reference |
+| -------- | ------------------------------------------------------------------------- | --------------- | --------------------------------- | -------------------- |
+| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete        | `5258b0a`                         | `951fd25`            |
+| 5B       | User review tools: ratings, flags, and custom collections                 | Complete        | `feat/stage-5b-photo-review`      | `4071948`            |
+| 5C       | Perceptual hashing and visual similarity review                           | Awaiting review | `feat/stage-5c-visual-similarity` | Pending              |
 
 ### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
 
@@ -150,6 +150,25 @@ Exit: users can browse discovered photographs smoothly with bounded memory and s
 - [x] Independent review verification passed at `4071948`: 657 tests passed across 52 test files (exit 0); all 17 required verification commands exit 0; typecheck, lint, formatting, production build, and unpacked build clean pass (exit 0); real-Electron photo review verification (built & unpacked) 12/12 passed each (exit 0); photo browsing verification (built & unpacked) 19/19 passed each (exit 0); duplicate review 18/18 passed (exit 0); scan workflow 14/14 passed (exit 0); vault import (built & unpacked) 11/11 passed each (exit 0); SQLite 8/8 passed (exit 0); smoke checks (built & unpacked) passed (exit 0); source preservation invariance confirmed.
 
 Exit: users can rate, flag, group, and filter photos with persistent, portable annotations and guaranteed source file preservation.
+
+### Stage 5C - Perceptual hashing and visual similarity review
+
+**Awaiting review.**
+
+- [x] Deterministic 64-bit perceptual fingerprinting (`dhash64_v1`) suitable for recompression, resizing, and modest edits; computes 4x16-bit partition bucket integers for sub-key indexing; Hamming distance comparison (0–64 bits) and bounded algorithmic similarity percentage `(1 - distance / 64) * 100%`. Explicitly documented algorithm limits (crops, rotations, burst scenes, extreme contrast shifts).
+- [x] Shared decode worker pool integration (`requestFingerprint`): executes outside Electron main with low priority, respecting the aggregate concurrency bounds (<= 2 live decode workers including terminating workers, <= 64 queued jobs, 15-second per-job timeout, max 128 MiB source size, max 100 megapixels input limit).
+- [x] Database migration 8 (`src/main/services/catalog/migrations.ts`): introduces `photo_perceptual_hashes` (content-revision keyed, algorithm-versioned), `similarity_candidate_pairs` (canonical location ordering `file_location_id_a < file_location_id_b`, Hamming distance, algorithmic score), `similarity_decisions` (canonical ordering, partial unique index `idx_sim_decision_pair_curr` on `is_current = 1`), `similarity_jobs`, and `similarity_job_items`.
+- [x] Partitioned candidate search (`findAndPersistCandidatePairs`): bucket-indexed matching avoiding all-pairs quadratic explosion; excludes exact byte duplicates (`sha256_a === sha256_b`, preserved for Stage 3 exact duplicate workflow); enforces per-photo candidate limit (<= 50) and catalog-wide candidate limit (<= 10,000 pairs).
+- [x] Resumable similarity coordinator (`SimilarityCoordinator`): snapshot job-scope authorization, cooperative cancellation via `AbortSignal`, restart recovery (`interrupted` status), and startup interruption reconciliation. Unchanged verified content reuses existing fingerprints; out-of-band changes advance revision and invalidate stale entries.
+- [x] Portable two-phase decision persistence: durable annotation journal (`appendSimilarityDecisionSync`, `kind: 'similarity_decision'`) with pre-commit fsync, SQLite commit, `persistencePending` UI propagation, startup reconciliation (`reconcileJournalWithDatabase`), and revision matching preventing stale mutations (`REVISION_MISMATCH`, `STALE_DECISION_VERSION`).
+- [x] Pure SQL pagination for candidate pairs (`getSimilarityCandidatePairs`): deterministic sorting (`distance ASC, id ASC`), bounded pages, and decision filtering (`all`, `unreviewed`, `edited_version`, `similar_scene`, `unrelated`).
+- [x] Responsive side-by-side comparison UI (`SimilarityReviewPanel`): toggleable view in Photos tab (`#photos-mode-similarity`), comparison cards showing filenames, source locations, dimensions when known (unknown remain explicit "Unknown"), recorded facts, algorithmic similarity score, Hamming distance, and explicit user decision buttons (`Edited Version`, `Similar Scene`, `Dismiss (Unrelated)`, `Clear Decision`).
+- [x] Stale presentation and selection guards: monotonic request tokens and pure render state updaters preventing racing queries or delayed completions from corrupting presentation.
+- [x] Narrow typed IPC channels (`similarity:start-analysis`, `similarity:cancel-analysis`, `similarity:resume-analysis`, `similarity:get-progress`, `similarity:get-pairs`, `similarity:set-decision`, `similarity:reconcile`) with bidirectional Zod validation and top-level sender frame authorization.
+- [x] Isolated-fixture verification scripts (`scripts/verify-electron-similarity.mjs`, `verify:similarity`, `verify:similarity:unpacked`): exercises DOM controls in real Electron across built and unpacked modes — scan -> navigate to similarity review -> trigger analysis -> progress bar -> inspect cards -> exercise all 4 decision actions -> filter candidate pairs -> restart persistence -> bitwise source preservation invariance.
+- [x] Full quality gates verified: 733/733 tests passed across 61 test files (exit 0); typecheck clean (exit 0); lint clean (exit 0); formatting clean (exit 0); build clean (exit 0); unpack build clean (exit 0); all 12 verification command suites passed with exit code 0.
+
+Exit: users can run local perceptual analysis, browse similar candidates side by side, and record explicit review decisions with guaranteed source file preservation.
 
 ## Stage 6 - Semantic photo search
 

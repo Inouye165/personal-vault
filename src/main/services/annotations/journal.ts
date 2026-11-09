@@ -1168,6 +1168,46 @@ export class AnnotationJournal {
     }))
   }
 
+  public async appendSimilarityDecision(params: {
+    opId?: string
+    locationIdA: number
+    locationIdB: number
+    expectedRevisionA: string
+    expectedRevisionB: string
+    decision: 'edited_version' | 'similar_scene' | 'unrelated' | 'unreviewed'
+    version: number
+  }): Promise<AnnotationJournalEntry> {
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntry((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
+      kind: 'similarity_decision',
+      ...params
+    }))
+  }
+
+  public appendSimilarityDecisionSync(params: {
+    opId?: string
+    locationIdA: number
+    locationIdB: number
+    expectedRevisionA: string
+    expectedRevisionB: string
+    decision: 'edited_version' | 'similar_scene' | 'unrelated' | 'unreviewed'
+    version: number
+  }): AnnotationJournalEntry {
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
+      kind: 'similarity_decision',
+      ...params
+    }))
+  }
+
   public async appendCommitRecord(params: {
     opId: string
     targetSeq: number

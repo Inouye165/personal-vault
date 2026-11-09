@@ -79,7 +79,14 @@ describe('preload bridge', () => {
         'addCollectionMember',
         'removeCollectionMember',
         'getPhotoMemberships',
-        'reconcileJournal'
+        'reconcileJournal',
+        'startSimilarityAnalysis',
+        'cancelSimilarityAnalysis',
+        'resumeSimilarityAnalysis',
+        'getSimilarityProgress',
+        'getSimilarityPairs',
+        'setSimilarityDecision',
+        'reconcileSimilarity'
       ].sort()
     )
   })

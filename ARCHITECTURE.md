@@ -393,3 +393,35 @@ src/
       - Current filter refs ensure in-flight saves do not evict photos when user switches filters concurrently.
       - Bounded pagination windows and in-flight request guards for collection and membership queries.
       - Accessible collection rename controls (`Rename collection {name}`, input `New name for collection {name}`, Save, Cancel) and explicit membership error banner with retry control.
+
+14. **Perceptual Hashing & Visual Similarity Review (Stage 5C)**:
+    - **Inviolable Principles & Source Preservation**:
+      - Source photographs and vault copies are strictly read-only. Fingerprinting uses read-only descriptors (`open(path, 'r')`) and verifies pre/post descriptor identity and content SHA-256 before accepting derived results.
+      - Similarity classification is an explicit user review annotation; neither perceptual hashing nor similarity suggestions touch or alter original files.
+      - Exact byte duplicates remain strictly under Stage 3 exact duplicate grouping; photos sharing verified SHA-256 are excluded from perceptual similarity candidate pairs.
+    - **Separation of Facts vs. Inferred Similarity vs. User Decisions**:
+      - Recorded facts (filename, original path, dimensions when known, byte size, filesystem timestamps, verified SHA-256) remain immutable.
+      - Algorithmic similarity score (`(64 - distance) / 64`) is an uncalibrated machine inference, never presented as calibrated probability or proof of an edited copy.
+      - Review decisions (`edited_version`, `similar_scene`, `unrelated`, `unreviewed`) are explicit user determinations persisted with two-phase journal durability.
+    - **Deterministic Fingerprinting Algorithm (`dhash64_v1`)**:
+      - Resize to 9x8 grayscale raw pixels ignoring aspect ratio (`fit: 'fill'`) after `.rotate()` orientation normalization.
+      - Row adjacent gradient comparison ($P(x, y) > P(x+1, y)$) yields 64-bit integer formatted as 16 hexadecimal characters.
+      - Documented limits: robust against recompression and resizing; crops shift gradients and may be missed; rotations without EXIF metadata alter adjacencies; burst shots produce close distances requiring explicit user discrimination; solid color/noise images may collide.
+    - **Resource Limits & Bounded Execution**:
+      - Image decoding and fingerprinting execute in existing Node worker threads outside Electron main.
+      - Aggregate concurrency shared with thumbnails: live workers <= 2 (including terminating workers), queued jobs <= 64.
+      - Interactive photo browsing requests take priority (`high`) over background fingerprinting (`low`), keeping browsing responsive during analysis.
+      - Candidate search partitions 64-bit hashes into 4x16-bit indexed buckets (`bucket_0`..`bucket_3`), querying candidates via SQLite index without full-table materialization.
+      - Algorithmic similarity threshold: Hamming distance <= 10 / 64 bits (>= 84.375% similarity).
+      - Dense similarity bounds: max 50 candidates per photo, max 10,000 total candidate pairs persisted per analysis run.
+      - Pagination: 10 candidate pairs per page with monotonic request tokens.
+    - **Catalog Persistence (Migration 8) & Resumable Coordinator**:
+      - Adds `photo_perceptual_hashes`, `similarity_candidate_pairs`, `similarity_decisions`, `similarity_jobs`, and `similarity_job_items`.
+      - Pair identity canonicalization: `file_location_id_a < file_location_id_b` strictly prevents reversed pairs.
+      - Resumable `SimilarityCoordinator`: captures authorized photo items into `similarity_job_items` upon start; resume processes only originally authorized pending items without including newly cataloged photos; cancellation/interruption never appears as completed; startup marks running jobs interrupted.
+    - **Portable Journal Persistence**:
+      - User decisions append `similarity_decision` to `review-journal.jsonl` with fsync before SQLite commit, followed by `op_committed`.
+      - Post-commit journal failures return `persistencePending: true` for truthful UI reporting and retry without re-running transactions.
+    - **IPC & Renderer Integration**:
+      - Bidirectional Zod validation across `similarity:*` IPC channels with sender validation.
+      - `SimilarityReviewPanel` renders side-by-side thumbnail comparisons, recorded facts, unknown values, decision controls, and progress/cancellation bars.

@@ -55,7 +55,13 @@ import type {
   RemoveCollectionMemberResponse,
   GetPhotoMembershipsRequest,
   GetPhotoMembershipsResponse,
-  ReconcileJournalResponse
+  ReconcileJournalResponse,
+  SimilarityAnalysisProgress,
+  SimilarityGetPairsRequest,
+  SimilarityGetPairsResponse,
+  SimilaritySetDecisionRequest,
+  SimilaritySetDecisionResponse,
+  SimilarityReconcileResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -103,6 +109,15 @@ export interface VaultApi {
   ) => Promise<RemoveCollectionMemberResponse>
   getPhotoMemberships: (request: GetPhotoMembershipsRequest) => Promise<GetPhotoMembershipsResponse>
   reconcileJournal: () => Promise<ReconcileJournalResponse>
+  startSimilarityAnalysis: () => Promise<SimilarityAnalysisProgress>
+  cancelSimilarityAnalysis: () => Promise<SimilarityAnalysisProgress>
+  resumeSimilarityAnalysis: () => Promise<SimilarityAnalysisProgress>
+  getSimilarityProgress: () => Promise<SimilarityAnalysisProgress>
+  getSimilarityPairs: (request: SimilarityGetPairsRequest) => Promise<SimilarityGetPairsResponse>
+  setSimilarityDecision: (
+    request: SimilaritySetDecisionRequest
+  ) => Promise<SimilaritySetDecisionResponse>
+  reconcileSimilarity: () => Promise<SimilarityReconcileResponse>
 }
 
 declare global {

@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { usePhotos, PHOTO_BOUNDS } from '../hooks/usePhotos'
 import { usePhotoReview } from '../hooks/usePhotoReview'
+import { SimilarityReviewPanel } from './SimilarityReviewPanel'
 import type {
   PhotoFlagFilter,
   PhotoItem,
@@ -222,6 +223,7 @@ export function PhotosPanel() {
   const [renamingCollectionId, setRenamingCollectionId] = useState<number | null>(null)
   const [renameInputValue, setRenameInputValue] = useState('')
   const [collectionActionError, setCollectionActionError] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<'grid' | 'similarity'>('grid')
 
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -350,211 +352,242 @@ export function PhotosPanel() {
             </span>
           </div>
 
-          {/* Filter Bar */}
-          <div className="photos-filter-bar" role="search" aria-label="Photo filters">
-            <div className="filter-group">
-              <label htmlFor="filter-rating" className="filter-label">
-                Rating:
-              </label>
-              <select
-                id="filter-rating"
-                aria-label="Filter by Rating"
-                className="filter-select"
-                value={ratingFilter}
-                onChange={(e) => setRatingFilter(e.target.value as PhotoRatingFilter)}
-              >
-                <option value="all">All Ratings</option>
-                <option value="unrated">Unrated</option>
-                <option value="1">1+ Stars</option>
-                <option value="2">2+ Stars</option>
-                <option value="3">3+ Stars</option>
-                <option value="4">4+ Stars</option>
-                <option value="5">5 Stars</option>
-              </select>
-            </div>
-
-            <div className="filter-group">
-              <label htmlFor="filter-flag" className="filter-label">
-                Flag:
-              </label>
-              <select
-                id="filter-flag"
-                aria-label="Filter by Flag"
-                className="filter-select"
-                value={flagFilter}
-                onChange={(e) => setFlagFilter(e.target.value as PhotoFlagFilter)}
-              >
-                <option value="all">All Flags</option>
-                <option value="none">Unflagged</option>
-                <option value="pick">Pick</option>
-                <option value="reject">Reject</option>
-              </select>
-            </div>
-
-            <div className="filter-group">
-              <label htmlFor="filter-collection" className="filter-label">
-                Collection:
-              </label>
-              <select
-                id="filter-collection"
-                aria-label="Filter by Collection"
-                className="filter-select"
-                value={collectionId !== null ? String(collectionId) : ''}
-                onChange={(e) => setCollectionId(e.target.value ? Number(e.target.value) : null)}
-              >
-                <option value="">All Collections</option>
-                {collections.map((col) => (
-                  <option key={col.id} value={String(col.id)}>
-                    {col.name} ({col.photoCount ?? 0})
-                  </option>
-                ))}
-              </select>
-            </div>
-
+          <div className="photos-mode-toggle" role="group" aria-label="Photo view mode">
             <button
+              id="photos-mode-grid"
               type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={resetFilters}
-              title="Reset all filters"
+              className={`btn btn-sm ${viewMode === 'grid' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setViewMode('grid')}
             >
-              Reset filters
+              Photo Grid
+            </button>
+            <button
+              id="photos-mode-similarity"
+              type="button"
+              className={`btn btn-sm ${viewMode === 'similarity' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setViewMode('similarity')}
+            >
+              Visual Similarity
             </button>
           </div>
 
-          <div className="photos-toolbar-actions">
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => void refresh()}
-              disabled={isLoading}
-              title="Refresh photograph catalog"
-            >
-              <RefreshCw size={14} className={isLoading ? 'spin' : ''} />
-              <span>Refresh</span>
-            </button>
-          </div>
+          {viewMode === 'grid' && (
+            <>
+              {/* Filter Bar */}
+              <div className="photos-filter-bar" role="search" aria-label="Photo filters">
+                <div className="filter-group">
+                  <label htmlFor="filter-rating" className="filter-label">
+                    Rating:
+                  </label>
+                  <select
+                    id="filter-rating"
+                    aria-label="Filter by Rating"
+                    className="filter-select"
+                    value={ratingFilter}
+                    onChange={(e) => setRatingFilter(e.target.value as PhotoRatingFilter)}
+                  >
+                    <option value="all">All Ratings</option>
+                    <option value="unrated">Unrated</option>
+                    <option value="1">1+ Stars</option>
+                    <option value="2">2+ Stars</option>
+                    <option value="3">3+ Stars</option>
+                    <option value="4">4+ Stars</option>
+                    <option value="5">5 Stars</option>
+                  </select>
+                </div>
+
+                <div className="filter-group">
+                  <label htmlFor="filter-flag" className="filter-label">
+                    Flag:
+                  </label>
+                  <select
+                    id="filter-flag"
+                    aria-label="Filter by Flag"
+                    className="filter-select"
+                    value={flagFilter}
+                    onChange={(e) => setFlagFilter(e.target.value as PhotoFlagFilter)}
+                  >
+                    <option value="all">All Flags</option>
+                    <option value="none">Unflagged</option>
+                    <option value="pick">Pick</option>
+                    <option value="reject">Reject</option>
+                  </select>
+                </div>
+
+                <div className="filter-group">
+                  <label htmlFor="filter-collection" className="filter-label">
+                    Collection:
+                  </label>
+                  <select
+                    id="filter-collection"
+                    aria-label="Filter by Collection"
+                    className="filter-select"
+                    value={collectionId !== null ? String(collectionId) : ''}
+                    onChange={(e) =>
+                      setCollectionId(e.target.value ? Number(e.target.value) : null)
+                    }
+                  >
+                    <option value="">All Collections</option>
+                    {collections.map((col) => (
+                      <option key={col.id} value={String(col.id)}>
+                        {col.name} ({col.photoCount ?? 0})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={resetFilters}
+                  title="Reset all filters"
+                >
+                  Reset filters
+                </button>
+              </div>
+
+              <div className="photos-toolbar-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void refresh()}
+                  disabled={isLoading}
+                  title="Refresh photograph catalog"
+                >
+                  <RefreshCw size={14} className={isLoading ? 'spin' : ''} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
-        {/* Status Notices */}
-        {isLoading && totalCount === 0 && (
-          <div className="notice" role="status">
-            <RefreshCw size={16} className="spin" />
-            <span>Loading photographs…</span>
-          </div>
-        )}
+        {viewMode === 'similarity' ? (
+          <SimilarityReviewPanel />
+        ) : (
+          <>
+            {/* Status Notices */}
+            {isLoading && totalCount === 0 && (
+              <div className="notice" role="status">
+                <RefreshCw size={16} className="spin" />
+                <span>Loading photographs…</span>
+              </div>
+            )}
 
-        {error && (
-          <div className="notice notice-error" role="alert">
-            <AlertTriangle size={16} />
-            <div className="notice-content">
-              <strong>Failed to load photographs</strong>
-              <p>{error}</p>
-            </div>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => void refresh()}
-            >
-              Retry
-            </button>
-          </div>
-        )}
+            {error && (
+              <div className="notice notice-error" role="alert">
+                <AlertTriangle size={16} />
+                <div className="notice-content">
+                  <strong>Failed to load photographs</strong>
+                  <p>{error}</p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void refresh()}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
 
-        {!isLoading && !error && totalCount === 0 && (
-          <div className="notice" role="status">
-            <ImageIcon size={24} />
-            <div className="notice-content">
-              <strong>
-                {ratingFilter !== 'all' || flagFilter !== 'all' || collectionId !== null
-                  ? 'No photographs match the current filter criteria'
-                  : 'No photographs discovered yet'}
-              </strong>
-              <p>
-                {ratingFilter !== 'all' || flagFilter !== 'all' || collectionId !== null
-                  ? 'Try selecting different filters or click Reset filters.'
-                  : 'Connect a source folder and run a scan to discover photographs.'}
-              </p>
-            </div>
-          </div>
-        )}
+            {!isLoading && !error && totalCount === 0 && (
+              <div className="notice" role="status">
+                <ImageIcon size={24} />
+                <div className="notice-content">
+                  <strong>
+                    {ratingFilter !== 'all' || flagFilter !== 'all' || collectionId !== null
+                      ? 'No photographs match the current filter criteria'
+                      : 'No photographs discovered yet'}
+                  </strong>
+                  <p>
+                    {ratingFilter !== 'all' || flagFilter !== 'all' || collectionId !== null
+                      ? 'Try selecting different filters or click Reset filters.'
+                      : 'Connect a source folder and run a scan to discover photographs.'}
+                  </p>
+                </div>
+              </div>
+            )}
 
-        {/* Virtualized Grid Container */}
-        {totalCount > 0 && (
-          <div
-            ref={containerRef}
-            className="photos-grid-scroll-container photos-grid-container"
-            onScroll={handleScroll}
-            tabIndex={-1}
-            role="region"
-            aria-label="Photographs Grid"
-          >
-            <div
-              className="photos-virtual-height-holder photos-virtual-container"
-              style={{
-                height: `${totalHeight}px`,
-                position: 'relative',
-                width: '100%'
-              }}
-            >
-              {visibleIndices.map((index) => {
-                const photo = getPhoto(index)
-                const row = Math.floor(index / columns)
-                const col = index % columns
-                const top = row * rowHeight
-                const left = col * (cellWidth + gap)
+            {/* Virtualized Grid Container */}
+            {totalCount > 0 && (
+              <div
+                ref={containerRef}
+                className="photos-grid-scroll-container photos-grid-container"
+                onScroll={handleScroll}
+                tabIndex={-1}
+                role="region"
+                aria-label="Photographs Grid"
+              >
+                <div
+                  className="photos-virtual-height-holder photos-virtual-container"
+                  style={{
+                    height: `${totalHeight}px`,
+                    position: 'relative',
+                    width: '100%'
+                  }}
+                >
+                  {visibleIndices.map((index) => {
+                    const photo = getPhoto(index)
+                    const row = Math.floor(index / columns)
+                    const col = index % columns
+                    const top = row * rowHeight
+                    const left = col * (cellWidth + gap)
 
-                if (!photo) {
-                  return (
-                    <div
-                      key={`placeholder-${index}`}
-                      className="photo-card photo-cell photo-skeleton"
-                      style={{
-                        position: 'absolute',
-                        top: `${top}px`,
-                        left: `${left}px`,
-                        width: `${cellWidth}px`,
-                        height: `${cellHeight}px`
-                      }}
-                    >
-                      <div className="photo-thumbnail-container">
-                        <div className="thumbnail-placeholder loading">
-                          <FileImage size={28} className="pulse" />
+                    if (!photo) {
+                      return (
+                        <div
+                          key={`placeholder-${index}`}
+                          className="photo-card photo-cell photo-skeleton"
+                          style={{
+                            position: 'absolute',
+                            top: `${top}px`,
+                            left: `${left}px`,
+                            width: `${cellWidth}px`,
+                            height: `${cellHeight}px`
+                          }}
+                        >
+                          <div className="photo-thumbnail-container">
+                            <div className="thumbnail-placeholder loading">
+                              <FileImage size={28} className="pulse" />
+                            </div>
+                          </div>
+                          <div className="photo-card-info">
+                            <span className="photo-filename">Loading…</span>
+                          </div>
                         </div>
-                      </div>
-                      <div className="photo-card-info">
-                        <span className="photo-filename">Loading…</span>
-                      </div>
-                    </div>
-                  )
-                }
+                      )
+                    }
 
-                const thumb = thumbnails.get(photo.id)
-                const isSelected = selectedId === photo.id
+                    const thumb = thumbnails.get(photo.id)
+                    const isSelected = selectedId === photo.id
 
-                return (
-                  <PhotoCardCell
-                    key={photo.id}
-                    photo={photo}
-                    thumb={thumb}
-                    isSelected={isSelected}
-                    top={top}
-                    left={left}
-                    cellWidth={cellWidth}
-                    cellHeight={cellHeight}
-                    onSelect={selectPhoto}
-                    onKeyDown={handleKeyDown}
-                    requestThumbnail={requestThumbnail}
-                    cancelThumbnail={cancelThumbnail}
-                  />
-                )
-              })}
-            </div>
-          </div>
+                    return (
+                      <PhotoCardCell
+                        key={photo.id}
+                        photo={photo}
+                        thumb={thumb}
+                        isSelected={isSelected}
+                        top={top}
+                        left={left}
+                        cellWidth={cellWidth}
+                        cellHeight={cellHeight}
+                        onSelect={selectPhoto}
+                        onKeyDown={handleKeyDown}
+                        requestThumbnail={requestThumbnail}
+                        cancelThumbnail={cancelThumbnail}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
       {/* Details Side Panel */}
-      {selectedPhoto && (
+      {viewMode === 'grid' && selectedPhoto && (
         <aside className="photo-details-panel" aria-label="Photograph Details">
           <div className="details-header">
             <h3>Photograph Details</h3>

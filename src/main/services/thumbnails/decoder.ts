@@ -11,6 +11,7 @@ import { extname } from 'node:path'
 import { createHash } from 'node:crypto'
 import sharp from 'sharp'
 import { THUMBNAIL_LIMITS } from './types'
+import { extractDHash64FromImageBuffer } from '../similarity/fingerprint'
 
 // Configure sharp bounds
 sharp.concurrency(1)
@@ -76,14 +77,53 @@ const RAW_EXTENSIONS = new Set([
 ])
 const SVG_EXTENSIONS = new Set(['.svg', '.svgz'])
 
-export async function decodeThumbnail(params: DecodeInputParams): Promise<DecodeResult> {
+export type ReadSourceFileResult =
+  | {
+      readonly status: 'success'
+      readonly fileBuffer: Buffer
+      readonly computedSha256: string
+    }
+  | {
+      readonly status: 'unsupported'
+      readonly reason: string
+    }
+  | {
+      readonly status: 'error'
+      readonly code: string
+      readonly message: string
+    }
+
+export type FingerprintDecodeResult =
+  | {
+      readonly status: 'ready'
+      readonly fingerprint: string
+      readonly bucket0: number
+      readonly bucket1: number
+      readonly bucket2: number
+      readonly bucket3: number
+      readonly width: number
+      readonly height: number
+      readonly algorithmVersion: string
+      readonly computedSha256: string
+    }
+  | {
+      readonly status: 'unsupported'
+      readonly reason: string
+    }
+  | {
+      readonly status: 'error'
+      readonly code: string
+      readonly message: string
+    }
+
+export async function readAndVerifySourceFile(
+  params: DecodeInputParams
+): Promise<ReadSourceFileResult> {
   const {
     sourcePath,
     expectedByteSize,
     expectedMtimeMs,
     expectedSha256,
-    maxDimension = THUMBNAIL_LIMITS.MAX_DIMENSION_PX,
-    maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS,
     maxSourceSizeBytes = THUMBNAIL_LIMITS.MAX_SOURCE_SIZE_BYTES,
     approvedRoots
   } = params
@@ -152,6 +192,7 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
   let fileBuffer: Buffer
   let canonicalPath: string
   let preLstat: import('node:fs').Stats
+  let computedSha256: string
   try {
     preLstat = lstatSync(sourcePath)
     if (preLstat.isSymbolicLink() || !preLstat.isFile()) {
@@ -252,7 +293,7 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
       }
     }
 
-    const computedSha256 = hasher.digest('hex')
+    computedSha256 = hasher.digest('hex')
     if (expectedSha256 && computedSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
       return {
         status: 'error',
@@ -321,13 +362,30 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
     }
   }
 
-  // 5. Sharp resize and encode to WebP
+  return {
+    status: 'success',
+    fileBuffer,
+    computedSha256
+  }
+}
+
+export async function decodeThumbnail(params: DecodeInputParams): Promise<DecodeResult> {
+  const {
+    maxDimension = THUMBNAIL_LIMITS.MAX_DIMENSION_PX,
+    maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS
+  } = params
+
+  const verified = await readAndVerifySourceFile(params)
+  if (verified.status !== 'success') {
+    return verified
+  }
+
+  // Sharp resize and encode to WebP
   try {
-    const image = sharp(fileBuffer, {
+    const image = sharp(verified.fileBuffer, {
       limitInputPixels: maxInputPixels
     })
 
-    // If animated format like GIF, select first frame
     const pipeline = image.rotate().resize({
       width: maxDimension,
       height: maxDimension,
@@ -351,6 +409,39 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
       status: 'error',
       code: 'DECODE_FAILED',
       message: err instanceof Error ? err.message : 'Failed to decode image'
+    }
+  }
+}
+
+export async function decodeFingerprint(
+  params: DecodeInputParams
+): Promise<FingerprintDecodeResult> {
+  const { maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS } = params
+
+  const verified = await readAndVerifySourceFile(params)
+  if (verified.status !== 'success') {
+    return verified
+  }
+
+  try {
+    const fp = await extractDHash64FromImageBuffer(verified.fileBuffer, maxInputPixels)
+    return {
+      status: 'ready',
+      fingerprint: fp.fingerprint,
+      bucket0: fp.bucket0,
+      bucket1: fp.bucket1,
+      bucket2: fp.bucket2,
+      bucket3: fp.bucket3,
+      width: fp.width,
+      height: fp.height,
+      algorithmVersion: fp.algorithmVersion,
+      computedSha256: verified.computedSha256
+    }
+  } catch (err: unknown) {
+    return {
+      status: 'error',
+      code: 'DECODE_FAILED',
+      message: err instanceof Error ? err.message : 'Failed to decode image for fingerprint'
     }
   }
 }

@@ -46,7 +46,7 @@ describe('CatalogDatabase Stage 5B Photo Review & Collections', () => {
   })
 
   it('runs Migration 7 and checks schema version', () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(7)
+    expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(7)
     const tables = catalog
       .getRawDb()
       .prepare("SELECT name FROM sqlite_master WHERE type='table';")

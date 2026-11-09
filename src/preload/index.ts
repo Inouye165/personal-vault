@@ -61,6 +61,12 @@ import {
   GetPhotoMembershipsRequestSchema,
   GetPhotoMembershipsResponseSchema,
   ReconcileJournalResponseSchema,
+  SimilarityAnalysisProgressSchema,
+  SimilarityGetPairsRequestSchema,
+  SimilarityGetPairsResponseSchema,
+  SimilaritySetDecisionRequestSchema,
+  SimilaritySetDecisionResponseSchema,
+  SimilarityReconcileResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -118,7 +124,13 @@ import {
   type RemoveCollectionMemberResponse,
   type GetPhotoMembershipsRequest,
   type GetPhotoMembershipsResponse,
-  type ReconcileJournalResponse
+  type ReconcileJournalResponse,
+  type SimilarityAnalysisProgress,
+  type SimilarityGetPairsRequest,
+  type SimilarityGetPairsResponse,
+  type SimilaritySetDecisionRequest,
+  type SimilaritySetDecisionResponse,
+  type SimilarityReconcileResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -621,6 +633,81 @@ const api: VaultApi = {
     const result = validatePayload(ReconcileJournalResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid reconcileJournal response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startSimilarityAnalysis(): Promise<SimilarityAnalysisProgress> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_START_ANALYSIS)
+    const result = validatePayload(SimilarityAnalysisProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startSimilarityAnalysis response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelSimilarityAnalysis(): Promise<SimilarityAnalysisProgress> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_CANCEL_ANALYSIS)
+    const result = validatePayload(SimilarityAnalysisProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelSimilarityAnalysis response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeSimilarityAnalysis(): Promise<SimilarityAnalysisProgress> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_RESUME_ANALYSIS)
+    const result = validatePayload(SimilarityAnalysisProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeSimilarityAnalysis response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getSimilarityProgress(): Promise<SimilarityAnalysisProgress> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_GET_PROGRESS)
+    const result = validatePayload(SimilarityAnalysisProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getSimilarityProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getSimilarityPairs(
+    request: SimilarityGetPairsRequest
+  ): Promise<SimilarityGetPairsResponse> {
+    const parsed = validatePayload(SimilarityGetPairsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getSimilarityPairs request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_GET_PAIRS, parsed.data)
+    const result = validatePayload(SimilarityGetPairsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getSimilarityPairs response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async setSimilarityDecision(
+    request: SimilaritySetDecisionRequest
+  ): Promise<SimilaritySetDecisionResponse> {
+    const parsed = validatePayload(SimilaritySetDecisionRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid setSimilarityDecision request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_SET_DECISION, parsed.data)
+    const result = validatePayload(SimilaritySetDecisionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid setSimilarityDecision response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async reconcileSimilarity(): Promise<SimilarityReconcileResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SIMILARITY_RECONCILE)
+    const result = validatePayload(SimilarityReconcileResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid reconcileSimilarity response from main: ${result.error}`)
     }
     return result.data
   }

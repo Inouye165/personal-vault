@@ -231,6 +231,7 @@ async function main() {
         'addCollectionMember',
         'cancelImport',
         'cancelScan',
+        'cancelSimilarityAnalysis',
         'cancelThumbnail',
         'createCollection',
         'dismissScanJob',
@@ -247,6 +248,8 @@ async function main() {
         'getPhotoMemberships',
         'getPhotosDiagnostics',
         'getPhotosPage',
+        'getSimilarityPairs',
+        'getSimilarityProgress',
         'getThumbnail',
         'getVaultStatus',
         'initializeVault',
@@ -256,18 +259,22 @@ async function main() {
         'pauseImport',
         'pauseScan',
         'reconcileJournal',
+        'reconcileSimilarity',
         'removeCollectionMember',
         'renameCollection',
         'resumeImport',
         'resumeScan',
+        'resumeSimilarityAnalysis',
         'selectRoots',
         'selectVaultDirectory',
         'setActiveVault',
         'setDuplicateReview',
         'setPhotoAnnotation',
+        'setSimilarityDecision',
         'setTab',
         'startImport',
-        'startScan'
+        'startScan',
+        'startSimilarityAnalysis'
       ]
       if (JSON.stringify(bridge.methods) !== JSON.stringify(expectMethods)) {
         fail(`window.api methods were ${JSON.stringify(bridge.methods)}`)

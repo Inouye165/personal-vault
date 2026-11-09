@@ -798,9 +798,147 @@ export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
     kind: z.literal('op_aborted'),
     targetSeq: z.number().int().positive(),
     reason: z.string().min(1)
+  }),
+  z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
+    kind: z.literal('similarity_decision'),
+    locationIdA: z.number().int().positive(),
+    locationIdB: z.number().int().positive(),
+    expectedRevisionA: z.string().min(1),
+    expectedRevisionB: z.string().min(1),
+    decision: z.enum(['edited_version', 'similar_scene', 'unrelated', 'unreviewed']),
+    version: z.number().int().positive()
   })
 ])
 export type AnnotationJournalEntry = z.infer<typeof AnnotationJournalEntrySchema>
+
+// ============================================================================
+// Stage 5C: Visual Similarity Review Schemas
+// ============================================================================
+
+export const SimilarityJobStatusSchema = z.enum([
+  'idle',
+  'running',
+  'paused',
+  'cancelled',
+  'interrupted',
+  'completed',
+  'failed'
+])
+export type SimilarityJobStatus = z.infer<typeof SimilarityJobStatusSchema>
+
+export const SimilarityAnalysisProgressSchema = z.object({
+  jobId: z.string().nullable(),
+  status: SimilarityJobStatusSchema,
+  algorithmVersion: z.string(),
+  totalPhotos: z.number().int().nonnegative(),
+  processedPhotos: z.number().int().nonnegative(),
+  errorPhotos: z.number().int().nonnegative(),
+  unsupportedPhotos: z.number().int().nonnegative(),
+  candidatePairsFound: z.number().int().nonnegative(),
+  startedAtMs: z.number().int().nullable(),
+  updatedAtMs: z.number().int().nullable(),
+  completedAtMs: z.number().int().nullable()
+})
+export type SimilarityAnalysisProgress = z.infer<typeof SimilarityAnalysisProgressSchema>
+
+export const SimilarityDecisionTypeSchema = z.enum([
+  'edited_version',
+  'similar_scene',
+  'unrelated',
+  'unreviewed'
+])
+export type SimilarityDecisionType = z.infer<typeof SimilarityDecisionTypeSchema>
+
+export const SimilarityCandidatePhotoSchema = z.object({
+  id: z.number().int().positive(),
+  fileName: z.string().min(1),
+  originalPath: z.string().min(1),
+  byteSize: z.number().int().nonnegative(),
+  filesystemBirthtimeMs: z.number().nullable(),
+  filesystemMtimeMs: z.number().nullable(),
+  activeHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i)
+    .nullable(),
+  discoveryObservationId: z.number().int().positive(),
+  width: z.number().int().positive().nullable(),
+  height: z.number().int().positive().nullable(),
+  rating: z.number().int().min(1).max(5).nullable(),
+  flag: z.enum(['none', 'pick', 'reject'])
+})
+export type SimilarityCandidatePhoto = z.infer<typeof SimilarityCandidatePhotoSchema>
+
+export const SimilarityCandidatePairSchema = z.object({
+  id: z.number().int().positive(),
+  jobId: z.string().min(1),
+  locationIdA: z.number().int().positive(),
+  locationIdB: z.number().int().positive(),
+  photoA: SimilarityCandidatePhotoSchema,
+  photoB: SimilarityCandidatePhotoSchema,
+  distance: z.number().int().min(0).max(64),
+  similarityScore: z.number().min(0).max(1),
+  algorithmVersion: z.string().min(1),
+  decision: SimilarityDecisionTypeSchema,
+  decisionVersion: z.number().int().positive().nullable(),
+  decisionUpdatedAtMs: z.number().int().nullable(),
+  createdAtMs: z.number().int().positive()
+})
+export type SimilarityCandidatePair = z.infer<typeof SimilarityCandidatePairSchema>
+
+export const SimilarityGetPairsFilterSchema = z.enum([
+  'all',
+  'unreviewed',
+  'reviewed',
+  'edited_version',
+  'similar_scene',
+  'unrelated'
+])
+export type SimilarityGetPairsFilter = z.infer<typeof SimilarityGetPairsFilterSchema>
+
+export const SimilarityGetPairsRequestSchema = z.object({
+  page: z.number().int().positive().default(1),
+  pageSize: z.number().int().positive().max(100).default(10),
+  filter: SimilarityGetPairsFilterSchema.default('all')
+})
+export type SimilarityGetPairsRequest = z.infer<typeof SimilarityGetPairsRequestSchema>
+
+export const SimilarityGetPairsResponseSchema = z.object({
+  pairs: z.array(SimilarityCandidatePairSchema),
+  totalCount: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  pageSize: z.number().int().positive(),
+  totalPages: z.number().int().nonnegative()
+})
+export type SimilarityGetPairsResponse = z.infer<typeof SimilarityGetPairsResponseSchema>
+
+export const SimilaritySetDecisionRequestSchema = z.object({
+  locationIdA: z.number().int().positive(),
+  locationIdB: z.number().int().positive(),
+  expectedRevisionA: z.string().min(1),
+  expectedRevisionB: z.string().min(1),
+  decision: SimilarityDecisionTypeSchema,
+  expectedVersion: z.number().int().positive().optional()
+})
+export type SimilaritySetDecisionRequest = z.infer<typeof SimilaritySetDecisionRequestSchema>
+
+export const SimilaritySetDecisionResponseSchema = z.object({
+  success: z.boolean(),
+  decision: SimilarityDecisionTypeSchema,
+  version: z.number().int().positive(),
+  persistencePending: z.boolean().default(false),
+  message: z.string().optional()
+})
+export type SimilaritySetDecisionResponse = z.infer<typeof SimilaritySetDecisionResponseSchema>
+
+export const SimilarityReconcileResponseSchema = z.object({
+  reconciledCount: z.number().int().nonnegative(),
+  unresolvedCount: z.number().int().nonnegative()
+})
+export type SimilarityReconcileResponse = z.infer<typeof SimilarityReconcileResponseSchema>
 
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,

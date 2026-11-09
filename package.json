@@ -24,6 +24,8 @@
     "verify:photos:unpacked": "node scripts/verify-electron-photos.mjs --mode=unpacked",
     "verify:photo-review": "node scripts/verify-electron-photo-review.mjs",
     "verify:photo-review:unpacked": "node scripts/verify-electron-photo-review.mjs --mode=unpacked",
+    "verify:similarity": "node scripts/verify-electron-similarity.mjs",
+    "verify:similarity:unpacked": "node scripts/verify-electron-similarity.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

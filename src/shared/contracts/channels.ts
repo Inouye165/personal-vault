@@ -38,7 +38,14 @@ export const IPC_CHANNELS = {
   COLLECTIONS_ADD_MEMBER: 'collections:add-member',
   COLLECTIONS_REMOVE_MEMBER: 'collections:remove-member',
   COLLECTIONS_GET_MEMBERSHIPS_FOR_PHOTO: 'collections:get-memberships-for-photo',
-  PHOTOS_RECONCILE_JOURNAL: 'photos:reconcile-journal'
+  PHOTOS_RECONCILE_JOURNAL: 'photos:reconcile-journal',
+  SIMILARITY_START_ANALYSIS: 'similarity:start-analysis',
+  SIMILARITY_CANCEL_ANALYSIS: 'similarity:cancel-analysis',
+  SIMILARITY_RESUME_ANALYSIS: 'similarity:resume-analysis',
+  SIMILARITY_GET_PROGRESS: 'similarity:get-progress',
+  SIMILARITY_GET_PAIRS: 'similarity:get-pairs',
+  SIMILARITY_SET_DECISION: 'similarity:set-decision',
+  SIMILARITY_RECONCILE: 'similarity:reconcile'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

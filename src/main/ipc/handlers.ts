@@ -92,7 +92,15 @@ import {
   type AddCollectionMemberResponse,
   type RemoveCollectionMemberResponse,
   type GetPhotoMembershipsResponse,
-  type ReconcileJournalResponse
+  type ReconcileJournalResponse,
+  SimilarityGetPairsRequestSchema,
+  SimilarityGetPairsResponseSchema,
+  SimilaritySetDecisionRequestSchema,
+  SimilaritySetDecisionResponseSchema,
+  type SimilarityAnalysisProgress,
+  type SimilarityGetPairsResponse,
+  type SimilaritySetDecisionResponse,
+  type SimilarityReconcileResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -102,6 +110,7 @@ import {
   type VaultImportCoordinator
 } from '../services/vault'
 import type { ThumbnailCoordinator } from '../services/thumbnails'
+import type { SimilarityCoordinator } from '../services/similarity'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 
 export interface IpcHandlerOptions {
@@ -110,6 +119,7 @@ export interface IpcHandlerOptions {
   readonly coordinator?: ScanJobCoordinator
   readonly vaultCoordinator?: VaultImportCoordinator
   readonly thumbnailCoordinator?: ThumbnailCoordinator
+  readonly similarityCoordinator?: SimilarityCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
@@ -121,6 +131,7 @@ export function registerIpcHandlers({
   coordinator,
   vaultCoordinator,
   thumbnailCoordinator,
+  similarityCoordinator,
   getMainWindow,
   selectDirectories,
   selectVaultDirectory
@@ -955,6 +966,105 @@ export function registerIpcHandlers({
       return validated.data
     }
   )
+
+  handle(IPC_CHANNELS.SIMILARITY_START_ANALYSIS, async (): Promise<SimilarityAnalysisProgress> => {
+    if (!similarityCoordinator) {
+      throw new Error('Similarity coordinator unavailable')
+    }
+    await similarityCoordinator.startAnalysis()
+    return similarityCoordinator.getProgress()
+  })
+
+  handle(IPC_CHANNELS.SIMILARITY_CANCEL_ANALYSIS, (): SimilarityAnalysisProgress => {
+    if (!similarityCoordinator) {
+      throw new Error('Similarity coordinator unavailable')
+    }
+    similarityCoordinator.cancelAnalysis()
+    return similarityCoordinator.getProgress()
+  })
+
+  handle(IPC_CHANNELS.SIMILARITY_RESUME_ANALYSIS, async (): Promise<SimilarityAnalysisProgress> => {
+    if (!similarityCoordinator) {
+      throw new Error('Similarity coordinator unavailable')
+    }
+    await similarityCoordinator.resumeAnalysis()
+    return similarityCoordinator.getProgress()
+  })
+
+  handle(IPC_CHANNELS.SIMILARITY_GET_PROGRESS, (): SimilarityAnalysisProgress => {
+    if (!similarityCoordinator) {
+      return {
+        jobId: null,
+        status: 'idle',
+        algorithmVersion: 'dhash64_v1',
+        totalPhotos: 0,
+        processedPhotos: 0,
+        errorPhotos: 0,
+        unsupportedPhotos: 0,
+        candidatePairsFound: 0,
+        startedAtMs: null,
+        updatedAtMs: null,
+        completedAtMs: null
+      }
+    }
+    return similarityCoordinator.getProgress()
+  })
+
+  handle(IPC_CHANNELS.SIMILARITY_GET_PAIRS, (raw: unknown): SimilarityGetPairsResponse => {
+    const parsed = validatePayload(SimilarityGetPairsRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming SimilarityGetPairsRequest: ${parsed.error}`)
+    }
+    if (!catalog) {
+      return {
+        pairs: [],
+        totalCount: 0,
+        page: parsed.data.page,
+        pageSize: parsed.data.pageSize,
+        totalPages: 0
+      }
+    }
+    const res = catalog.getSimilarityCandidatePairs(parsed.data)
+    const validated = validatePayload(SimilarityGetPairsResponseSchema, res)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SimilarityGetPairsResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.SIMILARITY_SET_DECISION, (raw: unknown): SimilaritySetDecisionResponse => {
+    const parsed = validatePayload(SimilaritySetDecisionRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming SimilaritySetDecisionRequest: ${parsed.error}`)
+    }
+    if (!catalog) {
+      throw new Error('Catalog database unavailable')
+    }
+    const res = catalog.setSimilarityDecision(parsed.data)
+    const responsePayload = {
+      success: true,
+      decision: res.decision,
+      version: res.version,
+      persistencePending: res.persistencePending ?? false,
+      message: res.persistenceError
+    }
+    const validated = validatePayload(SimilaritySetDecisionResponseSchema, responsePayload)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SimilaritySetDecisionResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.SIMILARITY_RECONCILE, (): SimilarityReconcileResponse => {
+    if (!catalog) {
+      return { reconciledCount: 0, unresolvedCount: 0 }
+    }
+    const res = catalog.reconcileJournalWithDatabase()
+    return {
+      reconciledCount: res.reconciledCount,
+      unresolvedCount: 0
+    }
+  })
 
   if (vaultCoordinator && getMainWindow) {
     vaultCoordinator.onProgress((progress) => {

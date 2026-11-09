@@ -16,7 +16,8 @@ import {
   THUMBNAIL_LIMITS,
   type ThumbnailCoordinatorOptions,
   type ThumbnailRequestParams,
-  type ThumbnailDiagnostics
+  type ThumbnailDiagnostics,
+  type FingerprintJobResult
 } from './types'
 import type { ThumbnailResult } from '../../../shared/validation/ipc-schemas'
 
@@ -24,11 +25,11 @@ export { readWebPDimensions }
 
 interface QueuedItem {
   id: number
-  action: 'decode' | 'validate_cache'
+  action: 'decode' | 'validate_cache' | 'fingerprint'
   params: ThumbnailRequestParams
   cacheKey: string
   cachedBuf?: Buffer
-  resolve: (res: ThumbnailResult) => void
+  resolve: (res: ThumbnailResult | FingerprintJobResult) => void
   reject: (err: unknown) => void
   priorityOrder: number
 }
@@ -242,6 +243,113 @@ export class ThumbnailCoordinator {
     }
   }
 
+  public async requestFingerprint(params: ThumbnailRequestParams): Promise<FingerprintJobResult> {
+    if (this.isShuttingDown) {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        code: 'SHUTTING_DOWN',
+        message: 'Thumbnail service is shutting down'
+      }
+    }
+
+    if (this.queue.length >= this.maxQueuedJobs) {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        code: 'QUEUE_FULL',
+        message: `Image processing queue limit reached (${this.maxQueuedJobs} jobs)`
+      }
+    }
+
+    // Validate root containment if approved roots are configured
+    const roots = this.getApprovedRoots()
+    if (roots.length > 0) {
+      try {
+        const canonicalSource = realpathSync(params.sourcePath)
+        const isApproved = roots.some((root) => {
+          try {
+            const canonicalRoot = realpathSync(root)
+            return (
+              canonicalSource === canonicalRoot ||
+              canonicalSource.startsWith(canonicalRoot + '\\') ||
+              canonicalSource.startsWith(canonicalRoot + '/')
+            )
+          } catch {
+            return false
+          }
+        })
+        if (!isApproved) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'ACCESS_DENIED',
+            message: `Source path is outside approved roots: ${params.sourcePath}`
+          }
+        }
+      } catch {
+        return {
+          status: 'error',
+          locationId: params.locationId,
+          code: 'ACCESS_DENIED',
+          message: `Source path cannot be verified: ${params.sourcePath}`
+        }
+      }
+    }
+
+    // Check live source stability
+    try {
+      const st = statSync(params.sourcePath)
+      if (st.size > this.maxSourceSizeBytes) {
+        return {
+          status: 'error',
+          locationId: params.locationId,
+          code: 'OVERSIZED_SOURCE',
+          message: `Source file size (${st.size} bytes) exceeds limit (${this.maxSourceSizeBytes} bytes)`
+        }
+      }
+      if (params.expectedByteSize !== undefined && st.size !== params.expectedByteSize) {
+        return {
+          status: 'error',
+          locationId: params.locationId,
+          code: 'SOURCE_MODIFIED',
+          message: 'Source file size changed on disk'
+        }
+      }
+    } catch {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        code: 'SOURCE_UNAVAILABLE',
+        message: 'Source file is not accessible'
+      }
+    }
+
+    const priority = params.priority ?? 'low'
+    const priorityOrder = priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
+
+    return new Promise<FingerprintJobResult>((resolve, reject) => {
+      const item: QueuedItem = {
+        id: this.nextJobId++,
+        action: 'fingerprint',
+        params,
+        cacheKey: '',
+        resolve: (res) => resolve(res as FingerprintJobResult),
+        reject,
+        priorityOrder
+      }
+
+      const insertIndex = this.queue.findIndex((q) => q.priorityOrder > priorityOrder)
+      if (insertIndex === -1) {
+        this.queue.push(item)
+      } else {
+        this.queue.splice(insertIndex, 0, item)
+      }
+
+      this.processNext()
+    })
+  }
+
   private async executeRequestThumbnail(params: ThumbnailRequestParams): Promise<ThumbnailResult> {
     if (this.cancelledLocationIds.has(params.locationId)) {
       return {
@@ -448,6 +556,20 @@ export class ThumbnailCoordinator {
         maxBytes: THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES,
         stuck: process.env.PV_TEST_STUCK_VALIDATION === '1'
       })
+    } else if (item.action === 'fingerprint') {
+      currentEntry.worker.postMessage({
+        id: item.id,
+        action: 'fingerprint',
+        params: {
+          sourcePath: item.params.sourcePath,
+          expectedByteSize: item.params.expectedByteSize,
+          expectedMtimeMs: item.params.expectedMtimeMs,
+          expectedSha256: item.params.expectedSha256,
+          maxInputPixels: this.maxInputPixels,
+          maxSourceSizeBytes: this.maxSourceSizeBytes,
+          approvedRoots: this.getApprovedRoots()
+        }
+      })
     } else {
       this.totalDecodes++
 
@@ -548,6 +670,43 @@ export class ThumbnailCoordinator {
         this.processNext()
         return
       }
+    }
+
+    if (item.action === 'fingerprint') {
+      entry.item = null
+      entry.jobId = null
+      entry.locationId = null
+
+      if (msg.status === 'ready') {
+        item.resolve({
+          status: 'ready',
+          locationId: item.params.locationId,
+          fingerprint: msg.fingerprint as string,
+          bucket0: msg.bucket0 as number,
+          bucket1: msg.bucket1 as number,
+          bucket2: msg.bucket2 as number,
+          bucket3: msg.bucket3 as number,
+          width: msg.width as number,
+          height: msg.height as number,
+          algorithmVersion: msg.algorithmVersion as string,
+          computedSha256: msg.computedSha256 as string
+        })
+      } else if (msg.status === 'unsupported') {
+        item.resolve({
+          status: 'unsupported',
+          locationId: item.params.locationId,
+          reason: (msg.reason as string) || 'Unsupported image format'
+        })
+      } else {
+        item.resolve({
+          status: 'error',
+          locationId: item.params.locationId,
+          code: (msg.code as string) || 'FINGERPRINT_FAILED',
+          message: (msg.message as string) || 'Failed to compute fingerprint'
+        })
+      }
+      this.processNext()
+      return
     }
 
     entry.item = null

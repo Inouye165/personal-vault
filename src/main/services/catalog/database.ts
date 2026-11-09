@@ -72,9 +72,21 @@ import type {
   RemoveCollectionMemberInput,
   CatalogCollectionMembershipRecord,
   SetPhotoAnnotationInput,
-  CatalogPhotoAnnotationRecord
+  CatalogPhotoAnnotationRecord,
+  PhotoPerceptualHashRecord,
+  SavePhotoPerceptualHashInput,
+  SimilarityDecisionRecord,
+  SetSimilarityDecisionInput,
+  SimilarityJobRecord,
+  CreateSimilarityJobInput,
+  SimilarityJobItemRecord
 } from './types'
 import type { AnnotationJournal } from '../annotations/journal'
+import type {
+  AnnotationJournalEntry,
+  SimilarityCandidatePair,
+  SimilarityDecisionType
+} from '../../../shared/validation/ipc-schemas'
 
 interface RawFileRow {
   id: number
@@ -4044,6 +4056,804 @@ export class CatalogDatabase {
       createdAtMs: r.created_at_ms,
       updatedAtMs: r.updated_at_ms
     }))
+  }
+
+  // ==========================================================================
+  // Stage 5C: Perceptual Hashing & Similarity Operations
+  // ==========================================================================
+
+  public savePhotoPerceptualHash(input: SavePhotoPerceptualHashInput): PhotoPerceptualHashRecord {
+    this.assertOpen()
+    const now = Date.now()
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          'UPDATE photo_perceptual_hashes SET is_current = 0 WHERE file_location_id = ? AND algorithm_version = ?;'
+        )
+        .run(input.fileLocationId, input.algorithmVersion)
+
+      const stmt = this.db.prepare(`
+        INSERT INTO photo_perceptual_hashes (
+          file_location_id, discovery_observation_id, content_sha256, content_revision,
+          algorithm_version, fingerprint, bucket_0, bucket_1, bucket_2, bucket_3,
+          width, height, created_at_ms, is_current
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        RETURNING id, file_location_id, discovery_observation_id, content_sha256, content_revision,
+                  algorithm_version, fingerprint, bucket_0, bucket_1, bucket_2, bucket_3,
+                  width, height, created_at_ms, is_current;
+      `)
+
+      const row = stmt.get(
+        input.fileLocationId,
+        input.discoveryObservationId,
+        input.contentSha256,
+        input.contentRevision,
+        input.algorithmVersion,
+        input.fingerprint,
+        input.bucket0,
+        input.bucket1,
+        input.bucket2,
+        input.bucket3,
+        input.width ?? null,
+        input.height ?? null,
+        now
+      ) as {
+        id: number
+        file_location_id: number
+        discovery_observation_id: number
+        content_sha256: string
+        content_revision: string
+        algorithm_version: string
+        fingerprint: string
+        bucket_0: number
+        bucket_1: number
+        bucket_2: number
+        bucket_3: number
+        width: number | null
+        height: number | null
+        created_at_ms: number
+        is_current: number
+      }
+
+      this.db.exec('COMMIT;')
+
+      return {
+        id: row.id,
+        fileLocationId: row.file_location_id,
+        discoveryObservationId: row.discovery_observation_id,
+        contentSha256: row.content_sha256,
+        contentRevision: row.content_revision,
+        algorithmVersion: row.algorithm_version,
+        fingerprint: row.fingerprint,
+        bucket0: row.bucket_0,
+        bucket1: row.bucket_1,
+        bucket2: row.bucket_2,
+        bucket3: row.bucket_3,
+        width: row.width,
+        height: row.height,
+        createdAtMs: row.created_at_ms,
+        isCurrent: row.is_current === 1
+      }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getPhotoPerceptualHash(
+    fileLocationId: number,
+    algorithmVersion: string = 'dhash64_v1'
+  ): PhotoPerceptualHashRecord | null {
+    this.assertOpen()
+    const stmt = this.db.prepare(`
+      SELECT id, file_location_id, discovery_observation_id, content_sha256, content_revision,
+             algorithm_version, fingerprint, bucket_0, bucket_1, bucket_2, bucket_3,
+             width, height, created_at_ms, is_current
+      FROM photo_perceptual_hashes
+      WHERE file_location_id = ? AND algorithm_version = ? AND is_current = 1;
+    `)
+    const row = stmt.get(fileLocationId, algorithmVersion) as
+      | {
+          id: number
+          file_location_id: number
+          discovery_observation_id: number
+          content_sha256: string
+          content_revision: string
+          algorithm_version: string
+          fingerprint: string
+          bucket_0: number
+          bucket_1: number
+          bucket_2: number
+          bucket_3: number
+          width: number | null
+          height: number | null
+          created_at_ms: number
+          is_current: number
+        }
+      | undefined
+
+    if (!row) return null
+
+    return {
+      id: row.id,
+      fileLocationId: row.file_location_id,
+      discoveryObservationId: row.discovery_observation_id,
+      contentSha256: row.content_sha256,
+      contentRevision: row.content_revision,
+      algorithmVersion: row.algorithm_version,
+      fingerprint: row.fingerprint,
+      bucket0: row.bucket_0,
+      bucket1: row.bucket_1,
+      bucket2: row.bucket_2,
+      bucket3: row.bucket_3,
+      width: row.width,
+      height: row.height,
+      createdAtMs: row.created_at_ms,
+      isCurrent: row.is_current === 1
+    }
+  }
+
+  public findFingerprintMatchesForBuckets(
+    buckets: readonly [number, number, number, number],
+    excludeLocationId: number,
+    algorithmVersion: string = 'dhash64_v1'
+  ): Array<{ fileLocationId: number; fingerprint: string; contentSha256: string }> {
+    this.assertOpen()
+    const stmt = this.db.prepare(`
+      SELECT DISTINCT file_location_id, fingerprint, content_sha256
+      FROM photo_perceptual_hashes
+      WHERE algorithm_version = ?
+        AND is_current = 1
+        AND file_location_id > ?
+        AND (bucket_0 = ? OR bucket_1 = ? OR bucket_2 = ? OR bucket_3 = ?);
+    `)
+    const rows = stmt.all(
+      algorithmVersion,
+      excludeLocationId,
+      buckets[0],
+      buckets[1],
+      buckets[2],
+      buckets[3]
+    ) as Array<{
+      file_location_id: number
+      fingerprint: string
+      content_sha256: string
+    }>
+
+    return rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      fingerprint: r.fingerprint,
+      contentSha256: r.content_sha256
+    }))
+  }
+
+  public setSimilarityDecision(input: SetSimilarityDecisionInput): {
+    success: boolean
+    decision: SimilarityDecisionType
+    version: number
+    persistencePending?: boolean
+    persistenceError?: string
+  } {
+    this.assertOpen()
+    const locA = Math.min(input.locationIdA, input.locationIdB)
+    const locB = Math.max(input.locationIdA, input.locationIdB)
+    const revA =
+      input.locationIdA < input.locationIdB ? input.expectedRevisionA : input.expectedRevisionB
+    const revB =
+      input.locationIdA < input.locationIdB ? input.expectedRevisionB : input.expectedRevisionA
+
+    if (locA === locB) {
+      throw new Error('Cannot set similarity decision for a photo paired with itself')
+    }
+
+    const recordA = this.getFileLocationById(locA)
+    const recordB = this.getFileLocationById(locB)
+    if (!recordA || !recordB) {
+      throw new Error('Photo location not found for similarity decision')
+    }
+
+    const currentRevA = `rev:${recordA.discoveryObservationId}:${recordA.byteSize}:${recordA.filesystemMtimeMs ?? 'null'}:${recordA.activeHash ?? 'unhashed'}`
+    const currentRevB = `rev:${recordB.discoveryObservationId}:${recordB.byteSize}:${recordB.filesystemMtimeMs ?? 'null'}:${recordB.activeHash ?? 'unhashed'}`
+
+    if (revA !== currentRevA || revB !== currentRevB) {
+      throw new Error('REVISION_MISMATCH: Stale revision provided for similarity decision')
+    }
+
+    const now = Date.now()
+    const opId = randomUUID()
+
+    const existing = this.getSimilarityDecision(locA, locB)
+    if (
+      input.expectedVersion !== undefined &&
+      existing &&
+      existing.version !== input.expectedVersion
+    ) {
+      throw new Error('STALE_DECISION_VERSION')
+    }
+
+    const nextVersion = (existing?.version ?? 0) + 1
+
+    let journalEntry: AnnotationJournalEntry | null = null
+    let isCommitted = false
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      if (this.journal) {
+        journalEntry = this.journal.appendSimilarityDecisionSync({
+          opId,
+          locationIdA: locA,
+          locationIdB: locB,
+          expectedRevisionA: revA,
+          expectedRevisionB: revB,
+          decision: input.decision,
+          version: nextVersion
+        })
+      }
+
+      this.maybeHoldPersistenceBarrier(opId, journalEntry ? journalEntry.entrySeq : 0)
+
+      this.db
+        .prepare(
+          'UPDATE similarity_decisions SET is_current = 0 WHERE file_location_id_a = ? AND file_location_id_b = ?;'
+        )
+        .run(locA, locB)
+
+      if (input.decision !== 'unreviewed') {
+        this.db
+          .prepare(
+            `
+            INSERT INTO similarity_decisions (
+              file_location_id_a, file_location_id_b, content_revision_a, content_revision_b,
+              decision, version, created_at_ms, updated_at_ms, is_current
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1);
+          `
+          )
+          .run(
+            locA,
+            locB,
+            revA,
+            revB,
+            input.decision,
+            nextVersion,
+            existing?.createdAtMs ?? now,
+            now
+          )
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO journal_operations (op_id, entry_seq, kind, status, applied_at_ms) VALUES (?, ?, 'similarity_decision', 'committed', ?);"
+        )
+        .run(opId, journalEntry ? journalEntry.entrySeq : 0, now)
+
+      this.db.exec('COMMIT;')
+      isCommitted = true
+
+      let persistencePending = false
+      let persistenceError: string | undefined
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendCommitRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq
+          })
+        } catch (commitErr) {
+          persistencePending = true
+          persistenceError = commitErr instanceof Error ? commitErr.message : String(commitErr)
+        }
+      }
+
+      return {
+        success: true,
+        decision: input.decision,
+        version: nextVersion,
+        persistencePending,
+        ...(persistenceError ? { persistenceError } : {})
+      }
+    } catch (err) {
+      if (isCommitted) throw err
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      if (this.journal && journalEntry) {
+        try {
+          this.journal.appendAbortRecordSync({
+            opId,
+            targetSeq: journalEntry.entrySeq,
+            reason: err instanceof Error ? err.message : String(err)
+          })
+        } catch {
+          // ignore
+        }
+      }
+      throw err
+    }
+  }
+
+  public getSimilarityDecision(
+    locationIdA: number,
+    locationIdB: number
+  ): SimilarityDecisionRecord | null {
+    this.assertOpen()
+    const locA = Math.min(locationIdA, locationIdB)
+    const locB = Math.max(locationIdA, locationIdB)
+
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, file_location_id_a, file_location_id_b, content_revision_a, content_revision_b,
+               decision, version, created_at_ms, updated_at_ms, is_current
+        FROM similarity_decisions
+        WHERE file_location_id_a = ? AND file_location_id_b = ? AND is_current = 1;
+      `
+      )
+      .get(locA, locB) as
+      | {
+          id: number
+          file_location_id_a: number
+          file_location_id_b: number
+          content_revision_a: string
+          content_revision_b: string
+          decision: 'edited_version' | 'similar_scene' | 'unrelated'
+          version: number
+          created_at_ms: number
+          updated_at_ms: number
+          is_current: number
+        }
+      | undefined
+
+    if (!row) return null
+
+    return {
+      id: row.id,
+      locationIdA: row.file_location_id_a,
+      locationIdB: row.file_location_id_b,
+      contentRevisionA: row.content_revision_a,
+      contentRevisionB: row.content_revision_b,
+      decision: row.decision,
+      version: row.version,
+      createdAtMs: row.created_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      isCurrent: row.is_current === 1
+    }
+  }
+
+  public createSimilarityJob(input: CreateSimilarityJobInput): SimilarityJobRecord {
+    this.assertOpen()
+    const now = Date.now()
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          INSERT INTO similarity_jobs (
+            job_id, status, algorithm_version, total_photos, processed_photos,
+            error_photos, unsupported_photos, candidate_pairs_found,
+            started_at_ms, updated_at_ms, completed_at_ms
+          ) VALUES (?, 'running', ?, ?, 0, 0, 0, 0, ?, ?, NULL);
+        `
+        )
+        .run(input.jobId, input.algorithmVersion, input.totalPhotos, now, now)
+
+      const insertItemStmt = this.db.prepare(`
+        INSERT INTO similarity_job_items (job_id, file_location_id, status, error_message, updated_at_ms)
+        VALUES (?, ?, 'pending', NULL, ?);
+      `)
+
+      for (const locId of input.photoLocationIds) {
+        insertItemStmt.run(input.jobId, locId, now)
+      }
+
+      this.db.exec('COMMIT;')
+
+      return {
+        jobId: input.jobId,
+        status: 'running',
+        algorithmVersion: input.algorithmVersion,
+        totalPhotos: input.totalPhotos,
+        processedPhotos: 0,
+        errorPhotos: 0,
+        unsupportedPhotos: 0,
+        candidatePairsFound: 0,
+        startedAtMs: now,
+        updatedAtMs: now,
+        completedAtMs: null
+      }
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getSimilarityJob(jobId: string): SimilarityJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT job_id, status, algorithm_version, total_photos, processed_photos,
+               error_photos, unsupported_photos, candidate_pairs_found,
+               started_at_ms, updated_at_ms, completed_at_ms
+        FROM similarity_jobs
+        WHERE job_id = ?;
+      `
+      )
+      .get(jobId) as
+      | {
+          job_id: string
+          status: SimilarityJobRecord['status']
+          algorithm_version: string
+          total_photos: number
+          processed_photos: number
+          error_photos: number
+          unsupported_photos: number
+          candidate_pairs_found: number
+          started_at_ms: number
+          updated_at_ms: number
+          completed_at_ms: number | null
+        }
+      | undefined
+
+    if (!row) return null
+
+    return {
+      jobId: row.job_id,
+      status: row.status,
+      algorithmVersion: row.algorithm_version,
+      totalPhotos: row.total_photos,
+      processedPhotos: row.processed_photos,
+      errorPhotos: row.error_photos,
+      unsupportedPhotos: row.unsupported_photos,
+      candidatePairsFound: row.candidate_pairs_found,
+      startedAtMs: row.started_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      completedAtMs: row.completed_at_ms
+    }
+  }
+
+  public getLatestSimilarityJob(): SimilarityJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT job_id, status, algorithm_version, total_photos, processed_photos,
+               error_photos, unsupported_photos, candidate_pairs_found,
+               started_at_ms, updated_at_ms, completed_at_ms
+        FROM similarity_jobs
+        ORDER BY started_at_ms DESC
+        LIMIT 1;
+      `
+      )
+      .get() as
+      | {
+          job_id: string
+          status: SimilarityJobRecord['status']
+          algorithm_version: string
+          total_photos: number
+          processed_photos: number
+          error_photos: number
+          unsupported_photos: number
+          candidate_pairs_found: number
+          started_at_ms: number
+          updated_at_ms: number
+          completed_at_ms: number | null
+        }
+      | undefined
+
+    if (!row) return null
+
+    return {
+      jobId: row.job_id,
+      status: row.status,
+      algorithmVersion: row.algorithm_version,
+      totalPhotos: row.total_photos,
+      processedPhotos: row.processed_photos,
+      errorPhotos: row.error_photos,
+      unsupportedPhotos: row.unsupported_photos,
+      candidatePairsFound: row.candidate_pairs_found,
+      startedAtMs: row.started_at_ms,
+      updatedAtMs: row.updated_at_ms,
+      completedAtMs: row.completed_at_ms
+    }
+  }
+
+  public updateSimilarityJob(
+    jobId: string,
+    updates: Partial<{
+      status: SimilarityJobRecord['status']
+      processedPhotos: number
+      errorPhotos: number
+      unsupportedPhotos: number
+      candidatePairsFound: number
+      completedAtMs: number | null
+    }>
+  ): void {
+    this.assertOpen()
+    const now = Date.now()
+    const setClauses: string[] = ['updated_at_ms = ?']
+    const params: (string | number | null)[] = [now]
+
+    if (updates.status !== undefined) {
+      setClauses.push('status = ?')
+      params.push(updates.status)
+    }
+    if (updates.processedPhotos !== undefined) {
+      setClauses.push('processed_photos = ?')
+      params.push(updates.processedPhotos)
+    }
+    if (updates.errorPhotos !== undefined) {
+      setClauses.push('error_photos = ?')
+      params.push(updates.errorPhotos)
+    }
+    if (updates.unsupportedPhotos !== undefined) {
+      setClauses.push('unsupported_photos = ?')
+      params.push(updates.unsupportedPhotos)
+    }
+    if (updates.candidatePairsFound !== undefined) {
+      setClauses.push('candidate_pairs_found = ?')
+      params.push(updates.candidatePairsFound)
+    }
+    if (updates.completedAtMs !== undefined) {
+      setClauses.push('completed_at_ms = ?')
+      params.push(updates.completedAtMs)
+    }
+
+    params.push(jobId)
+
+    this.db
+      .prepare(`UPDATE similarity_jobs SET ${setClauses.join(', ')} WHERE job_id = ?;`)
+      .run(...(params as SQLInputValue[]))
+  }
+
+  public markRunningSimilarityJobsAsInterrupted(): number {
+    this.assertOpen()
+    const now = Date.now()
+    const result = this.db
+      .prepare(
+        "UPDATE similarity_jobs SET status = 'interrupted', updated_at_ms = ? WHERE status IN ('running', 'paused');"
+      )
+      .run(now)
+    return Number(result.changes)
+  }
+
+  public getSimilarityJobItems(jobId: string, status?: string): SimilarityJobItemRecord[] {
+    this.assertOpen()
+    const sql = status
+      ? 'SELECT id, job_id, file_location_id, status, error_message, updated_at_ms FROM similarity_job_items WHERE job_id = ? AND status = ? ORDER BY id ASC;'
+      : 'SELECT id, job_id, file_location_id, status, error_message, updated_at_ms FROM similarity_job_items WHERE job_id = ? ORDER BY id ASC;'
+    const rows = (
+      status ? this.db.prepare(sql).all(jobId, status) : this.db.prepare(sql).all(jobId)
+    ) as Array<{
+      id: number
+      job_id: string
+      file_location_id: number
+      status: SimilarityJobItemRecord['status']
+      error_message: string | null
+      updated_at_ms: number
+    }>
+    return rows.map((r) => ({
+      id: r.id,
+      jobId: r.job_id,
+      fileLocationId: r.file_location_id,
+      status: r.status,
+      errorMessage: r.error_message,
+      updatedAtMs: r.updated_at_ms
+    }))
+  }
+
+  public updateSimilarityJobItem(
+    jobId: string,
+    fileLocationId: number,
+    status: SimilarityJobItemRecord['status'],
+    errorMessage?: string | null
+  ): void {
+    this.assertOpen()
+    const now = Date.now()
+    this.db
+      .prepare(
+        'UPDATE similarity_job_items SET status = ?, error_message = ?, updated_at_ms = ? WHERE job_id = ? AND file_location_id = ?;'
+      )
+      .run(status, errorMessage ?? null, now, jobId, fileLocationId)
+  }
+
+  public saveSimilarityCandidatePairs(
+    jobId: string,
+    pairs: Array<{
+      locationIdA: number
+      locationIdB: number
+      distance: number
+      similarityScore: number
+      algorithmVersion: string
+    }>
+  ): void {
+    this.assertOpen()
+    if (pairs.length === 0) return
+    const now = Date.now()
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR IGNORE INTO similarity_candidate_pairs (
+          job_id, file_location_id_a, file_location_id_b, distance, similarity_score, algorithm_version, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?);
+      `)
+      for (const p of pairs) {
+        const locA = Math.min(p.locationIdA, p.locationIdB)
+        const locB = Math.max(p.locationIdA, p.locationIdB)
+        stmt.run(jobId, locA, locB, p.distance, p.similarityScore, p.algorithmVersion, now)
+      }
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getSimilarityCandidatePairs(options: {
+    page: number
+    pageSize: number
+    filter?: string
+  }): {
+    pairs: Array<SimilarityCandidatePair>
+    totalCount: number
+    page: number
+    pageSize: number
+    totalPages: number
+  } {
+    this.assertOpen()
+    const page = Math.max(1, options.page)
+    const pageSize = Math.max(1, Math.min(100, options.pageSize))
+    const offset = (page - 1) * pageSize
+    const filter = options.filter ?? 'all'
+
+    let whereClause = ''
+    if (filter === 'unreviewed') {
+      whereClause = "AND (sd.decision IS NULL OR sd.decision = 'unreviewed')"
+    } else if (filter === 'reviewed') {
+      whereClause = "AND sd.decision IN ('edited_version', 'similar_scene', 'unrelated')"
+    } else if (filter === 'edited_version') {
+      whereClause = "AND sd.decision = 'edited_version'"
+    } else if (filter === 'similar_scene') {
+      whereClause = "AND sd.decision = 'similar_scene'"
+    } else if (filter === 'unrelated') {
+      whereClause = "AND sd.decision = 'unrelated'"
+    }
+
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM similarity_candidate_pairs cp
+      LEFT JOIN similarity_decisions sd
+        ON sd.file_location_id_a = cp.file_location_id_a
+        AND sd.file_location_id_b = cp.file_location_id_b
+        AND sd.is_current = 1
+      WHERE 1=1 ${whereClause};
+    `
+    const totalRow = this.db.prepare(countSql).get() as { total: number } | undefined
+    const totalCount = totalRow?.total ?? 0
+    const totalPages = Math.ceil(totalCount / pageSize)
+
+    const querySql = `
+      SELECT
+        cp.id,
+        cp.job_id,
+        cp.file_location_id_a,
+        cp.file_location_id_b,
+        cp.distance,
+        cp.similarity_score,
+        cp.algorithm_version,
+        cp.created_at_ms,
+        sd.decision,
+        sd.version AS decision_version,
+        sd.updated_at_ms AS decision_updated_at_ms,
+        flA.file_name AS a_file_name,
+        flA.original_path AS a_original_path,
+        dA.id AS a_discovery_observation_id,
+        dA.byte_size AS a_byte_size,
+        dA.filesystem_birthtime_ms AS a_birthtime_ms,
+        dA.filesystem_mtime_ms AS a_mtime_ms,
+        hA.sha256 AS a_sha256,
+        phA.width AS a_width,
+        phA.height AS a_height,
+        paA.rating AS a_rating,
+        paA.flag AS a_flag,
+        flB.file_name AS b_file_name,
+        flB.original_path AS b_original_path,
+        dB.id AS b_discovery_observation_id,
+        dB.byte_size AS b_byte_size,
+        dB.filesystem_birthtime_ms AS b_birthtime_ms,
+        dB.filesystem_mtime_ms AS b_mtime_ms,
+        hB.sha256 AS b_sha256,
+        phB.width AS b_width,
+        phB.height AS b_height,
+        paB.rating AS b_rating,
+        paB.flag AS b_flag
+      FROM similarity_candidate_pairs cp
+      LEFT JOIN similarity_decisions sd
+        ON sd.file_location_id_a = cp.file_location_id_a
+        AND sd.file_location_id_b = cp.file_location_id_b
+        AND sd.is_current = 1
+      JOIN file_locations flA ON flA.id = cp.file_location_id_a
+      JOIN discovery_observations dA ON dA.file_location_id = flA.id AND dA.is_current = 1
+      LEFT JOIN hash_observations hA ON hA.discovery_observation_id = dA.id AND hA.is_active = 1
+      LEFT JOIN photo_perceptual_hashes phA ON phA.file_location_id = flA.id AND phA.is_current = 1
+      LEFT JOIN photo_annotations paA ON paA.file_location_id = flA.id AND paA.is_current = 1
+      JOIN file_locations flB ON flB.id = cp.file_location_id_b
+      JOIN discovery_observations dB ON dB.file_location_id = flB.id AND dB.is_current = 1
+      LEFT JOIN hash_observations hB ON hB.discovery_observation_id = dB.id AND hB.is_active = 1
+      LEFT JOIN photo_perceptual_hashes phB ON phB.file_location_id = flB.id AND phB.is_current = 1
+      LEFT JOIN photo_annotations paB ON paB.file_location_id = flB.id AND paB.is_current = 1
+      WHERE 1=1 ${whereClause}
+      ORDER BY cp.distance ASC, cp.id ASC
+      LIMIT ? OFFSET ?;
+    `
+
+    const rows = this.db.prepare(querySql).all(pageSize, offset) as Array<Record<string, unknown>>
+
+    const pairs: SimilarityCandidatePair[] = rows.map((r) => ({
+      id: Number(r.id),
+      jobId: String(r.job_id),
+      locationIdA: Number(r.file_location_id_a),
+      locationIdB: Number(r.file_location_id_b),
+      photoA: {
+        id: Number(r.file_location_id_a),
+        fileName: String(r.a_file_name),
+        originalPath: String(r.a_original_path),
+        byteSize: Number(r.a_byte_size),
+        filesystemBirthtimeMs: r.a_birthtime_ms !== null ? Number(r.a_birthtime_ms) : null,
+        filesystemMtimeMs: r.a_mtime_ms !== null ? Number(r.a_mtime_ms) : null,
+        activeHash: (r.a_sha256 as string) ?? null,
+        discoveryObservationId: Number(r.a_discovery_observation_id),
+        width: r.a_width !== null ? Number(r.a_width) : null,
+        height: r.a_height !== null ? Number(r.a_height) : null,
+        rating: r.a_rating !== null ? Number(r.a_rating) : null,
+        flag: (r.a_flag as 'none' | 'pick' | 'reject') ?? 'none'
+      },
+      photoB: {
+        id: Number(r.file_location_id_b),
+        fileName: String(r.b_file_name),
+        originalPath: String(r.b_original_path),
+        byteSize: Number(r.b_byte_size),
+        filesystemBirthtimeMs: r.b_birthtime_ms !== null ? Number(r.b_birthtime_ms) : null,
+        filesystemMtimeMs: r.b_mtime_ms !== null ? Number(r.b_mtime_ms) : null,
+        activeHash: (r.b_sha256 as string) ?? null,
+        discoveryObservationId: Number(r.b_discovery_observation_id),
+        width: r.b_width !== null ? Number(r.b_width) : null,
+        height: r.b_height !== null ? Number(r.b_height) : null,
+        rating: r.b_rating !== null ? Number(r.b_rating) : null,
+        flag: (r.b_flag as 'none' | 'pick' | 'reject') ?? 'none'
+      },
+      distance: Number(r.distance),
+      similarityScore: Number(r.similarity_score),
+      algorithmVersion: String(r.algorithm_version),
+      decision: (r.decision as SimilarityDecisionType) ?? 'unreviewed',
+      decisionVersion: r.decision_version !== null ? Number(r.decision_version) : null,
+      decisionUpdatedAtMs:
+        r.decision_updated_at_ms !== null ? Number(r.decision_updated_at_ms) : null,
+      createdAtMs: Number(r.created_at_ms)
+    }))
+
+    return {
+      pairs,
+      totalCount,
+      page,
+      pageSize,
+      totalPages
+    }
   }
 }
 

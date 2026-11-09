@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 7
+export const CURRENT_SCHEMA_VERSION = 8
 
 interface Migration {
   readonly version: number
@@ -453,6 +453,104 @@ const MIGRATIONS: readonly Migration[] = [
           last_op_id TEXT,
           updated_at_ms INTEGER NOT NULL
         );
+      `)
+    }
+  },
+  {
+    version: 8,
+    name: 'perceptual_hashes_and_similarity',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_perceptual_hashes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          content_sha256 TEXT NOT NULL,
+          content_revision TEXT NOT NULL,
+          algorithm_version TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          bucket_0 INTEGER NOT NULL,
+          bucket_1 INTEGER NOT NULL,
+          bucket_2 INTEGER NOT NULL,
+          bucket_3 INTEGER NOT NULL,
+          width INTEGER,
+          height INTEGER,
+          created_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_phash_loc_curr
+          ON photo_perceptual_hashes(file_location_id, algorithm_version, is_current);
+        CREATE INDEX IF NOT EXISTS idx_photo_phash_sha256
+          ON photo_perceptual_hashes(content_sha256, algorithm_version, is_current);
+        CREATE INDEX IF NOT EXISTS idx_photo_phash_b0
+          ON photo_perceptual_hashes(bucket_0, is_current);
+        CREATE INDEX IF NOT EXISTS idx_photo_phash_b1
+          ON photo_perceptual_hashes(bucket_1, is_current);
+        CREATE INDEX IF NOT EXISTS idx_photo_phash_b2
+          ON photo_perceptual_hashes(bucket_2, is_current);
+        CREATE INDEX IF NOT EXISTS idx_photo_phash_b3
+          ON photo_perceptual_hashes(bucket_3, is_current);
+
+        CREATE TABLE IF NOT EXISTS similarity_decisions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id_a INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          file_location_id_b INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          content_revision_a TEXT NOT NULL,
+          content_revision_b TEXT NOT NULL,
+          decision TEXT NOT NULL CHECK (decision IN ('edited_version', 'similar_scene', 'unrelated')),
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+          CHECK (file_location_id_a < file_location_id_b)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sim_decision_pair_curr
+          ON similarity_decisions(file_location_id_a, file_location_id_b) WHERE is_current = 1;
+
+        CREATE TABLE IF NOT EXISTS similarity_jobs (
+          job_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (status IN ('idle', 'running', 'paused', 'cancelled', 'interrupted', 'completed', 'failed')),
+          algorithm_version TEXT NOT NULL,
+          total_photos INTEGER NOT NULL DEFAULT 0,
+          processed_photos INTEGER NOT NULL DEFAULT 0,
+          error_photos INTEGER NOT NULL DEFAULT 0,
+          unsupported_photos INTEGER NOT NULL DEFAULT 0,
+          candidate_pairs_found INTEGER NOT NULL DEFAULT 0,
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS similarity_job_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL REFERENCES similarity_jobs(job_id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'processed', 'skipped', 'error', 'unsupported')),
+          error_message TEXT,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sim_job_items_job_status
+          ON similarity_job_items(job_id, status);
+
+        CREATE TABLE IF NOT EXISTS similarity_candidate_pairs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL REFERENCES similarity_jobs(job_id) ON DELETE CASCADE,
+          file_location_id_a INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          file_location_id_b INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          distance INTEGER NOT NULL CHECK (distance >= 0 AND distance <= 64),
+          similarity_score REAL NOT NULL CHECK (similarity_score >= 0.0 AND similarity_score <= 1.0),
+          algorithm_version TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          CHECK (file_location_id_a < file_location_id_b)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sim_candidates_unique
+          ON similarity_candidate_pairs(job_id, file_location_id_a, file_location_id_b);
+        CREATE INDEX IF NOT EXISTS idx_sim_candidates_pair
+          ON similarity_candidate_pairs(file_location_id_a, file_location_id_b);
       `)
     }
   }

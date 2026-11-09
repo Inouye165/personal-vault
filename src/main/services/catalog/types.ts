@@ -509,3 +509,106 @@ export interface CatalogPhotoAnnotationRecord {
   readonly persistencePending?: boolean
   readonly persistenceError?: string
 }
+
+// Stage 5C: Perceptual Hashing & Similarity Types
+
+export interface PhotoPerceptualHashRecord {
+  readonly id: number
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly contentSha256: string
+  readonly contentRevision: string
+  readonly algorithmVersion: string
+  readonly fingerprint: string
+  readonly bucket0: number
+  readonly bucket1: number
+  readonly bucket2: number
+  readonly bucket3: number
+  readonly width: number | null
+  readonly height: number | null
+  readonly createdAtMs: number
+  readonly isCurrent: boolean
+}
+
+export interface SavePhotoPerceptualHashInput {
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly contentSha256: string
+  readonly contentRevision: string
+  readonly algorithmVersion: string
+  readonly fingerprint: string
+  readonly bucket0: number
+  readonly bucket1: number
+  readonly bucket2: number
+  readonly bucket3: number
+  readonly width?: number | null
+  readonly height?: number | null
+}
+
+export interface SimilarityDecisionRecord {
+  readonly id: number
+  readonly locationIdA: number
+  readonly locationIdB: number
+  readonly contentRevisionA: string
+  readonly contentRevisionB: string
+  readonly decision: 'edited_version' | 'similar_scene' | 'unrelated'
+  readonly version: number
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+  readonly isCurrent: boolean
+  readonly persistencePending?: boolean
+}
+
+export interface SetSimilarityDecisionInput {
+  readonly locationIdA: number
+  readonly locationIdB: number
+  readonly expectedRevisionA: string
+  readonly expectedRevisionB: string
+  readonly decision: 'edited_version' | 'similar_scene' | 'unrelated' | 'unreviewed'
+  readonly expectedVersion?: number
+}
+
+export interface SimilarityJobRecord {
+  readonly jobId: string
+  readonly status:
+    'idle' | 'running' | 'paused' | 'cancelled' | 'interrupted' | 'completed' | 'failed'
+  readonly algorithmVersion: string
+  readonly totalPhotos: number
+  readonly processedPhotos: number
+  readonly errorPhotos: number
+  readonly unsupportedPhotos: number
+  readonly candidatePairsFound: number
+  readonly startedAtMs: number
+  readonly updatedAtMs: number
+  readonly completedAtMs: number | null
+}
+
+export interface CreateSimilarityJobInput {
+  readonly jobId: string
+  readonly algorithmVersion: string
+  readonly totalPhotos: number
+  readonly photoLocationIds: readonly number[]
+}
+
+export interface SimilarityJobItemRecord {
+  readonly id: number
+  readonly jobId: string
+  readonly fileLocationId: number
+  readonly status: 'pending' | 'processed' | 'skipped' | 'error' | 'unsupported'
+  readonly errorMessage: string | null
+  readonly updatedAtMs: number
+}
+
+export interface SimilarityCandidatePairRecord {
+  readonly id: number
+  readonly jobId: string
+  readonly locationIdA: number
+  readonly locationIdB: number
+  readonly distance: number
+  readonly similarityScore: number
+  readonly algorithmVersion: string
+  readonly createdAtMs: number
+  readonly decision?: 'edited_version' | 'similar_scene' | 'unrelated' | 'unreviewed'
+  readonly decisionVersion?: number | null
+  readonly decisionUpdatedAtMs?: number | null
+}
