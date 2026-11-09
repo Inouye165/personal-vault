@@ -1,27 +1,27 @@
 # Personal Vault - Development and Public Release Tracker
 
-Updated: November 7, 2026.
+Updated: November 9, 2026.
 
 This tracker covers all development through public release. Detailed tasks belong in [TODO.md](TODO.md); verification evidence and limitations belong in [HANDOFF.md](HANDOFF.md).
 
 ## Current position
 
-Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is Planned and has not started; Stages 7-8 are also planned. Public release has not occurred and has no scheduled date.
+Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Awaiting review; Substages 6B-6E are Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status   | Acceptance                               |
-| ----- | -------------------------------------------------------------- | -------- | ---------------------------------------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete | `070e3cb`                                |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete | `71e1af7`                                |
-| 3     | Exact duplicate grouping and review                            | Complete | `79bbf44`                                |
-| 4     | Verified vault copying and portable metadata                   | Complete | `1a1fb69`                                |
-| 5     | Fast photo browsing, ratings, and similarity review            | Complete | 5A `951fd25`, 5B `4071948`, 5C `543135a` |
-| 6     | Semantic photo search and metadata filters                     | Planned  | Pending                                  |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned  | Pending                                  |
-| 8     | Export, recovery, release validation, beta, and public release | Planned  | Pending                                  |
+| Stage | Deliverable                                                    | Status      | Acceptance                               |
+| ----- | -------------------------------------------------------------- | ----------- | ---------------------------------------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                |
+| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                |
+| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                |
+| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a` |
+| 6     | Semantic photo search and metadata filters                     | In progress | 6A Awaiting review; 6B-6E Planned        |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                  |
+| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                  |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -173,12 +173,20 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ## Stage 6 - Semantic photo search
 
-**Planned.**
+**In progress; Substage 6A Awaiting review; Substages 6B-6E Planned.**
 
-- [ ] Evaluate local embedding models and resource/packaging requirements.
-- [ ] Implement content-based photo search and a persistent search index.
-- [ ] Filter by available date, camera, lens, resolution, and file-type metadata.
-- [ ] Preserve unknown dates/locations and separate inferences from recorded facts.
+| Substage | Deliverable                                                                  | Status          | Submission reference                | Acceptance reference |
+| -------- | ---------------------------------------------------------------------------- | --------------- | ----------------------------------- | -------------------- |
+| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Awaiting review | `feat/stage-6a-semantic-evaluation` | Pending              |
+| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Planned         | Pending                             | Pending              |
+| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Planned         | Pending                             | Pending              |
+| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned         | Pending                             | Pending              |
+| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned         | Pending                             | Pending              |
+
+- [ ] Evaluate local embedding models and resource/packaging requirements (6A submitted; awaiting review).
+- [ ] Implement content-based photo search and a persistent search index (6B/6D Planned).
+- [ ] Filter by available date, camera, lens, resolution, and file-type metadata (6C/6D Planned).
+- [ ] Preserve unknown dates/locations and separate inferences from recorded facts (6B-6E Planned).
 
 Exit: users can find photos by content and available metadata using the supported offline workflow.
 

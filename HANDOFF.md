@@ -3,20 +3,17 @@
 ## Current state
 
 - **Workspace**: `D:\organizer`
-- **Branch**: `feat/stage-5c-visual-similarity` (created directly from verified Stage 5B closeout commit `84090e76fb758197fbcf74bf25ca89a3f813c013`, Stage 5B accepted at `4071948`)
-- **Base Commit**: `84090e7`
+- **Branch**: `feat/stage-6a-semantic-evaluation` (created from verified Stage 5 closeout commit `9b8faa741a5ec81cfbb45a5b61acff20be82d61e`, descending from accepted Stage 5C commit `543135a`)
+- **Base Commit**: `9b8faa7`
 - **Stage 1 status**: Complete (independently accepted at `070e3cb`).
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
 - **Stage 4 status**: Complete (independently accepted at `1a1fb69`, closeout at `8a17bfe`).
 - **Stage 5 status**: **Complete; Substage 5A independently accepted at `951fd25`, 5B at `4071948`, 5C at `543135a`**.
-  - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Complete** (independently accepted at `951fd25`).
-  - **Stage 5B (Ratings, Flags, Custom Collections)**: **Complete** (independently accepted at `4071948`).
-  - **Stage 5C (Visual Similarity Review)**: **Complete** (independently accepted at `543135ad36e24d8f2abf7ffb23fe4d520ad8b079`).
-- **Next stage**: Stage 6 (Semantic photo search) is **Planned; not started**.
-- **Candidate History**: Initial candidate `3ea3454` failed independent review (reviewer-observed `npm run typecheck` errors). The corrected candidate `543135a` was independently re-reviewed and **ACCEPTED**.
-- **Evidence source**: All verification results below are as reported by the independent reviewer at `543135a` (733 tests across 61 files; all 19 commands exit 0; `verify:similarity` and `verify:similarity:unpacked` 8/8 each). They were not re-run during this documentation closeout.
-- **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only. Perceptual similarity is labeled algorithmic similarity and does not prove an edited copy. Source files and vault copies are never touched, altered, moved, or deleted.
+- **Stage 6 status**: **In progress**:
+  - **Stage 6A (Offline Semantic Search Feasibility & Technical Spike)**: **Awaiting review** on `feat/stage-6a-semantic-evaluation`.
+  - **Substages 6B–6E**: **Planned** (not started).
+- **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
 
@@ -146,8 +143,17 @@ The following unrelated files remain intact and untouched:
 
 ---
 
-## 5. Scope Exclusions & Next Steps
+## 5. Stage 6A Summary, Scope Exclusions & Next Steps
 
-- **Scope Exclusions**: Stage 5C is Complete; no Stage 6 work, semantic photo search, OCR, document classification, catalog deletion, vault deletion, source deletion, or cloud uploads performed.
-- **Stage 5 Status**: Complete; 5A (`951fd25`), 5B (`4071948`), and 5C (`543135a`) independently accepted. Stage 6 is Planned; not started.
-- **Git State**: Work committed on `feat/stage-5c-visual-similarity` branched directly from `84090e7`. Do NOT push or merge.
+- **Stage 6A Deliverable**: Bounded offline semantic search evaluation (`docs/stage-6a-semantic-search-evaluation.md`), isolated executable real-Electron spike (`spikes/semantic-eval/`), and unit tests for pure vector/revision logic (`tests/main/semantic-spike-core.test.ts`).
+- **Recommendation**: CLIP ViT-B/32 quantized ONNX (`Xenova/clip-vit-base-patch32` @ `6b7c5237`, MIT license, $148.63\text{ MiB}$) executed in a worker thread via `onnxruntime-node@1.31.1` (MIT) + `@huggingface/tokenizers@0.2.0` (Apache-2.0) + `sharp@0.35.5` (Apache-2.0), paired with an exact linear scan over 512-d `Float32Array` vectors in `node:sqlite` (capped at $\le 50,000$ photos).
+- **Measured Real-Electron Spike Results (`node spikes/semantic-eval/run-electron-spike.mjs`, exit 0)**:
+  - Cold ONNX session + tokenizer load: $367.36\text{ ms}$.
+  - Warm per-image embedding mean: $28.37\text{ ms}$ ($2.85\text{ ms}$ decode + $25.52\text{ ms}$ inference; $35.24\text{ images/sec}$).
+  - Warm text query embedding mean: $3.39\text{ ms}$.
+  - Worker peak RSS: $453.98\text{ MiB}$ (heap $16.94\text{ MiB}$); main event-loop delay p95 $16.49\text{ ms}$ ($\le 100\text{ ms}$ limit).
+  - Synthetic 512-d `Float32` index scan: $4.95\text{ ms}$ in-memory / $42.15\text{ ms}$ SQLite streaming at $10,000$ vectors; $26.78\text{ ms}$ in-memory / $202.15\text{ ms}$ SQLite streaming at $50,000$ vectors.
+  - All 7/7 synthetic nonpersonal queries passed the declared relevance rubric; missing-model (`MISSING_MODEL`), unsupported format (`HEIC`), corrupt image (`DECODE_FAILED`), active cancellation (`CANCELLED`), and bitwise source preservation verified.
+- **Scope Exclusions**: No production search UI, IPC, or catalog schema changes implemented in Stage 6A; header search placeholder untouched; model cache and spike `node_modules` gitignored and isolated from app bundles.
+- **Stage 6 Status**: In progress — Stage 6A Awaiting review; Substages 6B–6E Planned.
+- **Git State**: Committed locally on `feat/stage-6a-semantic-evaluation` branched from `9b8faa7`. Do NOT push or merge.

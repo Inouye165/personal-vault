@@ -186,11 +186,13 @@ Tasks:
 
 ## Stage 6: Semantic Photo Search and Metadata Filters
 
-Status: **Planned; not started.**
+Status: **In progress — Substage 6A Awaiting review; Substages 6B-6E Planned.**
 
-- [ ] Local offline embedding model evaluation and selection.
-- [ ] Semantic query vector generation and search indexing.
-- [ ] Metadata filter controls (capture date range, camera model, lens, resolution, file type).
+- [ ] **Stage 6A (Awaiting review)**: Offline semantic search feasibility evaluation and isolated real-Electron technical spike (`docs/stage-6a-semantic-search-evaluation.md`, `spikes/semantic-eval/`, `tests/main/semantic-spike-core.test.ts`). Evaluated CLIP ViT-B/32 (`Xenova/clip-vit-base-patch32` quantized ONNX) via `onnxruntime-node` + `@huggingface/tokenizers` + `sharp`, SigLIP Base Patch16-224, and `@huggingface/transformers` WASM; verified MIT/Apache-2.0 code and weight licenses; measured cold/warm latency, throughput, worker RSS, and synthetic index scan costs (1k-50k vectors) under real Electron (`45.2.3`); proposed Stage 6B contract and Stage 6C/6D metadata filter integration note.
+- [ ] **Stage 6B (Planned)**: Explicit offline model provisioning, SQLite Migration 9 (`photo_semantic_embeddings`, `semantic_index_jobs`, `semantic_index_job_items`), resumable background semantic indexing coordinator, content-revision invalidation, and `asarUnpack` packaging configuration.
+- [ ] **Stage 6C (Planned)**: Read-only EXIF/technical metadata extraction (capture date, camera, lens, resolution, file type) with strict separation of recorded facts vs. inferences and explicit `NULL` ("Unknown") preservation.
+- [ ] **Stage 6D (Planned)**: Semantic query vector generation, bounded SQL + cosine similarity search ranking, typed IPC contracts, and Photos search & metadata filter UI controls.
+- [ ] **Stage 6E (Planned)**: Real-Electron built and unpacked verification suites for semantic search and metadata filters, plus Stage 6 closeout.
 
 ---
 

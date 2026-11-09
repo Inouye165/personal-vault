@@ -45,3 +45,10 @@ Thumbs.db
 !.vscode/extensions.json
 !.vscode/settings.json
 smoke-*.png
+
+# Stage 6A Semantic Evaluation Spike isolated caches and dependencies
+spikes/semantic-eval/node_modules/
+spikes/semantic-eval/package-lock.json
+spikes/semantic-eval/.model-cache/
+spikes/semantic-eval/.fixtures-temp/
+
