@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stage 1, Stage 2, Stage 3, and Stage 4 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, and `1a1fb69`). Stages 5-8 are future work. Public release has not occurred and has no scheduled date.
+Stage 1, Stage 2, Stage 3, Stage 4, Stage 5A, and Stage 5B are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, `951fd25`, and `4071948`). Substage 5C and Stages 6-8 are future work. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status      | Acceptance                  |
-| ----- | -------------------------------------------------------------- | ----------- | --------------------------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                   |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                   |
-| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                   |
-| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                   |
-| 5     | Fast photo browsing, ratings, and similarity review            | In progress | Substage 5A awaiting review |
-| 6     | Semantic photo search and metadata filters                     | Planned     | Pending                     |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                     |
-| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                     |
+| Stage | Deliverable                                                    | Status      | Acceptance                |
+| ----- | -------------------------------------------------------------- | ----------- | ------------------------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                 |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                 |
+| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                 |
+| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                 |
+| 5     | Fast photo browsing, ratings, and similarity review            | In progress | Substage 5A & 5B accepted |
+| 6     | Semantic photo search and metadata filters                     | Planned     | Pending                   |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                   |
+| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                   |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -93,13 +93,13 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 ## Stage 5 - Photo browsing and review
 
-**In progress; Substage 5A complete; independently accepted at `951fd25`.**
+**In progress; Substage 5A and 5B complete; independently accepted at `951fd25` and `4071948`.**
 
-| Substage | Deliverable                                                               | Status          | Submission reference         | Acceptance reference |
-| -------- | ------------------------------------------------------------------------- | --------------- | ---------------------------- | -------------------- |
-| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete        | `5258b0a`                    | `951fd25`            |
-| 5B       | User review tools: ratings, flags, and custom collections                 | Awaiting review | `feat/stage-5b-photo-review` | Pending              |
-| 5C       | Perceptual hashing and visual similarity review                           | Planned         | Pending                      | Pending              |
+| Substage | Deliverable                                                               | Status   | Submission reference         | Acceptance reference |
+| -------- | ------------------------------------------------------------------------- | -------- | ---------------------------- | -------------------- |
+| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete | `5258b0a`                    | `951fd25`            |
+| 5B       | User review tools: ratings, flags, and custom collections                 | Complete | `feat/stage-5b-photo-review` | `4071948`            |
+| 5C       | Perceptual hashing and visual similarity review                           | Planned  | Pending                      | Pending              |
 
 ### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
 
@@ -125,7 +125,7 @@ Exit: users can browse discovered photographs smoothly with bounded memory and s
 
 ### Stage 5B - User review tools: ratings, flags, and custom collections
 
-**Awaiting review.** Implemented on `feat/stage-5b-photo-review`.
+**Complete; independently accepted at `4071948`.**
 
 - [x] Photo ratings: unrated (null) or 1–5 stars with toggle/clearing, optimistic UI updates, and monotonic version increments.
 - [x] Review flags: mutually exclusive None, Pick, Reject. Reject is strictly a review annotation; source photographs and vault copies are never touched, altered, moved, or deleted.
@@ -138,7 +138,7 @@ Exit: users can browse discovered photographs smoothly with bounded memory and s
 - [x] Strict containment and ownership: recursive ancestor symlink/junction detection, forbidden overlap checking against source and vault paths, and exclusive marker creation with `wx` (`.pv_annotations_owner`).
 - [x] Concurrency and rescan reconciliation: annotations bound to location and content revision (`rev:<discoveryId>:<byteSize>:<mtime>:<hash>`); unchanged rescan preserves annotations; touched with identical verified hash preserves; changed content invalidates active annotation and collection memberships while preserving prior history. Stale writes rejected atomically with conflict errors (`STALE_REVISION`, `STALE_ANNOTATION_VERSION`).
 - [x] Renderer selection concurrency guarding: monotonic `selectionGenRef` and `prevSelectedPhotoIdRef` preventing rapid selection switches from leaking save status, errors, or filter evictions to newly selected photos; accessible rename controls (`Rename collection {name}`, input `New name for collection {name}`, Save, Cancel).
-- [x] Comprehensive real Electron verification suite in built and unpacked modes (`scripts/verify-electron-photo-review.mjs`, `verify:photo-review`, `verify:photo-review:unpacked` — 12/12 checks passed each, exit code 0): scan -> initial DOM cards -> star ratings (1-5, clear, re-rate) & Pick/Reject flags via DOM -> selection switch concurrency guard -> custom collections (create, rename, add/remove member) -> combined SQL filters & out-of-filter eviction/refill -> deterministic pre-commit persistence interruption observed at barrier with process kill, SQLite uncommitted verification, restart reconciliation appending `op_aborted`, and subsequent write success -> filtered scale browsing beyond 2,000 photos (3,000 decodable fixtures, 2,200 filtered, cold scroll past 2,000 items, distant jump, return travel, mounted cells <= 200, zero error cards, workers and queue bounded) -> strict source preservation invariance. All 657 tests pass across 52 test files.
+- [x] Comprehensive real Electron verification suite in built and unpacked modes (`scripts/verify-electron-photo-review.mjs`, `verify:photo-review`, `verify:photo-review:unpacked` — 12/12 checks passed each, exit code 0): scan -> initial DOM cards -> star ratings (1-5, clear, re-rate) & Pick/Reject flags via DOM -> selection switch concurrency guard -> custom collections (create, rename, add/remove member) -> combined SQL filters & out-of-filter eviction/refill -> deterministic pre-commit persistence interruption observed at barrier with process kill, SQLite uncommitted verification, restart reconciliation appending `op_aborted`, and subsequent write success -> filtered scale browsing beyond 2,000 photos (3,000 decodable fixtures, 2,200 filtered, cold scroll past 2,000 items, distant jump, return travel, mounted cells <= 200, zero error cards, workers and queue bounded) -> strict source preservation invariance.
 - [x] Review findings corrections:
   1. Accurate pending persistence tracking & lifecycle: pending journal finalization is tracked with unique per-invocation identities and monotonic generation counters (`mutationGenRef`) across ratings, flags, collection changes, and memberships. Outcomes are recorded independently of selection, photo revision, and stale presentation-response guards (so a save for photo A completing after navigating to B registers its unresolved operation while keeping obsolete badges and status updates guarded). Memory bounds employ an honest overflow policy (`overflowCount`) so capacity limits cannot silently forget unresolved work or report a false all-saved state. Reconciliation snapshots and clears only the operation generations actually covered (`gen <= coveredGen`), preserving newer unresolved operations added mid-flight until reconciled in turn without repeating mutations. React state updaters remain strictly pure without mutating refs.
   2. Same-photo revision and response guards: selection generation is keyed by photo ID and content revision (`${photo.id}:${computePhotoRevision(photo)}`). Content replacement advances generation, resets save state, reloads memberships, and drops delayed in-flight responses before updating DOM badges or active star buttons.
@@ -147,6 +147,7 @@ Exit: users can browse discovered photographs smoothly with bounded memory and s
   5. Bounded pagination/reconciliation: collection and membership lists navigate via bounded 50-item pages with Prev/Next controls, absolute offsets, and page indicators; SQLite `reconcileJournalWithDatabase()` streams unterminated operations via bounded iterator (`stmt.iterate()`) without array accumulation.
   6. Comprehensive stale-response guards: `updatePhotoLocal` guarded by per-photo mutation sequence counter, selection generation, and photo revision; membership loads guarded by request identity and selection generation; unmount invalidation.
   7. Runtime journal security: lists all registered source roots without 1,000-item cap via `catalog.getAllSourceRoots()`; fails closed if security context cannot be obtained; canonical platform-correct path normalization; ensures source and vault security context is available before journal startup repair and revalidated on subsequent mutations.
+- [x] Independent review verification passed at `4071948`: 657 tests passed across 52 test files (exit 0); all 17 required verification commands exit 0; typecheck, lint, formatting, production build, and unpacked build clean pass (exit 0); real-Electron photo review verification (built & unpacked) 12/12 passed each (exit 0); photo browsing verification (built & unpacked) 19/19 passed each (exit 0); duplicate review 18/18 passed (exit 0); scan workflow 14/14 passed (exit 0); vault import (built & unpacked) 11/11 passed each (exit 0); SQLite 8/8 passed (exit 0); smoke checks (built & unpacked) passed (exit 0); source preservation invariance confirmed.
 
 Exit: users can rate, flag, group, and filter photos with persistent, portable annotations and guaranteed source file preservation.
 

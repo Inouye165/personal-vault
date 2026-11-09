@@ -9,10 +9,10 @@
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
 - **Stage 4 status**: Complete (independently accepted at `1a1fb69`, closeout at `8a17bfe`).
-- **Stage 5 status**: **In progress; Substage 5A Complete (independently accepted at `951fd25`); Substage 5B Awaiting review**.
+- **Stage 5 status**: **In progress; Substage 5A Complete (independently accepted at `951fd25`); Substage 5B Complete (independently accepted at `4071948`); Substage 5C Planned (not started)**.
   - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Complete** (independently accepted at `951fd25`).
-  - **Stage 5B (Ratings, Flags, Custom Collections)**: **Awaiting review** (implementation complete on `feat/stage-5b-photo-review`).
-  - **Stage 5C (Visual Similarity Review)**: Planned; not started.
+  - **Stage 5B (Ratings, Flags, Custom Collections)**: **Complete** (independently accepted at `4071948`).
+  - **Stage 5C (Visual Similarity Review)**: Planned; not started (next planned work).
 - **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only. Reject is strictly a review annotation; source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
@@ -218,7 +218,7 @@ All verification commands executed from `D:\organizer`:
 
 | Verification Gate / Suite                 | Command                                | Result                         | Exit Code | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ----------------------------------------- | -------------------------------------- | ------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Unit & Behavioral Tests**               | `npm test`                             | **625 passed across 44 files** | 0         | Full coverage: Stage 5B review/annotation schemas, collection normalization, journal ownership/containment, bounded recovery, two-phase protocol, startup reconciliation, Migration 7, catalog review/filter queries, concurrency & revisions, photo review IPC, preload bridge, renderer UI review components, post-commit journal failure handling, UTF-8 safety & record bounds, runtime security revalidation, and renderer response safety |
+| **Unit & Behavioral Tests**               | `npm test`                             | **657 passed across 52 files** | 0         | Full coverage: Stage 5B review/annotation schemas, collection normalization, journal ownership/containment, bounded recovery, two-phase protocol, startup reconciliation, Migration 7, catalog review/filter queries, concurrency & revisions, photo review IPC, preload bridge, renderer UI review components, post-commit journal failure handling, UTF-8 safety & record bounds, runtime security revalidation, and renderer response safety |
 | **Strict Typecheck**                      | `npm run typecheck`                    | **Clean pass**                 | 0         | TypeScript strict checking across Node and Web targets (0 errors)                                                                                                                                                                                                                                                                                                                                                                               |
 | **ESLint**                                | `npm run lint`                         | **Clean pass**                 | 0         | Codebase compliant (0 errors, 0 warnings)                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **Formatting Compliance**                 | `npm run format:check`                 | **Clean pass**                 | 0         | 100% Prettier compliant                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -252,9 +252,9 @@ The following unrelated files remain intact and untouched:
 
 ## 5. Scope Exclusions & Next Steps
 
-- **Scope Exclusions**: Stage 5B is implemented only. Stage 5C (perceptual hashing and visual similarity review) is planned and not started. No catalog deletion, vault deletion, source deletion, OCR, semantic search, or cloud uploads.
+- **Scope Exclusions**: Stage 5B is Complete; no Stage 5C work, catalog deletion, vault deletion, source deletion, OCR, semantic search, or cloud uploads performed.
 - **Stage 5A Status**: Complete (independently accepted at `951fd25`).
 - **Stage 5 Overall Status**: In progress.
-- **Stage 5B Status**: **Awaiting review** (implemented on `feat/stage-5b-photo-review`).
-- **Stage 5C Status**: Planned; not started.
+- **Stage 5B Status**: **Complete** (independently accepted at `4071948`).
+- **Stage 5C Status**: Planned; not started (next planned work).
 - **Git State**: Work committed on `feat/stage-5b-photo-review` branched directly from `53c1052`. Do NOT push or merge.
