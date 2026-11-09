@@ -92,7 +92,7 @@ Verification: implementation host & independent review verification **421 passed
 
 ## Stage 5: Cached, Virtualized Photo Browsing; Ratings and Similarity Review
 
-Status: **in progress; Substage 5A and 5B complete (independently accepted at `951fd25` and `4071948`).**
+Status: **complete; Substages 5A, 5B, and 5C independently accepted at `951fd25`, `4071948`, and `543135a`.**
 
 Verification (Substage 5A): reviewer verification passed at `951fd25`: **503 passed, 0 skipped** across all 31 test files (exit code 0), all 15 required verification commands exit code 0, strict typecheck across Node and Web targets (exit code 0), ESLint clean pass (exit code 0), Prettier formatting clean pass (exit code 0), production bundle build (exit code 0), unpacked binary build (exit code 0), real Electron photo verification suite in built and unpacked modes (`verify:photos`, `verify:photos:unpacked` — 19/19 checks passed each, exit code 0, 10,000-photo scale test exercising actual Photos UI with real decodable image files and recorded actual fixture timestamps, cold scroll, warm reversal with frame interval p95 4.30 ms vs. 33 ms bound across 584 [built] / 599 [unpacked] rAF samples, continuous main process event-loop delay inside main p95 35.91 ms [built] / 44.40 ms [unpacked] vs. 100 ms bound, renderer-to-main IPC round-trip latency p95 28.39 ms [built] / 61.78 ms [unpacked], distant jumps, return to evicted pages with verified image loading [complete && naturalWidth > 0] and cell association at each checkpoint, terminating worker capacity counting ensuring live workers never exceed 2, active and queued cancellation capacity recovery, deterministic publication interruption observed at boundary with clean recovery, new decode, and subsequent cache reuse, hardened cache root/ancestor containment and dynamic separation validation, and 0 re-decodes on cache reuse proven via diagnostics), real Electron duplicate review (`verify:duplicates` — 18/18 checks passed, exit code 0), scan workflow (`verify:scan` — 14/14 checks passed, exit code 0), verified vault import in built and unpacked modes (`verify:vault`, `verify:vault:unpacked` — 11/11 checks passed each, exit code 0), SQLite catalog repository (`verify:sqlite` — 8/8 checks passed, exit code 0), real Electron smoke checks in built and unpacked modes (`smoke:built`, `smoke:unpacked` — passed, exit code 0), and source preservation invariance confirmed across all operations. Reviewer-host evidence recorded distinctly from other hosts' results; HEIC/RAW limitations and documented environmental uncertainty retained.
 
@@ -145,7 +145,7 @@ Verification: independent review verification passed at `4071948`: 657 passed ac
 
 ### Substage 5C: Visual Similarity Review
 
-Status: **complete; awaiting independent review.**
+Status: **complete; independent re-review accepted at `543135a`** (see HANDOFF.md). Earlier candidate `3ea3454` failed review on `npm run typecheck`; corrected in `543135a`. Reviewer-reported: 733 tests across 61 files, all 19 commands exit 0, `verify:similarity` and `verify:similarity:unpacked` 8/8 each. Algorithm limits retained; similarity scores are machine suggestions distinct from explicit user classifications.
 
 Design & Numerical Resource Bounds:
 
@@ -185,6 +185,8 @@ Tasks:
 ---
 
 ## Stage 6: Semantic Photo Search and Metadata Filters
+
+Status: **Planned; not started.**
 
 - [ ] Local offline embedding model evaluation and selection.
 - [ ] Semantic query vector generation and search indexing.

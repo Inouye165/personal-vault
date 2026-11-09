@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stage 1, Stage 2, Stage 3, Stage 4, Stage 5A, and Stage 5B are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, `951fd25`, and `4071948`). Substage 5C and Stages 6-8 are future work. Public release has not occurred and has no scheduled date.
+Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is Planned and has not started; Stages 7-8 are also planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status      | Acceptance                |
-| ----- | -------------------------------------------------------------- | ----------- | ------------------------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                 |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                 |
-| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                 |
-| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                 |
-| 5     | Fast photo browsing, ratings, and similarity review            | In progress | Substage 5A & 5B accepted |
-| 6     | Semantic photo search and metadata filters                     | Planned     | Pending                   |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                   |
-| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                   |
+| Stage | Deliverable                                                    | Status   | Acceptance                               |
+| ----- | -------------------------------------------------------------- | -------- | ---------------------------------------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete | `070e3cb`                                |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete | `71e1af7`                                |
+| 3     | Exact duplicate grouping and review                            | Complete | `79bbf44`                                |
+| 4     | Verified vault copying and portable metadata                   | Complete | `1a1fb69`                                |
+| 5     | Fast photo browsing, ratings, and similarity review            | Complete | 5A `951fd25`, 5B `4071948`, 5C `543135a` |
+| 6     | Semantic photo search and metadata filters                     | Planned  | Pending                                  |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned  | Pending                                  |
+| 8     | Export, recovery, release validation, beta, and public release | Planned  | Pending                                  |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -93,13 +93,13 @@ Exit: originals can be copied with verified integrity and recoverable metadata o
 
 ## Stage 5 - Photo browsing and review
 
-**In progress; Substage 5A and 5B complete; independently accepted at `951fd25` and `4071948`.**
+**Complete; Substages 5A, 5B, and 5C independently accepted at `951fd25`, `4071948`, and `543135a`.**
 
-| Substage | Deliverable                                                               | Status          | Submission reference              | Acceptance reference |
-| -------- | ------------------------------------------------------------------------- | --------------- | --------------------------------- | -------------------- |
-| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete        | `5258b0a`                         | `951fd25`            |
-| 5B       | User review tools: ratings, flags, and custom collections                 | Complete        | `feat/stage-5b-photo-review`      | `4071948`            |
-| 5C       | Perceptual hashing and visual similarity review                           | Awaiting review | `feat/stage-5c-visual-similarity` | Pending              |
+| Substage | Deliverable                                                               | Status   | Submission reference              | Acceptance reference |
+| -------- | ------------------------------------------------------------------------- | -------- | --------------------------------- | -------------------- |
+| 5A       | Bounded thumbnail generation, secure disposable cache, and photo browsing | Complete | `5258b0a`                         | `951fd25`            |
+| 5B       | User review tools: ratings, flags, and custom collections                 | Complete | `feat/stage-5b-photo-review`      | `4071948`            |
+| 5C       | Perceptual hashing and visual similarity review                           | Complete | `feat/stage-5c-visual-similarity` | `543135a`            |
 
 ### Stage 5A - Bounded thumbnail generation, secure disposable cache, and virtualized photo browsing
 
@@ -153,7 +153,7 @@ Exit: users can rate, flag, group, and filter photos with persistent, portable a
 
 ### Stage 5C - Perceptual hashing and visual similarity review
 
-**Awaiting review.**
+**Complete; independently accepted at `543135a` (corrected candidate). Earlier candidate `3ea3454` failed independent review because `npm run typecheck` reported TypeScript errors; those were corrected and the corrected candidate was re-reviewed and accepted.**
 
 - [x] Deterministic 64-bit perceptual fingerprinting (`dhash64_v1`) suitable for recompression, resizing, and modest edits; computes 4x16-bit partition bucket integers for sub-key indexing; Hamming distance comparison (0–64 bits) and bounded algorithmic similarity percentage `(1 - distance / 64) * 100%`. Explicitly documented algorithm limits (crops, rotations, burst scenes, extreme contrast shifts).
 - [x] Shared decode worker pool integration (`requestFingerprint`): executes outside Electron main with low priority, respecting the aggregate concurrency bounds (<= 2 live decode workers including terminating workers, <= 64 queued jobs, 15-second per-job timeout, max 128 MiB source size, max 100 megapixels input limit).
@@ -166,7 +166,8 @@ Exit: users can rate, flag, group, and filter photos with persistent, portable a
 - [x] Stale presentation and selection guards: monotonic request tokens and pure render state updaters preventing racing queries or delayed completions from corrupting presentation.
 - [x] Narrow typed IPC channels (`similarity:start-analysis`, `similarity:cancel-analysis`, `similarity:resume-analysis`, `similarity:get-progress`, `similarity:get-pairs`, `similarity:set-decision`, `similarity:reconcile`) with bidirectional Zod validation and top-level sender frame authorization.
 - [x] Isolated-fixture verification scripts (`scripts/verify-electron-similarity.mjs`, `verify:similarity`, `verify:similarity:unpacked`): exercises DOM controls in real Electron across built and unpacked modes — scan -> navigate to similarity review -> trigger analysis -> progress bar -> inspect cards -> exercise all 4 decision actions -> filter candidate pairs -> restart persistence -> bitwise source preservation invariance.
-- [x] Full quality gates verified: 733/733 tests passed across 61 test files (exit 0); typecheck clean (exit 0); lint clean (exit 0); formatting clean (exit 0); build clean (exit 0); unpack build clean (exit 0); all 12 verification command suites passed with exit code 0.
+- [x] Independent reviewer-reported verification at `543135a` (reviewer executed; not re-run during closeout): 733 tests passed across 61 test files; all 19 quality/build/Electron verification commands exited 0; `verify:similarity` and `verify:similarity:unpacked` each passed 8/8 phases; prior-stage regressions passed.
+- Algorithm limits retained: `dhash64_v1` similarity is an uncalibrated machine suggestion, not proof of an edited copy; crops, rotations without EXIF, bursts, and difficult images may be missed or confused; candidate caps (<= 50 per photo, <= 10,000 pairs per run) mean coverage can be incomplete. Only explicit user decisions (`edited_version`, `similar_scene`, `unrelated`, `unreviewed`) classify a pair. Exact duplicates remain under the Stage 3 SHA-256 workflow.
 
 Exit: users can run local perceptual analysis, browse similar candidates side by side, and record explicit review decisions with guaranteed source file preservation.
 

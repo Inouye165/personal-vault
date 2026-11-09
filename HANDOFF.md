@@ -9,11 +9,13 @@
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
 - **Stage 4 status**: Complete (independently accepted at `1a1fb69`, closeout at `8a17bfe`).
-- **Stage 5 status**: **In progress; Substage 5A Complete (independently accepted at `951fd25`); Substage 5B Complete (independently accepted at `4071948`); Substage 5C Complete (Awaiting review)**.
+- **Stage 5 status**: **Complete; Substage 5A independently accepted at `951fd25`, 5B at `4071948`, 5C at `543135a`**.
   - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Complete** (independently accepted at `951fd25`).
   - **Stage 5B (Ratings, Flags, Custom Collections)**: **Complete** (independently accepted at `4071948`).
-  - **Stage 5C (Visual Similarity Review)**: **Complete; Awaiting review**.
-- **Candidate History**: Initial candidate `3ea3454` had reviewer-observed TypeScript compilation errors; corrected candidate resolves all findings with clean typecheck and full 19-command verification.
+  - **Stage 5C (Visual Similarity Review)**: **Complete** (independently accepted at `543135ad36e24d8f2abf7ffb23fe4d520ad8b079`).
+- **Next stage**: Stage 6 (Semantic photo search) is **Planned; not started**.
+- **Candidate History**: Initial candidate `3ea3454` failed independent review (reviewer-observed `npm run typecheck` errors). The corrected candidate `543135a` was independently re-reviewed and **ACCEPTED**.
+- **Evidence source**: All verification results below are as reported by the independent reviewer at `543135a` (733 tests across 61 files; all 19 commands exit 0; `verify:similarity` and `verify:similarity:unpacked` 8/8 each). They were not re-run during this documentation closeout.
 - **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only. Perceptual similarity is labeled algorithmic similarity and does not prove an edited copy. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
@@ -147,5 +149,5 @@ The following unrelated files remain intact and untouched:
 ## 5. Scope Exclusions & Next Steps
 
 - **Scope Exclusions**: Stage 5C is Complete; no Stage 6 work, semantic photo search, OCR, document classification, catalog deletion, vault deletion, source deletion, or cloud uploads performed.
-- **Stage 5 Status**: In progress; Substage 5A Complete (independently accepted at `951fd25`); Substage 5B Complete (independently accepted at `4071948`); Substage 5C Complete (Awaiting review).
+- **Stage 5 Status**: Complete; 5A (`951fd25`), 5B (`4071948`), and 5C (`543135a`) independently accepted. Stage 6 is Planned; not started.
 - **Git State**: Work committed on `feat/stage-5c-visual-similarity` branched directly from `84090e7`. Do NOT push or merge.
