@@ -23,16 +23,29 @@ import type { ThumbnailResult } from '../../../shared/validation/ipc-schemas'
 
 export { readWebPDimensions }
 
-interface QueuedItem {
+interface QueuedThumbnailItem {
   id: number
-  action: 'decode' | 'validate_cache' | 'fingerprint'
+  action: 'decode' | 'validate_cache'
   params: ThumbnailRequestParams
   cacheKey: string
   cachedBuf?: Buffer
-  resolve: (res: ThumbnailResult | FingerprintJobResult) => void
+  resolve: (res: ThumbnailResult) => void
   reject: (err: unknown) => void
   priorityOrder: number
 }
+
+interface QueuedFingerprintItem {
+  id: number
+  action: 'fingerprint'
+  params: ThumbnailRequestParams
+  cacheKey: string
+  cachedBuf?: Buffer
+  resolve: (res: FingerprintJobResult) => void
+  reject: (err: unknown) => void
+  priorityOrder: number
+}
+
+type QueuedItem = QueuedThumbnailItem | QueuedFingerprintItem
 
 interface ActiveWorkerEntry {
   worker: Worker
@@ -329,12 +342,12 @@ export class ThumbnailCoordinator {
     const priorityOrder = priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
 
     return new Promise<FingerprintJobResult>((resolve, reject) => {
-      const item: QueuedItem = {
+      const item: QueuedFingerprintItem = {
         id: this.nextJobId++,
         action: 'fingerprint',
         params,
         cacheKey: '',
-        resolve: (res) => resolve(res as FingerprintJobResult),
+        resolve,
         reject,
         priorityOrder
       }
@@ -482,7 +495,7 @@ export class ThumbnailCoordinator {
     const priorityOrder = priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
 
     return new Promise<ThumbnailResult>((resolve, reject) => {
-      const item: QueuedItem = {
+      const item: QueuedThumbnailItem = {
         id: this.nextJobId++,
         action: candidateBuf ? 'validate_cache' : 'decode',
         params,

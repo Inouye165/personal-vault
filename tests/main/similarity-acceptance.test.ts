@@ -249,10 +249,13 @@ describe('Stage 5C Acceptance Suite — Perceptual Similarity & Review Invariant
     // Verify deterministic pagination
     const page1 = catalog.getSimilarityCandidatePairs({ page: 1, pageSize: 2 })
     const page2 = catalog.getSimilarityCandidatePairs({ page: 2, pageSize: 2 })
-    expect(page1.pairs.length).toBeLessThanOrEqual(2)
-    if (page1.pairs.length > 0 && page2.pairs.length > 0) {
-      expect(page1.pairs[0].id).not.toBe(page2.pairs[0].id)
-    }
+    expect(page1.pairs.length).toBe(2)
+    expect(page2.pairs.length).toBeGreaterThan(0)
+    const firstPageItem = page1.pairs[0]
+    const secondPageItem = page2.pairs[0]
+    expect(firstPageItem).toBeDefined()
+    expect(secondPageItem).toBeDefined()
+    expect(firstPageItem!.id).not.toBe(secondPageItem!.id)
   })
 
   it('rejects stale decision revisions and invalidates decisions when content changes', async () => {

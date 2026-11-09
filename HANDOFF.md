@@ -13,6 +13,7 @@
   - **Stage 5A (Thumbnails, Cache & Photo Browsing)**: **Complete** (independently accepted at `951fd25`).
   - **Stage 5B (Ratings, Flags, Custom Collections)**: **Complete** (independently accepted at `4071948`).
   - **Stage 5C (Visual Similarity Review)**: **Complete; Awaiting review**.
+- **Candidate History**: Initial candidate `3ea3454` had reviewer-observed TypeScript compilation errors; corrected candidate resolves all findings with clean typecheck and full 19-command verification.
 - **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only. Perceptual similarity is labeled algorithmic similarity and does not prove an edited copy. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
@@ -73,6 +74,24 @@ Catalog database schema updated via Migration 8 (`CURRENT_SCHEMA_VERSION = 8`):
 - **Explicit Review Controls**: Buttons for `Edited Version`, `Similar Scene`, `Dismiss (Unrelated)`, and `Clear Decision` (returns to unreviewed).
 - **Decision Filters & Bounded Pagination**: Filter candidate pairs by `All`, `Unreviewed`, `Edited Versions`, `Similar Scenes`, and `Dismissed`. Deterministic pagination with Prev/Next controls and page indicators.
 - **Asynchronous Response Safety**: Monotonic request tokens and pure render state updaters prevent racing queries or delayed completions from corrupting presentation.
+
+### 1.8 Independent Review Corrections & Evidence Distinctions from Candidate 3ea3454
+
+The independent review of initial candidate `3ea3454` reported four actionable TypeScript findings under strict checking (`npm run typecheck` failed on `3ea3454` with 5 TS errors):
+
+1. **`src/main/services/thumbnails/coordinator.ts:491`**: `ThumbnailResult`-only resolver assigned to a union-result callback.
+   - _Correction_: Refactored `QueuedItem` into a discriminated union (`QueuedThumbnailItem | QueuedFingerprintItem`). Direct typed resolver assignment without unchecked casts (`resolve: (res: ThumbnailResult) => void` vs. `resolve: (res: FingerprintJobResult) => void`), guaranteeing compile-time discriminated routing.
+2. **`tests/main/similarity-acceptance.test.ts:254`**: Conditional pagination assertion skipped under `noUncheckedIndexedAccess`.
+   - _Correction_: Explicitly asserted page array lengths (`expect(page1.pairs.length).toBe(2)` and `expect(page2.pairs.length).toBeGreaterThan(0)`) and validated element definedness before comparing unique IDs across pages.
+3. **`tests/main/similarity-ipc.test.ts:16`**: Nonexistent `SimilarityDecisionResult` import.
+   - _Correction_: Imported correct schema type `SimilaritySetDecisionResponse` and updated test response assertions.
+4. **`tests/main/similarity-ipc.test.ts:57`**: Sender validator mock contract mismatch with `IpcSenderEvent` (especially nullable `senderFrame`).
+   - _Correction_: Typed mock events as `IpcSenderEvent` with optional-chaining sender-frame check; added test coverage verifying rejection of both untrusted origins and null sender frames.
+
+**Distinction of Evidence**:
+
+- `3ea3454`: Failed `npm run typecheck` with TS2322, TS2532, TS2724 across coordinator and test files.
+- **Corrected Candidate**: Fully passes `npm run typecheck` (0 errors across Node and Web projects), passes all 733 tests across 61 test files, passes both built and unpacked real Electron similarity verifications, passes all prior-stage regressions, and strictly maintains all inviolable principles.
 
 ---
 
