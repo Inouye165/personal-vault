@@ -32,6 +32,13 @@ export interface UsePhotoReviewProps {
     version: number
   ) => void
   removePhotoFromFilterView: (photoId: number) => void
+  maxPendingOps?: number
+}
+
+interface PendingOpRecord {
+  id: string
+  gen: number
+  error?: string | null
 }
 
 export function computePhotoRevision(photo: PhotoItem): string {
@@ -46,7 +53,8 @@ export function usePhotoReview({
   flagFilter,
   collectionIdFilter,
   updatePhotoLocal,
-  removePhotoFromFilterView
+  removePhotoFromFilterView,
+  maxPendingOps = 500
 }: UsePhotoReviewProps) {
   const [collections, setCollections] = useState<CollectionItem[]>([])
   const [collectionsOffset, setCollectionsOffset] = useState(0)
@@ -64,29 +72,49 @@ export function usePhotoReview({
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
 
   // Track pending persistence operations accurately across mutations
-  const MAX_PENDING_OPS = 500
-  const [pendingOps, setPendingOps] = useState<Map<string, { id: string; error?: string | null }>>(
-    new Map()
-  )
-  const pendingOpsRef = useRef<Map<string, { id: string; error?: string | null }>>(new Map())
+  const [pendingOps, setPendingOps] = useState<Map<string, PendingOpRecord>>(new Map())
+  const pendingOpsRef = useRef<Map<string, PendingOpRecord>>(new Map())
+  const mutationGenRef = useRef(0)
+  const overflowCountRef = useRef(0)
+  const overflowHighestGenRef = useRef(0)
+  const [overflowCount, setOverflowCount] = useState(0)
   const [persistenceError, setPersistenceError] = useState<string | null>(null)
-  const persistencePending = pendingOps.size > 0
+  const persistencePending = pendingOps.size > 0 || overflowCount > 0
 
-  const addPendingOp = useCallback((opId: string, error?: string | null) => {
-    setPendingOps((prev) => {
-      const next = new Map(prev)
-      if (next.size >= MAX_PENDING_OPS) {
-        const oldestKey = next.keys().next().value
+  const addPendingOp = useCallback(
+    (opPrefix: string, error?: string | null) => {
+      const gen = ++mutationGenRef.current
+      const opId = `${opPrefix}:${gen}`
+      const opRecord: PendingOpRecord = { id: opId, gen, error }
+
+      // Update refs synchronously first (pure state updates below)
+      const nextMap = new Map(pendingOpsRef.current)
+      if (nextMap.size >= maxPendingOps) {
+        const oldestKey = nextMap.keys().next().value
         if (oldestKey !== undefined) {
-          next.delete(oldestKey)
+          const evicted = nextMap.get(oldestKey)
+          nextMap.delete(oldestKey)
+          overflowCountRef.current++
+          if (evicted) {
+            overflowHighestGenRef.current = Math.max(overflowHighestGenRef.current, evicted.gen)
+          }
         }
       }
-      next.set(opId, { id: opId, error })
-      pendingOpsRef.current = next
-      return next
-    })
-    setPersistenceError(error ?? 'Journal finalization pending')
-  }, [])
+      nextMap.set(opId, opRecord)
+      pendingOpsRef.current = nextMap
+
+      const currentOverflow = overflowCountRef.current
+      setPendingOps(nextMap)
+      setOverflowCount(currentOverflow)
+      setPersistenceError(
+        error ??
+          (currentOverflow > 0
+            ? `Journal finalization pending (${currentOverflow} older operation(s) unfinalized)`
+            : 'Journal finalization pending')
+      )
+    },
+    [maxPendingOps]
+  )
 
   const isMountedRef = useRef(true)
   useEffect(() => {
@@ -317,32 +345,44 @@ export function usePhotoReview({
   // Safe reconciliation for pending journal finalizations without re-mutating database
   const retryReconciliation = useCallback(async () => {
     if (typeof window.api?.reconcileJournal !== 'function') return
-    const coveredOpIds = new Set(pendingOpsRef.current.keys())
-    if (coveredOpIds.size === 0) return
+    const coveredGen = mutationGenRef.current
+    if (pendingOpsRef.current.size === 0 && overflowCountRef.current === 0) return
 
     try {
       const res = await window.api.reconcileJournal()
       if (!isMountedRef.current) return
       if (res.success) {
-        setPendingOps((prev) => {
-          const next = new Map(prev)
-          for (const id of coveredOpIds) {
-            next.delete(id)
+        // Clear only operations covered by this reconciliation call (gen <= coveredGen)
+        const nextMap = new Map<string, PendingOpRecord>()
+        for (const [id, op] of pendingOpsRef.current.entries()) {
+          if (op.gen > coveredGen) {
+            nextMap.set(id, op)
           }
-          pendingOpsRef.current = next
-          return next
-        })
+        }
+        pendingOpsRef.current = nextMap
 
-        // Check if there are newer pending operations not covered by this reconciliation
-        const remaining = Array.from(pendingOpsRef.current.values()).filter(
-          (op) => !coveredOpIds.has(op.id)
-        )
-        if (remaining.length === 0) {
+        if (overflowHighestGenRef.current <= coveredGen) {
+          overflowCountRef.current = 0
+          overflowHighestGenRef.current = 0
+        }
+        const remainingOverflow = overflowCountRef.current
+        const remainingCount = nextMap.size + remainingOverflow
+
+        setPendingOps(nextMap)
+        setOverflowCount(remainingOverflow)
+
+        if (remainingCount === 0) {
           setPersistenceError(null)
           setSaveStatus((current) => (current === 'saving' ? current : 'saved'))
         } else {
-          const lastErr = remaining[remaining.length - 1]?.error
-          setPersistenceError(lastErr ?? 'Journal finalization pending')
+          const remainingOps = Array.from(nextMap.values())
+          const lastErr = remainingOps[remainingOps.length - 1]?.error
+          setPersistenceError(
+            lastErr ??
+              (remainingOverflow > 0
+                ? `Journal finalization pending (${remainingOverflow} older operation(s) unfinalized)`
+                : 'Journal finalization pending')
+          )
         }
       }
     } catch (err) {
@@ -386,8 +426,7 @@ export function usePhotoReview({
         // 1. Record committed-but-persistence-pending outcomes independently of
         // selection, photo revision, and stale presentation-response guards.
         if (result.persistencePending) {
-          const opId = `rating:${targetPhotoId}:${targetSeq}`
-          addPendingOp(opId, result.persistenceError)
+          addPendingOp(`rating:${targetPhotoId}`, result.persistenceError)
         }
 
         // Presentation guards:
@@ -491,8 +530,7 @@ export function usePhotoReview({
         // 1. Record committed-but-persistence-pending outcomes independently of
         // selection, photo revision, and stale presentation-response guards.
         if (result.persistencePending) {
-          const opId = `flag:${targetPhotoId}:${targetSeq}`
-          addPendingOp(opId, result.persistenceError)
+          addPendingOp(`flag:${targetPhotoId}`, result.persistenceError)
         }
 
         // Presentation guards:
@@ -560,8 +598,7 @@ export function usePhotoReview({
         const res = await window.api.createCollection({ name })
         if (!isMountedRef.current) return res.collection
         if (res.persistencePending) {
-          const opId = `create_col:${res.collection.id}`
-          addPendingOp(opId, res.persistenceError)
+          addPendingOp(`create_col:${res.collection.id}`, res.persistenceError)
         }
         await loadCollections(0)
         return res.collection
@@ -582,8 +619,7 @@ export function usePhotoReview({
         const res = await window.api.renameCollection({ collectionId, name })
         if (!isMountedRef.current) return res.collection
         if (res.persistencePending) {
-          const opId = `rename_col:${collectionId}`
-          addPendingOp(opId, res.persistenceError)
+          addPendingOp(`rename_col:${collectionId}`, res.persistenceError)
         }
         await loadCollections(collectionsOffset)
         if (selectedPhotoRef.current) {
@@ -616,8 +652,7 @@ export function usePhotoReview({
         })
         if (!isMountedRef.current) return
         if (res.persistencePending) {
-          const opId = `add_mem:${collectionId}:${targetPhotoId}`
-          addPendingOp(opId, res.persistenceError)
+          addPendingOp(`add_mem:${collectionId}:${targetPhotoId}`, res.persistenceError)
         }
 
         // Verify photo selection and revision did not change mid-flight
@@ -662,8 +697,7 @@ export function usePhotoReview({
         })
         if (!isMountedRef.current) return
         if (res.persistencePending) {
-          const opId = `remove_mem:${collectionId}:${targetPhotoId}`
-          addPendingOp(opId, res.persistenceError)
+          addPendingOp(`remove_mem:${collectionId}:${targetPhotoId}`, res.persistenceError)
         }
 
         if (
