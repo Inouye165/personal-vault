@@ -61,7 +61,11 @@ import type {
   SimilarityGetPairsResponse,
   SimilaritySetDecisionRequest,
   SimilaritySetDecisionResponse,
-  SimilarityReconcileResponse
+  SimilarityReconcileResponse,
+  SemanticModelStatusResponse,
+  SemanticIndexProgressResponse,
+  SemanticIndexJobItemsRequest,
+  SemanticIndexJobItemsResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -118,6 +122,22 @@ export interface VaultApi {
     request: SimilaritySetDecisionRequest
   ) => Promise<SimilaritySetDecisionResponse>
   reconcileSimilarity: () => Promise<SimilarityReconcileResponse>
+  getSemanticModelStatus: () => Promise<SemanticModelStatusResponse>
+  downloadSemanticModel: () => Promise<SemanticModelStatusResponse>
+  importSemanticModelFromFolder: () => Promise<SemanticModelStatusResponse>
+  cancelSemanticModelProvisioning: () => Promise<SemanticModelStatusResponse>
+  onSemanticModelStatus: (callback: (status: SemanticModelStatusResponse) => void) => () => void
+  getSemanticIndexProgress: () => Promise<SemanticIndexProgressResponse>
+  startSemanticIndexing: () => Promise<SemanticIndexProgressResponse>
+  pauseSemanticIndexing: () => Promise<SemanticIndexProgressResponse>
+  resumeSemanticIndexing: () => Promise<SemanticIndexProgressResponse>
+  cancelSemanticIndexing: () => Promise<SemanticIndexProgressResponse>
+  getSemanticIndexJobItems: (
+    request?: SemanticIndexJobItemsRequest
+  ) => Promise<SemanticIndexJobItemsResponse>
+  onSemanticIndexProgress: (
+    callback: (progress: SemanticIndexProgressResponse) => void
+  ) => () => void
 }
 
 declare global {

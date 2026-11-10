@@ -612,3 +612,93 @@ export interface SimilarityCandidatePairRecord {
   readonly decisionVersion?: number | null
   readonly decisionUpdatedAtMs?: number | null
 }
+
+// Stage 6B: Semantic Embeddings & Resumable Semantic Index Types
+
+export interface PhotoSemanticEmbeddingRecord {
+  readonly id: number
+  readonly fileId: number | null
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly contentSha256: string
+  readonly contentRevision: string
+  readonly sourcePath: string
+  readonly observedByteSize: number
+  readonly observedMtimeMs: number
+  readonly modelId: string
+  readonly modelCommit: string
+  readonly modelManifestSha256: string
+  readonly preprocessingVersion: string
+  readonly embeddingDimensions: number
+  readonly vector: Float32Array
+  readonly width: number | null
+  readonly height: number | null
+  readonly createdAtMs: number
+  readonly isCurrent: boolean
+}
+
+export interface SavePhotoSemanticEmbeddingInput {
+  readonly fileId?: number | null
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly contentSha256: string
+  readonly contentRevision: string
+  readonly sourcePath: string
+  readonly observedByteSize: number
+  readonly observedMtimeMs: number
+  readonly modelId: string
+  readonly modelCommit: string
+  readonly modelManifestSha256: string
+  readonly preprocessingVersion: string
+  readonly embeddingDimensions: number
+  readonly vector: Float32Array
+  readonly width?: number | null
+  readonly height?: number | null
+}
+
+export interface SemanticIndexJobRecord {
+  readonly id: string
+  readonly status:
+    'idle' | 'running' | 'paused' | 'completed' | 'cancelled' | 'interrupted' | 'failed'
+  readonly modelId: string
+  readonly modelCommit: string
+  readonly modelManifestSha256: string
+  readonly preprocessingVersion: string
+  readonly totalPhotos: number
+  readonly processedPhotos: number
+  readonly reusedPhotos: number
+  readonly unsupportedPhotos: number
+  readonly failedPhotos: number
+  readonly pendingPhotos: number
+  readonly startedAtMs: number
+  readonly updatedAtMs: number
+  readonly completedAtMs: number | null
+  readonly lastError: string | null
+}
+
+export interface CreateSemanticIndexJobInput {
+  readonly jobId?: string
+  readonly modelId: string
+  readonly modelCommit: string
+  readonly modelManifestSha256: string
+  readonly preprocessingVersion: string
+}
+
+export interface SemanticIndexJobItem {
+  readonly id: number
+  readonly jobId: string
+  readonly fileLocationId: number
+  readonly originalPath: string
+  readonly discoveryObservationId: number
+  readonly expectedByteSize: number
+  readonly expectedMtimeMs: number
+  readonly status: 'pending' | 'completed' | 'reused' | 'unsupported' | 'failed' | 'skipped'
+  readonly errorCode: string | null
+  readonly errorMessage: string | null
+  readonly updatedAtMs: number | null
+}
+
+export interface SemanticIndexCoverageResult {
+  readonly totalCatalogPhotos: number
+  readonly currentIndexedPhotos: number
+}

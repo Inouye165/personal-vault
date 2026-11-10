@@ -78,11 +78,24 @@ src/
 │           ├── path-normalization.ts # Documented platform-aware lookup key normalization
 │           ├── types.ts      # Persistence contracts, records, and pagination interfaces
 │           └── index.ts      # Public catalog exports
-│       └── jobs/          # Stage 2D: resumable scan jobs and coordinator
-│           ├── coordinator.ts # ScanJobCoordinator (orchestrator, checkpointing, pause/resume, cancel)
-│           ├── errors.ts     # Domain errors (ActiveJobConflictError, JobNotFoundError, JobStateError)
-│           ├── types.ts      # Job options, progress, and event contracts
-│           └── index.ts      # Public jobs exports
+│       ├── jobs/          # Stage 2D: resumable scan jobs and coordinator
+│       │   ├── coordinator.ts # ScanJobCoordinator (orchestrator, checkpointing, pause/resume, cancel)
+│       │   ├── errors.ts     # Domain errors (ActiveJobConflictError, JobNotFoundError, JobStateError)
+│       │   ├── types.ts      # Job options, progress, and event contracts
+│       │   └── index.ts      # Public jobs exports
+│       ├── thumbnails/    # Stage 5A/5C/6B: shared decode, dHash, and semantic inference worker pool
+│       │   ├── coordinator.ts # ThumbnailCoordinator (<=2 live workers, <=64 queue, priority scheduling)
+│       │   ├── decoder.ts    # Sharp decode & 224x224 bicubic CLIP preprocessing outside main
+│       │   ├── worker.ts     # Node worker_threads entry (thumbnails, dHash, ONNX CLIP inference, off-main SHA-256)
+│       │   ├── cache.ts      # Disposable WebP disk cache
+│       │   └── types.ts      # Worker request/response discriminated unions
+│       └── semantic/      # Stage 6B: offline CLIP model provisioning & resumable semantic index coordinator
+│           ├── manifest.ts   # Pinned model identity, 7 artifact digests/sizes, recipe, approved CDN hosts
+│           ├── vector.ts     # 512-d Float32Array validation, L2 normalization, and blob conversion
+│           ├── model-manager.ts # SemanticModelManager (download, offline import, staging, off-main verification)
+│           ├── coordinator.ts # SemanticIndexCoordinator (resumable job execution, reuse verification, yielding)
+│           ├── types.ts      # Model status, job progress, and coordinator interfaces
+│           └── index.ts      # Public semantic exports
 ├── preload/
 │   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
@@ -425,3 +438,30 @@ src/
     - **IPC & Renderer Integration**:
       - Bidirectional Zod validation across `similarity:*` IPC channels with sender validation.
       - `SimilarityReviewPanel` renders side-by-side thumbnail comparisons, recorded facts, unknown values, decision controls, and progress/cancellation bars.
+
+15. **Model Provisioning & Resumable Semantic Index (Stage 6B)**:
+    - **Inviolable Principles & Source Preservation**:
+      - Source files remain strictly read-only (`open(path, 'r')`) during image decoding, off-main content verification, and embedding inference. Original bytes, sizes, and filesystem creation/modification timestamps (`birthtimeMs`, `mtimeMs`) are invariant (noting that OS mounts may update read access time `atime` during read-only file opens).
+      - Derived 512-dimensional semantic embeddings are stored strictly separate from immutable recorded facts (`file_locations`, `discovery_observations`, `hash_observations`). Embeddings are rebuildable derived data, not factual object labels, and are not journaled into the portable annotation log.
+      - Privacy & offline first: no personal photographs, filenames, metadata, or queries ever leave the device.
+    - **Pinned Model Provenance & Provisioning (`src/main/services/semantic/manifest.ts`, `model-manager.ts`)**:
+      - Pinned model: `Xenova/clip-vit-base-patch32` at revision `6b7c523703ae26e39be4b03774966f8571c7f523` (7 required files totaling exactly `155,851,918` bytes / `148.63 MiB`, verified against pinned SHA-256 digests and overall manifest SHA-256).
+      - Preprocessing recipe identifier: `clip_vit_b32_224_bicubic_center_rgb_v1` (224x224 bicubic center-crop RGB via `sharp.kernel.cubic`, normalized with CLIP channel means/stds), producing L2-normalized 512-dimensional `Float32Array` vectors (`2,048` bytes).
+      - Explicit user-initiated setup only: in-app download (`semantic:download-model`) or offline local folder import (`semantic:import-model-folder`, selected exclusively via main-process native dialog) after displaying the ~148.63 MiB model size requirement. Zero automatic startup or inference downloads.
+      - App-owned storage in `<userData>/models/` with canonical `realpath` + ancestor policy separation rejecting any overlap or symlink/junction redirection with source roots or active vault storage.
+      - Exclusive staging in `.pv_model_staging_<pid>_<uuid>`, off-main SHA-256 and byte-length verification (`validate_files` worker action), atomic publication (`model_manifest.json` written last after verified files), startup cleanup of abandoned staging directories, and preservation of existing verified installations when a replacement install fails or is cancelled.
+      - Strict download policy: HTTPS only to approved Hugging Face / XetHub CDN hosts (`huggingface.co`, `cas-bridge.xethub.hf.co`, `cdn-lfs.hf.co`, `cdn-lfs-us-1.hf.co`, `cdn-lfs-eu-1.hf.co`), redirect hop limit ($\le 5$), exact size and SHA-256 verification.
+      - Pre-load integrity revalidation off main before starting or resuming any semantic indexing job.
+    - **Persistent SQLite Index (Migration 9, `CURRENT_SCHEMA_VERSION = 9`)**:
+      - `photo_semantic_embeddings`: binds each 512-d `Float32Array` blob (`2,048` bytes) to `file_location_id`, `discovery_observation_id`, `content_sha256`, `content_revision`, `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`, and `vector_dimensions = 512` with partial unique index `idx_sem_emb_curr` on `(file_location_id, model_id, model_commit, model_manifest_sha256, preprocessing_version) WHERE is_current = 1`.
+      - `semantic_index_jobs` & `semantic_index_job_items`: disk-backed job state (`running`, `paused`, `cancelled`, `interrupted`, `failed`, `completed`), counters (`total_photos`, `processed_photos`, `indexed_photos`, `reused_photos`, `unsupported_photos`, `failed_photos`), and per-photo snapshot scope (`expected_revision`, `status`, `error_code`, `error_message`).
+      - No permanent 50,000-photo catalog cap: job creation snapshots only photos lacking a current embedding for the target model/recipe in SQLite, and job item queries paginate in bounded batches (`<= 500` items per batch).
+      - Vector validation (`src/main/services/semantic/vector.ts`): rejects non-finite (`NaN`/`Infinity`), wrong-dimension, non-unit-norm ($|\lVert v \rVert_2 - 1.0| > 10^{-3}$), or malformed-size blobs before SQLite persistence.
+      - Content-addressed reuse with live source verification: an existing current vector with matching `(content_sha256, model_id, model_commit, model_manifest_sha256, preprocessing_version)` is reused only after the worker verifies the live source file on disk (`verify_source` action: `approvedRoots` containment, pre/post `fstat`, sub-millisecond `mtimeMs`/`birthtimeMs` consistency, and streaming SHA-256).
+      - Pre-commit revision check: `recordSemanticEmbeddingAndCompleteItem` re-checks the current catalog `content_revision` inside a SQLite transaction and records `REVISION_MISMATCH` if the source changed while in flight.
+    - **Shared Worker Pool & Resource Bounds (`ThumbnailCoordinator` + `SemanticIndexCoordinator`)**:
+      - Aggregate live image-processing workers across interactive thumbnails, perceptual hashing (`dhash64_v1`), and semantic indexing (`semantic_embed`): **$\le 2$ live workers**, counting terminating workers until process `'exit'`.
+      - Active semantic embedding tasks: **$\le 1$ concurrent task** and at most **1 worker holding a loaded ONNX session** (`intraOpNumThreads: 2`, `interOpNumThreads: 1`, `cpuMemArena: false`). Idle or finished sessions are explicitly released (`release_semantic_session`).
+      - Aggregate worker queue: **$\le 64$ queued requests**, reserving $\ge 32$ slots for high-priority interactive thumbnail requests; `SemanticIndexCoordinator` yields whenever high-priority thumbnail decodes are queued or active.
+      - Thumbnail scroll cancellation isolation: `ThumbnailCoordinator.cancelRequest(locationId)` cancels only thumbnail `decode` and `validate_cache` items, never terminating background `fingerprint` or `semantic_embed` worker tasks for the same `locationId`.
+      - Packaging: `electron-builder.json5` unpacks `node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**/*` alongside `sharp` into `app.asar.unpacked`, bundles `THIRD_PARTY_NOTICES.md`, and excludes `spikes/` and model caches.

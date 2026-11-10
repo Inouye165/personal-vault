@@ -2292,3 +2292,138 @@ input:focus-visible {
   gap: 16px;
   padding: 12px 0;
 }
+
+/* --- Stage 6B: Semantic Index Management Panel --- */
+.semantic-index-panel {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.semantic-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.semantic-panel-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.semantic-panel-title-row h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-main);
+}
+
+.semantic-panel-scope-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.45;
+}
+
+.semantic-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.semantic-card {
+  background-color: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.semantic-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.semantic-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.semantic-detail-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.semantic-meta-tag {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.semantic-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.semantic-badge-ready,
+.semantic-job-badge-completed {
+  border-color: #238636;
+  color: #3fb950;
+}
+
+.semantic-badge-error,
+.semantic-job-badge-failed {
+  border-color: #da3633;
+  color: #f85149;
+}
+
+.semantic-actions-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.semantic-disabled-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.semantic-outcome-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #3fb950;
+  font-weight: 500;
+}
+
+.semantic-outcome-partial {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #e5c07b;
+  font-weight: 500;
+}

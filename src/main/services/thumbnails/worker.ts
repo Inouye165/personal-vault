@@ -1,23 +1,123 @@
 /**
- * Personal Vault — Thumbnail Worker Thread (Stage 5A)
+ * Personal Vault — Thumbnail & Semantic Worker Thread (Stages 5A, 5C, 6B)
  */
 
 import { parentPort } from 'node:worker_threads'
-import { decodeThumbnail, decodeFingerprint, type DecodeInputParams } from './decoder'
+import {
+  decodeThumbnail,
+  decodeFingerprint,
+  decodeSemanticEmbedding,
+  readAndVerifySourceFile,
+  verifyModelArtifactsInWorker,
+  releaseSemanticModelSessionInWorker,
+  type DecodeInputParams,
+  type SemanticDecodeInputParams
+} from './decoder'
 import { validateWebPIntegrity } from './cache'
+import type { SemanticModelArtifactSpec } from '../semantic/manifest'
 
 if (parentPort) {
   parentPort.on(
     'message',
     async (message: {
       id: number
-      action?: 'decode' | 'validate_cache' | 'fingerprint'
-      params?: DecodeInputParams
+      action?:
+        | 'decode'
+        | 'validate_cache'
+        | 'fingerprint'
+        | 'semantic_embed'
+        | 'verify_source'
+        | 'verify_model'
+        | 'release_model'
+        | 'worker_memory'
+      params?: DecodeInputParams | SemanticDecodeInputParams
       buffer?: Buffer | Uint8Array
       maxBytes?: number
       stuck?: boolean
+      directoryPath?: string
+      specs?: readonly SemanticModelArtifactSpec[]
     }) => {
       try {
+        if (message.action === 'release_model') {
+          await releaseSemanticModelSessionInWorker()
+          parentPort!.postMessage({
+            id: message.id,
+            status: 'released'
+          })
+          return
+        }
+
+        if (message.action === 'worker_memory') {
+          const mem = process.memoryUsage()
+          parentPort!.postMessage({
+            id: message.id,
+            status: 'ok',
+            heapUsed: mem.heapUsed,
+            heapTotal: mem.heapTotal,
+            external: mem.external,
+            arrayBuffers: mem.arrayBuffers,
+            rss: mem.rss
+          })
+          return
+        }
+
+        if (message.action === 'verify_model') {
+          const res = await verifyModelArtifactsInWorker(
+            message.directoryPath!,
+            message.specs ?? []
+          )
+          parentPort!.postMessage({
+            id: message.id,
+            status: res.ok ? 'ok' : 'error',
+            ok: res.ok,
+            error: res.error
+          })
+          return
+        }
+
+        if (message.action === 'verify_source') {
+          const verified = await readAndVerifySourceFile(message.params!)
+          if (verified.status === 'success') {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'ok',
+              sha256: verified.computedSha256,
+              observedByteSize: verified.observedByteSize,
+              observedMtimeMs: verified.observedMtimeMs
+            })
+          } else if (verified.status === 'unsupported') {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'unsupported',
+              reason: verified.reason
+            })
+          } else {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'error',
+              code: verified.code,
+              message: verified.message
+            })
+          }
+          return
+        }
+
+        if (message.action === 'semantic_embed') {
+          if (message.stuck || process.env.PV_TEST_STUCK_SEMANTIC === '1') {
+            return
+          }
+          const result = await decodeSemanticEmbedding(message.params as SemanticDecodeInputParams)
+          const mem = process.memoryUsage()
+          parentPort!.postMessage({
+            id: message.id,
+            ...result,
+            workerHeapUsedBytes: mem.heapUsed,
+            workerExternalBytes: mem.external,
+            workerRssBytes: mem.rss
+          })
+          return
+        }
+
         if (message.action === 'validate_cache') {
           if (message.stuck || process.env.PV_TEST_STUCK_VALIDATION === '1') {
             // Intentionally do not respond to test coordinator timeout termination

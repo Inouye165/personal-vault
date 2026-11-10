@@ -6,12 +6,20 @@
  */
 
 import { open } from 'node:fs/promises'
-import { realpathSync, lstatSync } from 'node:fs'
-import { extname } from 'node:path'
+import { realpathSync, lstatSync, existsSync } from 'node:fs'
+import { extname, join, relative, isAbsolute } from 'node:path'
 import { createHash } from 'node:crypto'
 import sharp from 'sharp'
 import { THUMBNAIL_LIMITS } from './types'
 import { extractDHash64FromImageBuffer } from '../similarity/fingerprint'
+import {
+  CLIP_IMAGE_SIZE,
+  CLIP_MEAN,
+  CLIP_STD,
+  SEMANTIC_EMBEDDING_DIMENSIONS,
+  type SemanticModelArtifactSpec
+} from '../semantic/manifest'
+import { normalizeEmbeddingVector } from '../semantic/vector'
 
 // Configure sharp bounds
 sharp.concurrency(1)
@@ -82,6 +90,8 @@ export type ReadSourceFileResult =
       readonly status: 'success'
       readonly fileBuffer: Buffer
       readonly computedSha256: string
+      readonly observedByteSize: number
+      readonly observedMtimeMs: number
     }
   | {
       readonly status: 'unsupported'
@@ -193,6 +203,7 @@ export async function readAndVerifySourceFile(
   let canonicalPath: string
   let preLstat: import('node:fs').Stats
   let computedSha256: string
+  let observedMtimeMs: number
   try {
     preLstat = lstatSync(sourcePath)
     if (preLstat.isSymbolicLink() || !preLstat.isFile()) {
@@ -214,6 +225,7 @@ export async function readAndVerifySourceFile(
 
     handle = await open(sourcePath, 'r')
     const preStat = await handle.stat()
+    observedMtimeMs = preStat.mtimeMs
 
     if (!preStat.isFile()) {
       return {
@@ -365,7 +377,9 @@ export async function readAndVerifySourceFile(
   return {
     status: 'success',
     fileBuffer,
-    computedSha256
+    computedSha256,
+    observedByteSize: fileBuffer.length,
+    observedMtimeMs
   }
 }
 
@@ -442,6 +456,263 @@ export async function decodeFingerprint(
       status: 'error',
       code: 'DECODE_FAILED',
       message: err instanceof Error ? err.message : 'Failed to decode image for fingerprint'
+    }
+  }
+}
+
+export interface SemanticDecodeInputParams extends DecodeInputParams {
+  readonly modelInstallDir: string
+}
+
+export type SemanticDecodeResult =
+  | {
+      readonly status: 'ready'
+      readonly vector: Float32Array
+      readonly width: number
+      readonly height: number
+      readonly computedSha256: string
+      readonly observedByteSize: number
+      readonly observedMtimeMs: number
+    }
+  | {
+      readonly status: 'unsupported'
+      readonly reason: string
+    }
+  | {
+      readonly status: 'error'
+      readonly code: string
+      readonly message: string
+    }
+
+let cachedOrtModule: typeof import('onnxruntime-node') | null = null
+let cachedVisionSession: import('onnxruntime-node').InferenceSession | null = null
+let cachedVisionModelPath: string | null = null
+
+async function getOrLoadVisionSession(
+  modelInstallDir: string
+): Promise<import('onnxruntime-node').InferenceSession> {
+  const visionPath = join(modelInstallDir, 'onnx', 'vision_model_quantized.onnx')
+  if (cachedVisionSession && cachedVisionModelPath === visionPath) {
+    return cachedVisionSession
+  }
+
+  await releaseSemanticModelSessionInWorker()
+
+  if (!cachedOrtModule) {
+    cachedOrtModule = await import('onnxruntime-node')
+  }
+
+  cachedVisionSession = await cachedOrtModule.InferenceSession.create(visionPath, {
+    executionProviders: ['cpu'],
+    intraOpNumThreads: 2,
+    interOpNumThreads: 1
+  })
+  cachedVisionModelPath = visionPath
+  return cachedVisionSession
+}
+
+export async function releaseSemanticModelSessionInWorker(): Promise<void> {
+  if (cachedVisionSession) {
+    try {
+      await cachedVisionSession.release()
+    } catch {
+      // ignore release errors
+    }
+    cachedVisionSession = null
+    cachedVisionModelPath = null
+  }
+}
+
+export async function verifyModelArtifactsInWorker(
+  directoryPath: string,
+  specs: readonly SemanticModelArtifactSpec[]
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    if (!existsSync(directoryPath)) {
+      return { ok: false, error: 'Model directory does not exist' }
+    }
+    const rootStat = lstatSync(directoryPath)
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      return { ok: false, error: 'Model directory is not a canonical directory' }
+    }
+    const canonicalRoot = realpathSync(directoryPath)
+
+    for (const spec of specs) {
+      if (!spec.relativePath || isAbsolute(spec.relativePath) || spec.relativePath.includes('\\')) {
+        return { ok: false, error: `Unsafe artifact path: ${spec.relativePath}` }
+      }
+      const parts = spec.relativePath.split('/')
+      if (parts.some((p) => !p || p === '.' || p === '..')) {
+        return { ok: false, error: `Unsafe traversal in artifact path: ${spec.relativePath}` }
+      }
+
+      let cur = directoryPath
+      for (const seg of parts) {
+        cur = join(cur, seg)
+        if (!existsSync(cur)) {
+          return { ok: false, error: `Missing model artifact: ${spec.relativePath}` }
+        }
+        const st = lstatSync(cur)
+        if (st.isSymbolicLink()) {
+          return { ok: false, error: `Symlink or junction rejected: ${spec.relativePath}` }
+        }
+      }
+
+      const canonicalFile = realpathSync(cur)
+      const rel = relative(canonicalRoot.toLowerCase(), canonicalFile.toLowerCase())
+      if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+        return { ok: false, error: `Artifact escapes model directory: ${spec.relativePath}` }
+      }
+
+      const fileStat = lstatSync(cur)
+      if (!fileStat.isFile() || fileStat.size !== spec.byteSize) {
+        return {
+          ok: false,
+          error: `Size mismatch on ${spec.relativePath}: expected ${spec.byteSize}, got ${fileStat.size}`
+        }
+      }
+
+      const handle = await open(cur, 'r')
+      try {
+        const hash = createHash('sha256')
+        const buf = Buffer.allocUnsafe(64 * 1024)
+        let totalRead = 0
+        while (true) {
+          const { bytesRead } = await handle.read(buf, 0, buf.length, totalRead)
+          if (bytesRead <= 0) break
+          hash.update(buf.subarray(0, bytesRead))
+          totalRead += bytesRead
+        }
+        if (totalRead !== spec.byteSize) {
+          return { ok: false, error: `Read size mismatch on ${spec.relativePath}` }
+        }
+        const digest = hash.digest('hex')
+        if (digest.toLowerCase() !== spec.sha256.toLowerCase()) {
+          return { ok: false, error: `SHA-256 digest mismatch on ${spec.relativePath}` }
+        }
+      } finally {
+        await handle.close()
+      }
+    }
+
+    return { ok: true }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err)
+    }
+  }
+}
+
+export async function decodeSemanticEmbedding(
+  params: SemanticDecodeInputParams
+): Promise<SemanticDecodeResult> {
+  const { maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS, modelInstallDir } = params
+
+  const verified = await readAndVerifySourceFile(params)
+  if (verified.status !== 'success') {
+    return verified
+  }
+
+  let rawPixels: Buffer
+  let origWidth: number
+  let origHeight: number
+
+  try {
+    // Single-pass decode: auto-orient -> sRGB -> removeAlpha -> 224x224 cover center bicubic raw RGB
+    const image = sharp(verified.fileBuffer, { limitInputPixels: maxInputPixels })
+    const meta = await image.metadata()
+    if (!meta.width || !meta.height) {
+      return {
+        status: 'error',
+        code: 'DECODE_FAILED',
+        message: 'Image metadata missing width or height'
+      }
+    }
+    if (meta.width * meta.height > maxInputPixels) {
+      return {
+        status: 'error',
+        code: 'OVERSIZED_DIMENSIONS',
+        message: `Image dimensions (${meta.width}x${meta.height}) exceed ${maxInputPixels} pixel limit`
+      }
+    }
+    origWidth = meta.width
+    origHeight = meta.height
+
+    const { data, info } = await image
+      .rotate()
+      .toColorspace('srgb')
+      .removeAlpha()
+      .resize(CLIP_IMAGE_SIZE, CLIP_IMAGE_SIZE, {
+        fit: 'cover',
+        position: 'centre',
+        kernel: sharp.kernel.cubic
+      })
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+
+    if (info.width !== CLIP_IMAGE_SIZE || info.height !== CLIP_IMAGE_SIZE || info.channels !== 3) {
+      return {
+        status: 'error',
+        code: 'PREPROCESS_FAILED',
+        message: `Unexpected preprocessed buffer shape: ${info.width}x${info.height}x${info.channels}`
+      }
+    }
+    rawPixels = data
+  } catch (err: unknown) {
+    return {
+      status: 'error',
+      code: 'DECODE_FAILED',
+      message: err instanceof Error ? err.message : 'Failed to decode image for semantic embedding'
+    }
+  }
+
+  try {
+    const numPixels = CLIP_IMAGE_SIZE * CLIP_IMAGE_SIZE
+    const tensorData = new Float32Array(3 * numPixels)
+    for (let i = 0; i < numPixels; i++) {
+      const r = (rawPixels[i * 3] ?? 0) / 255.0
+      const g = (rawPixels[i * 3 + 1] ?? 0) / 255.0
+      const b = (rawPixels[i * 3 + 2] ?? 0) / 255.0
+      tensorData[i] = (r - CLIP_MEAN[0]) / CLIP_STD[0]
+      tensorData[numPixels + i] = (g - CLIP_MEAN[1]) / CLIP_STD[1]
+      tensorData[2 * numPixels + i] = (b - CLIP_MEAN[2]) / CLIP_STD[2]
+    }
+
+    const session = await getOrLoadVisionSession(modelInstallDir)
+    const ort = cachedOrtModule!
+    const pixelValues = new ort.Tensor('float32', tensorData, [
+      1,
+      3,
+      CLIP_IMAGE_SIZE,
+      CLIP_IMAGE_SIZE
+    ])
+
+    const outputs = await session.run({ pixel_values: pixelValues })
+    const outputTensor = outputs.image_embeds ?? Object.values(outputs)[0]
+    if (!outputTensor || !(outputTensor.data instanceof Float32Array)) {
+      return {
+        status: 'error',
+        code: 'INFERENCE_FAILED',
+        message: 'ONNX vision session did not return Float32Array image_embeds'
+      }
+    }
+
+    const normalized = normalizeEmbeddingVector(outputTensor.data, SEMANTIC_EMBEDDING_DIMENSIONS)
+    return {
+      status: 'ready',
+      vector: normalized,
+      width: origWidth,
+      height: origHeight,
+      computedSha256: verified.computedSha256,
+      observedByteSize: verified.observedByteSize,
+      observedMtimeMs: verified.observedMtimeMs
+    }
+  } catch (err: unknown) {
+    return {
+      status: 'error',
+      code: 'INFERENCE_FAILED',
+      message: err instanceof Error ? err.message : 'ONNX vision inference failed'
     }
   }
 }

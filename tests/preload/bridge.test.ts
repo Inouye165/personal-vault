@@ -86,7 +86,19 @@ describe('preload bridge', () => {
         'getSimilarityProgress',
         'getSimilarityPairs',
         'setSimilarityDecision',
-        'reconcileSimilarity'
+        'reconcileSimilarity',
+        'getSemanticModelStatus',
+        'downloadSemanticModel',
+        'importSemanticModelFromFolder',
+        'cancelSemanticModelProvisioning',
+        'onSemanticModelStatus',
+        'startSemanticIndexing',
+        'pauseSemanticIndexing',
+        'resumeSemanticIndexing',
+        'cancelSemanticIndexing',
+        'getSemanticIndexProgress',
+        'getSemanticIndexJobItems',
+        'onSemanticIndexProgress'
       ].sort()
     )
   })

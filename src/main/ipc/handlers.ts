@@ -100,7 +100,14 @@ import {
   type SimilarityAnalysisProgress,
   type SimilarityGetPairsResponse,
   type SimilaritySetDecisionResponse,
-  type SimilarityReconcileResponse
+  type SimilarityReconcileResponse,
+  SemanticModelStatusResponseSchema,
+  SemanticIndexProgressResponseSchema,
+  SemanticIndexJobItemsRequestSchema,
+  SemanticIndexJobItemsResponseSchema,
+  type SemanticModelStatusResponse,
+  type SemanticIndexProgressResponse,
+  type SemanticIndexJobItemsResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -111,6 +118,7 @@ import {
 } from '../services/vault'
 import type { ThumbnailCoordinator } from '../services/thumbnails'
 import type { SimilarityCoordinator } from '../services/similarity'
+import type { SemanticModelManager, SemanticIndexCoordinator } from '../services/semantic'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 
 export interface IpcHandlerOptions {
@@ -120,9 +128,12 @@ export interface IpcHandlerOptions {
   readonly vaultCoordinator?: VaultImportCoordinator
   readonly thumbnailCoordinator?: ThumbnailCoordinator
   readonly similarityCoordinator?: SimilarityCoordinator
+  readonly semanticModelManager?: SemanticModelManager
+  readonly semanticIndexCoordinator?: SemanticIndexCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
+  readonly selectDirectory?: () => Promise<string | null>
 }
 
 export function registerIpcHandlers({
@@ -132,9 +143,12 @@ export function registerIpcHandlers({
   vaultCoordinator,
   thumbnailCoordinator,
   similarityCoordinator,
+  semanticModelManager,
+  semanticIndexCoordinator,
   getMainWindow,
   selectDirectories,
-  selectVaultDirectory
+  selectVaultDirectory,
+  selectDirectory
 }: IpcHandlerOptions): void {
   const handle = <Args extends unknown[], Result>(
     channel: string,
@@ -1065,6 +1079,175 @@ export function registerIpcHandlers({
       unresolvedCount: 0
     }
   })
+
+  // --- Stage 6B: Semantic Model Provisioning & Resumable Semantic Index ---
+
+  const validateModelStatusOut = (status: unknown): SemanticModelStatusResponse => {
+    const validated = validatePayload(SemanticModelStatusResponseSchema, status)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SemanticModelStatusResponse: ${validated.error}`)
+    }
+    return validated.data
+  }
+
+  const validateIndexProgressOut = (progress: unknown): SemanticIndexProgressResponse => {
+    const validated = validatePayload(SemanticIndexProgressResponseSchema, progress)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SemanticIndexProgressResponse: ${validated.error}`)
+    }
+    return validated.data
+  }
+
+  handle(IPC_CHANNELS.SEMANTIC_MODEL_GET_STATUS, (): SemanticModelStatusResponse => {
+    if (!semanticModelManager) {
+      throw new Error('Semantic model manager unavailable')
+    }
+    return validateModelStatusOut(semanticModelManager.getStatus())
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_MODEL_DOWNLOAD, async (): Promise<SemanticModelStatusResponse> => {
+    if (!semanticModelManager) {
+      throw new Error('Semantic model manager unavailable')
+    }
+    const res = await semanticModelManager.downloadModel()
+    return validateModelStatusOut(res)
+  })
+
+  handle(
+    IPC_CHANNELS.SEMANTIC_MODEL_IMPORT,
+    async (raw?: unknown): Promise<SemanticModelStatusResponse> => {
+      if (raw !== undefined) {
+        throw new Error('Renderer cannot supply filesystem paths to semantic:model-import')
+      }
+      if (!semanticModelManager) {
+        throw new Error('Semantic model manager unavailable')
+      }
+
+      let chosenDir: string | null = null
+      if (selectDirectory) {
+        chosenDir = await selectDirectory()
+      } else if (process.env.PV_TEST_MODEL_IMPORT_DIR) {
+        chosenDir = process.env.PV_TEST_MODEL_IMPORT_DIR
+      } else {
+        const win = getMainWindow ? getMainWindow() : null
+        const dialogOpts: Electron.OpenDialogOptions = {
+          title: 'Select Verified CLIP Model Folder',
+          properties: ['openDirectory', 'dontAddToRecent']
+        }
+        const dialogRes = win
+          ? await dialog.showOpenDialog(win, dialogOpts)
+          : await dialog.showOpenDialog(dialogOpts)
+        if (!dialogRes.canceled && dialogRes.filePaths.length > 0) {
+          chosenDir = dialogRes.filePaths[0] ?? null
+        }
+      }
+
+      if (!chosenDir) {
+        return validateModelStatusOut(semanticModelManager.getStatus())
+      }
+
+      const res = await semanticModelManager.importFromDirectory(chosenDir)
+      return validateModelStatusOut(res)
+    }
+  )
+
+  handle(IPC_CHANNELS.SEMANTIC_MODEL_CANCEL, async (): Promise<SemanticModelStatusResponse> => {
+    if (!semanticModelManager) {
+      throw new Error('Semantic model manager unavailable')
+    }
+    const res = await semanticModelManager.cancelProvisioning()
+    return validateModelStatusOut(res)
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_INDEX_GET_PROGRESS, (): SemanticIndexProgressResponse => {
+    if (!semanticIndexCoordinator) {
+      throw new Error('Semantic index coordinator unavailable')
+    }
+    return validateIndexProgressOut(semanticIndexCoordinator.getStatus())
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_INDEX_START, async (): Promise<SemanticIndexProgressResponse> => {
+    if (!semanticIndexCoordinator) {
+      throw new Error('Semantic index coordinator unavailable')
+    }
+    const res = await semanticIndexCoordinator.startIndexing()
+    return validateIndexProgressOut(res)
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_INDEX_PAUSE, async (): Promise<SemanticIndexProgressResponse> => {
+    if (!semanticIndexCoordinator) {
+      throw new Error('Semantic index coordinator unavailable')
+    }
+    const res = await semanticIndexCoordinator.pauseIndexing()
+    return validateIndexProgressOut(res)
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_INDEX_RESUME, async (): Promise<SemanticIndexProgressResponse> => {
+    if (!semanticIndexCoordinator) {
+      throw new Error('Semantic index coordinator unavailable')
+    }
+    const res = await semanticIndexCoordinator.resumeIndexing()
+    return validateIndexProgressOut(res)
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_INDEX_CANCEL, async (): Promise<SemanticIndexProgressResponse> => {
+    if (!semanticIndexCoordinator) {
+      throw new Error('Semantic index coordinator unavailable')
+    }
+    const res = await semanticIndexCoordinator.cancelIndexing()
+    return validateIndexProgressOut(res)
+  })
+
+  handle(
+    IPC_CHANNELS.SEMANTIC_INDEX_GET_ITEMS,
+    (raw: unknown = {}): SemanticIndexJobItemsResponse => {
+      const parsed = validatePayload(SemanticIndexJobItemsRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming SemanticIndexJobItemsRequest: ${parsed.error}`)
+      }
+      if (!semanticIndexCoordinator) {
+        throw new Error('Semantic index coordinator unavailable')
+      }
+      const res = semanticIndexCoordinator.listJobItems(parsed.data)
+      const validated = validatePayload(SemanticIndexJobItemsResponseSchema, res)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing SemanticIndexJobItemsResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(IPC_CHANNELS.SEMANTIC_MODEL_STATUS_EVENT, (): never => {
+    throw new Error('Event-only channel cannot be invoked')
+  })
+
+  handle(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, (): never => {
+    throw new Error('Event-only channel cannot be invoked')
+  })
+
+  if (semanticModelManager && getMainWindow) {
+    semanticModelManager.onStatusChange((status) => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) {
+        const validated = validatePayload(SemanticModelStatusResponseSchema, status)
+        if (validated.success) {
+          win.webContents.send(IPC_CHANNELS.SEMANTIC_MODEL_STATUS_EVENT, validated.data)
+        }
+      }
+    })
+  }
+
+  if (semanticIndexCoordinator && getMainWindow) {
+    semanticIndexCoordinator.onProgress((progress) => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) {
+        const validated = validatePayload(SemanticIndexProgressResponseSchema, progress)
+        if (validated.success) {
+          win.webContents.send(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, validated.data)
+        }
+      }
+    })
+  }
 
   if (vaultCoordinator && getMainWindow) {
     vaultCoordinator.onProgress((progress) => {

@@ -11,6 +11,11 @@ import { VaultImportCoordinator } from './services/vault'
 import { ThumbnailCoordinator } from './services/thumbnails'
 import { SimilarityCoordinator } from './services/similarity'
 import { AnnotationJournal } from './services/annotations'
+import {
+  SemanticModelManager,
+  SemanticIndexCoordinator,
+  APPROVED_DOWNLOAD_HOSTS
+} from './services/semantic'
 
 function logStartup(message: string): void {
   try {
@@ -46,6 +51,8 @@ let coordinator: ScanJobCoordinator | null = null
 let vaultCoordinator: VaultImportCoordinator | null = null
 let thumbnailCoordinator: ThumbnailCoordinator | null = null
 let similarityCoordinator: SimilarityCoordinator | null = null
+let semanticModelManager: SemanticModelManager | null = null
+let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -181,6 +188,38 @@ if (!app.requestSingleInstanceLock()) {
       await similarityCoordinator.initialize()
       logStartup('similarityCoordinator initialized')
 
+      const modelsRootDir = join(app.getPath('userData'), 'semantic-models')
+      const allowLoopbackForTests = process.env.PV_ALLOW_LOOPBACK_MODEL_URL === '1'
+      const customDownloadBaseUrl =
+        allowLoopbackForTests && process.env.PV_SEMANTIC_DOWNLOAD_BASE_URL
+          ? process.env.PV_SEMANTIC_DOWNLOAD_BASE_URL
+          : undefined
+      const allowedHosts = allowLoopbackForTests
+        ? [...APPROVED_DOWNLOAD_HOSTS, '127.0.0.1', 'localhost']
+        : APPROVED_DOWNLOAD_HOSTS
+
+      semanticModelManager = new SemanticModelManager({
+        modelsRootDir,
+        getApprovedRoots: () =>
+          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : [],
+        getVaultRoot: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null),
+        baseDownloadUrl: customDownloadBaseUrl,
+        allowedHosts,
+        allowLoopbackHttpForTests: allowLoopbackForTests,
+        verifyDirectoryOffMain: (dirPath, specs) =>
+          thumbnailCoordinator!.verifyModelDirectory(dirPath, specs)
+      })
+      await semanticModelManager.initialize()
+      logStartup('semanticModelManager initialized')
+
+      semanticIndexCoordinator = new SemanticIndexCoordinator({
+        catalog,
+        modelManager: semanticModelManager,
+        thumbnailCoordinator
+      })
+      semanticIndexCoordinator.initialize()
+      logStartup('semanticIndexCoordinator initialized')
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -191,6 +230,8 @@ if (!app.requestSingleInstanceLock()) {
         vaultCoordinator,
         thumbnailCoordinator,
         similarityCoordinator,
+        semanticModelManager,
+        semanticIndexCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -236,6 +277,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down similarity coordinator')
             await similarityCoordinator.shutdown()
             logStartup('similarity coordinator shutdown done')
+          }
+          if (semanticIndexCoordinator) {
+            logStartup('shutting down semantic index coordinator')
+            await semanticIndexCoordinator.shutdown()
+            logStartup('semantic index coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

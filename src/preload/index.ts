@@ -67,6 +67,10 @@ import {
   SimilaritySetDecisionRequestSchema,
   SimilaritySetDecisionResponseSchema,
   SimilarityReconcileResponseSchema,
+  SemanticModelStatusResponseSchema,
+  SemanticIndexProgressResponseSchema,
+  SemanticIndexJobItemsRequestSchema,
+  SemanticIndexJobItemsResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -130,7 +134,11 @@ import {
   type SimilarityGetPairsResponse,
   type SimilaritySetDecisionRequest,
   type SimilaritySetDecisionResponse,
-  type SimilarityReconcileResponse
+  type SimilarityReconcileResponse,
+  type SemanticModelStatusResponse,
+  type SemanticIndexProgressResponse,
+  type SemanticIndexJobItemsRequest,
+  type SemanticIndexJobItemsResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -710,6 +718,132 @@ const api: VaultApi = {
       throw new Error(`Invalid reconcileSimilarity response from main: ${result.error}`)
     }
     return result.data
+  },
+
+  async getSemanticModelStatus(): Promise<SemanticModelStatusResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_MODEL_GET_STATUS)
+    const result = validatePayload(SemanticModelStatusResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getSemanticModelStatus response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async downloadSemanticModel(): Promise<SemanticModelStatusResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_MODEL_DOWNLOAD)
+    const result = validatePayload(SemanticModelStatusResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid downloadSemanticModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async importSemanticModelFromFolder(): Promise<SemanticModelStatusResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_MODEL_IMPORT)
+    const result = validatePayload(SemanticModelStatusResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid importSemanticModelFromFolder response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelSemanticModelProvisioning(): Promise<SemanticModelStatusResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_MODEL_CANCEL)
+    const result = validatePayload(SemanticModelStatusResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelSemanticModelProvisioning response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onSemanticModelStatus(callback: (status: SemanticModelStatusResponse) => void): () => void {
+    const listener = (_event: unknown, raw: unknown): void => {
+      const result = validatePayload(SemanticModelStatusResponseSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      } else {
+        console.error(`Invalid SemanticModelStatus event payload from main: ${result.error}`)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.SEMANTIC_MODEL_STATUS_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.SEMANTIC_MODEL_STATUS_EVENT, listener)
+    }
+  },
+
+  async getSemanticIndexProgress(): Promise<SemanticIndexProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_INDEX_GET_PROGRESS)
+    const result = validatePayload(SemanticIndexProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getSemanticIndexProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startSemanticIndexing(): Promise<SemanticIndexProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_INDEX_START)
+    const result = validatePayload(SemanticIndexProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseSemanticIndexing(): Promise<SemanticIndexProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_INDEX_PAUSE)
+    const result = validatePayload(SemanticIndexProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeSemanticIndexing(): Promise<SemanticIndexProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_INDEX_RESUME)
+    const result = validatePayload(SemanticIndexProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelSemanticIndexing(): Promise<SemanticIndexProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_INDEX_CANCEL)
+    const result = validatePayload(SemanticIndexProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getSemanticIndexJobItems(
+    request: SemanticIndexJobItemsRequest = { page: 1, pageSize: 25 }
+  ): Promise<SemanticIndexJobItemsResponse> {
+    const parsed = validatePayload(SemanticIndexJobItemsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getSemanticIndexJobItems request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_INDEX_GET_ITEMS, parsed.data)
+    const result = validatePayload(SemanticIndexJobItemsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getSemanticIndexJobItems response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onSemanticIndexProgress(callback: (progress: SemanticIndexProgressResponse) => void): () => void {
+    const listener = (_event: unknown, raw: unknown): void => {
+      const result = validatePayload(SemanticIndexProgressResponseSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      } else {
+        console.error(`Invalid SemanticIndexProgress event payload from main: ${result.error}`)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, listener)
+    }
   }
 }
 

@@ -45,7 +45,19 @@ export const IPC_CHANNELS = {
   SIMILARITY_GET_PROGRESS: 'similarity:get-progress',
   SIMILARITY_GET_PAIRS: 'similarity:get-pairs',
   SIMILARITY_SET_DECISION: 'similarity:set-decision',
-  SIMILARITY_RECONCILE: 'similarity:reconcile'
+  SIMILARITY_RECONCILE: 'similarity:reconcile',
+  SEMANTIC_MODEL_GET_STATUS: 'semantic:model-get-status',
+  SEMANTIC_MODEL_DOWNLOAD: 'semantic:model-download',
+  SEMANTIC_MODEL_IMPORT: 'semantic:model-import',
+  SEMANTIC_MODEL_CANCEL: 'semantic:model-cancel',
+  SEMANTIC_MODEL_STATUS_EVENT: 'semantic:model-status-event',
+  SEMANTIC_INDEX_GET_PROGRESS: 'semantic:index-get-progress',
+  SEMANTIC_INDEX_START: 'semantic:index-start',
+  SEMANTIC_INDEX_PAUSE: 'semantic:index-pause',
+  SEMANTIC_INDEX_RESUME: 'semantic:index-resume',
+  SEMANTIC_INDEX_CANCEL: 'semantic:index-cancel',
+  SEMANTIC_INDEX_GET_ITEMS: 'semantic:index-get-items',
+  SEMANTIC_INDEX_PROGRESS_EVENT: 'semantic:index-progress-event'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

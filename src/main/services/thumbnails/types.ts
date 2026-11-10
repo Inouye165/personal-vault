@@ -45,6 +45,8 @@ export interface ThumbnailDiagnostics {
   readonly activeWorkers: number
   readonly terminatingWorkers?: number
   readonly liveWorkers?: number
+  readonly activeSemanticTasks?: number
+  readonly semanticModelLoadedWorkers?: number
   readonly queuedJobs: number
   readonly totalDecodes: number
   readonly cacheHits: number
@@ -52,6 +54,11 @@ export interface ThumbnailDiagnostics {
   readonly mainEventLoopDelayP95Ms?: number
   readonly mainEventLoopDelayMaxMs?: number
   readonly mainEventLoopDelayMeanMs?: number
+  readonly mainProcessRssBytes?: number
+  readonly mainProcessHeapUsedBytes?: number
+  readonly workerIsolatePeakHeapUsedBytes?: number
+  readonly workerIsolateLastHeapUsedBytes?: number
+  readonly workerIsolatePeakExternalBytes?: number
 }
 
 export interface ThumbnailCoordinatorOptions {
@@ -68,13 +75,63 @@ export interface ThumbnailCoordinatorOptions {
 }
 
 export interface ThumbnailRequestParams {
+  readonly locationId?: number
+  readonly fileLocationId?: number
+  readonly photoId?: number
+  readonly discoveryObservationId?: number
+  readonly sourcePath: string
+  readonly expectedByteSize: number
+  readonly expectedMtimeMs?: number | null
+  readonly expectedSha256?: string | null
+  readonly priority?: 'high' | 'normal' | 'low'
+}
+
+export interface SemanticEmbedRequestParams {
   readonly locationId: number
   readonly sourcePath: string
   readonly expectedByteSize: number
   readonly expectedMtimeMs: number | null
-  readonly expectedSha256: string | null
-  readonly priority?: 'high' | 'normal' | 'low'
+  readonly expectedSha256?: string | null
+  readonly modelInstallDir: string
+  readonly priority?: 'low' | 'normal'
 }
+
+export type SemanticEmbedJobResult =
+  | {
+      readonly status: 'ready'
+      readonly locationId: number
+      readonly vector: Float32Array
+      readonly width: number
+      readonly height: number
+      readonly computedSha256: string
+      readonly observedByteSize: number
+      readonly observedMtimeMs: number
+    }
+  | {
+      readonly status: 'unsupported'
+      readonly locationId: number
+      readonly reason: string
+    }
+  | {
+      readonly status: 'error'
+      readonly locationId: number
+      readonly code: string
+      readonly message: string
+    }
+
+export type SourceVerificationJobResult =
+  | {
+      readonly ok: true
+      readonly sha256: string
+      readonly observedByteSize: number
+      readonly observedMtimeMs: number
+    }
+  | {
+      readonly ok: false
+      readonly category: 'unsupported' | 'error'
+      readonly errorCode: string
+      readonly errorMessage: string
+    }
 
 export type FingerprintJobResult =
   | {

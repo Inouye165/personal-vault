@@ -28,8 +28,8 @@ describe('Stage 5C — Catalog Schema Migration 8 and Similarity Operations', ()
     rmSync(tempDir, { recursive: true, force: true })
   })
 
-  it('sets CURRENT_SCHEMA_VERSION to 8 and creates similarity tables', () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(8)
+  it('sets CURRENT_SCHEMA_VERSION to at least 8 and creates similarity tables', () => {
+    expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(8)
     const tables = catalog
       .getRawDb()
       .prepare("SELECT name FROM sqlite_master WHERE type='table';")

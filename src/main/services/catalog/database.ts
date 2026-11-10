@@ -79,8 +79,15 @@ import type {
   SetSimilarityDecisionInput,
   SimilarityJobRecord,
   CreateSimilarityJobInput,
-  SimilarityJobItemRecord
+  SimilarityJobItemRecord,
+  PhotoSemanticEmbeddingRecord,
+  SavePhotoSemanticEmbeddingInput,
+  SemanticIndexJobRecord,
+  CreateSemanticIndexJobInput,
+  SemanticIndexJobItem,
+  SemanticIndexCoverageResult
 } from './types'
+import { validateAndSerializeEmbeddingVector, deserializeEmbeddingVector } from '../semantic/vector'
 import type { AnnotationJournal } from '../annotations/journal'
 import type {
   AnnotationJournalEntry,
@@ -732,6 +739,11 @@ export class CatalogDatabase {
               candidate.discoveredAtMs
             )
             updateFileLocationStmt.run(now, existingFile.id)
+            this.db
+              .prepare(
+                'UPDATE photo_semantic_embeddings SET is_current = 0 WHERE file_location_id = ? AND is_current = 1;'
+              )
+              .run(existingFile.id)
             this.reconcilePhotoAnnotations(existingFile.id)
             updatedCount++
           } else {
@@ -887,6 +899,11 @@ export class CatalogDatabase {
         ) as unknown as RawHashRow
 
         results.push(this.mapHashRow(row))
+        this.db
+          .prepare(
+            'UPDATE photo_semantic_embeddings SET is_current = 0 WHERE file_location_id = ? AND is_current = 1 AND content_sha256 != ?;'
+          )
+          .run(fileAndObs.file_id, normalizedSha256)
         this.reconcilePhotoAnnotations(fileAndObs.file_id)
       }
 
@@ -4853,6 +4870,709 @@ export class CatalogDatabase {
       page,
       pageSize,
       totalPages
+    }
+  }
+
+  // ==========================================================================
+  // Stage 6B: Semantic Embeddings & Resumable Semantic Index Operations
+  // ==========================================================================
+
+  public savePhotoSemanticEmbedding(
+    input: SavePhotoSemanticEmbeddingInput
+  ): PhotoSemanticEmbeddingRecord {
+    this.assertOpen()
+    const blob = validateAndSerializeEmbeddingVector(input.vector, input.embeddingDimensions)
+    const now = Date.now()
+    const normalizedSha = input.contentSha256.toLowerCase()
+    const normalizedManifestSha = input.modelManifestSha256.toLowerCase()
+
+    this.db.exec('BEGIN TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          UPDATE photo_semantic_embeddings
+          SET is_current = 0
+          WHERE file_location_id = ? AND model_id = ? AND preprocessing_version = ? AND is_current = 1;
+        `
+        )
+        .run(input.fileLocationId, input.modelId, input.preprocessingVersion)
+
+      const stmt = this.db.prepare(`
+        INSERT INTO photo_semantic_embeddings (
+          file_id, file_location_id, discovery_observation_id,
+          content_sha256, content_revision, source_path,
+          observed_byte_size, observed_mtime_ms,
+          model_id, model_commit, model_manifest_sha256, preprocessing_version,
+          embedding_dimensions, embedding_blob, width, height, created_at_ms, is_current
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        RETURNING id, file_id, file_location_id, discovery_observation_id,
+                  content_sha256, content_revision, source_path,
+                  observed_byte_size, observed_mtime_ms,
+                  model_id, model_commit, model_manifest_sha256, preprocessing_version,
+                  embedding_dimensions, embedding_blob, width, height, created_at_ms, is_current;
+      `)
+
+      const row = stmt.get(
+        input.fileId ?? input.fileLocationId,
+        input.fileLocationId,
+        input.discoveryObservationId,
+        normalizedSha,
+        input.contentRevision,
+        input.sourcePath,
+        input.observedByteSize,
+        input.observedMtimeMs,
+        input.modelId,
+        input.modelCommit,
+        normalizedManifestSha,
+        input.preprocessingVersion,
+        input.embeddingDimensions,
+        blob,
+        input.width ?? null,
+        input.height ?? null,
+        now
+      ) as Record<string, unknown>
+
+      this.db.exec('COMMIT;')
+      return this.mapSemanticEmbeddingRow(row)
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getPhotoSemanticEmbedding(
+    fileLocationId: number,
+    modelId: string,
+    preprocessingVersion: string
+  ): PhotoSemanticEmbeddingRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, file_id, file_location_id, discovery_observation_id,
+               content_sha256, content_revision, source_path,
+               observed_byte_size, observed_mtime_ms,
+               model_id, model_commit, model_manifest_sha256, preprocessing_version,
+               embedding_dimensions, embedding_blob, width, height, created_at_ms, is_current
+        FROM photo_semantic_embeddings
+        WHERE file_location_id = ? AND model_id = ? AND preprocessing_version = ?
+        ORDER BY is_current DESC, id DESC
+        LIMIT 1;
+      `
+      )
+      .get(fileLocationId, modelId, preprocessingVersion) as Record<string, unknown> | undefined
+
+    if (!row) return null
+    return this.mapSemanticEmbeddingRow(row)
+  }
+
+  public findReusableSemanticEmbedding(params: {
+    contentSha256: string
+    observedByteSize: number
+    modelId: string
+    modelCommit: string
+    modelManifestSha256: string
+    preprocessingVersion: string
+  }): PhotoSemanticEmbeddingRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, file_id, file_location_id, discovery_observation_id,
+               content_sha256, content_revision, source_path,
+               observed_byte_size, observed_mtime_ms,
+               model_id, model_commit, model_manifest_sha256, preprocessing_version,
+               embedding_dimensions, embedding_blob, width, height, created_at_ms, is_current
+        FROM photo_semantic_embeddings
+        WHERE content_sha256 = ?
+          AND observed_byte_size = ?
+          AND model_id = ?
+          AND model_commit = ?
+          AND model_manifest_sha256 = ?
+          AND preprocessing_version = ?
+          AND is_current = 1
+        ORDER BY id DESC
+        LIMIT 1;
+      `
+      )
+      .get(
+        params.contentSha256.toLowerCase(),
+        params.observedByteSize,
+        params.modelId,
+        params.modelCommit,
+        params.modelManifestSha256.toLowerCase(),
+        params.preprocessingVersion
+      ) as Record<string, unknown> | undefined
+
+    if (!row) return null
+    return this.mapSemanticEmbeddingRow(row)
+  }
+
+  private mapSemanticEmbeddingRow(row: Record<string, unknown>): PhotoSemanticEmbeddingRecord {
+    const dims = Number(row.embedding_dimensions)
+    const rawBlob = row.embedding_blob as Uint8Array
+    const vector = deserializeEmbeddingVector(rawBlob, dims)
+    return {
+      id: Number(row.id),
+      fileId: row.file_id !== null && row.file_id !== undefined ? Number(row.file_id) : null,
+      fileLocationId: Number(row.file_location_id),
+      discoveryObservationId: Number(row.discovery_observation_id),
+      contentSha256: String(row.content_sha256),
+      contentRevision: String(row.content_revision),
+      sourcePath: String(row.source_path),
+      observedByteSize: Number(row.observed_byte_size),
+      observedMtimeMs: Number(row.observed_mtime_ms),
+      modelId: String(row.model_id),
+      modelCommit: String(row.model_commit),
+      modelManifestSha256: String(row.model_manifest_sha256),
+      preprocessingVersion: String(row.preprocessing_version),
+      embeddingDimensions: dims,
+      vector,
+      width: row.width !== null && row.width !== undefined ? Number(row.width) : null,
+      height: row.height !== null && row.height !== undefined ? Number(row.height) : null,
+      createdAtMs: Number(row.created_at_ms),
+      isCurrent: Number(row.is_current) === 1
+    }
+  }
+
+  public getSemanticIndexCoverage(params: {
+    modelId: string
+    modelCommit: string
+    modelManifestSha256: string
+    preprocessingVersion: string
+  }): SemanticIndexCoverageResult {
+    this.assertOpen()
+    const totalRow = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS total
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        WHERE f.category = 'photo';
+      `
+      )
+      .get() as { total: number } | undefined
+
+    const indexedRow = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS indexed
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        JOIN photo_semantic_embeddings e ON e.file_location_id = f.id AND e.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        WHERE f.category = 'photo'
+          AND e.model_id = ?
+          AND e.model_commit = ?
+          AND e.model_manifest_sha256 = ?
+          AND e.preprocessing_version = ?
+          AND e.observed_byte_size = d.byte_size
+          AND (d.filesystem_mtime_ms IS NULL OR ABS(e.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)
+          AND (h.sha256 IS NULL OR h.sha256 = e.content_sha256);
+      `
+      )
+      .get(
+        params.modelId,
+        params.modelCommit,
+        params.modelManifestSha256.toLowerCase(),
+        params.preprocessingVersion
+      ) as { indexed: number } | undefined
+
+    return {
+      totalCatalogPhotos: Number(totalRow?.total ?? 0),
+      currentIndexedPhotos: Number(indexedRow?.indexed ?? 0)
+    }
+  }
+
+  public createSemanticIndexJob(input: CreateSemanticIndexJobInput): SemanticIndexJobRecord {
+    this.assertOpen()
+    const jobId = input.jobId ?? randomUUID()
+    const now = Date.now()
+    const manifestSha = input.modelManifestSha256.toLowerCase()
+
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          INSERT INTO semantic_index_jobs (
+            id, status, model_id, model_commit, model_manifest_sha256, preprocessing_version,
+            total_photos, processed_photos, reused_photos, unsupported_photos, failed_photos, pending_photos,
+            started_at_ms, updated_at_ms, completed_at_ms, last_error
+          ) VALUES (?, 'running', ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, NULL, NULL);
+        `
+        )
+        .run(
+          jobId,
+          input.modelId,
+          input.modelCommit,
+          manifestSha,
+          input.preprocessingVersion,
+          now,
+          now
+        )
+
+      // Snapshot authorized unindexed photo scope inside SQLite without loading rows into JS memory
+      const insertItemsRes = this.db
+        .prepare(
+          `
+          INSERT INTO semantic_index_job_items (
+            job_id, file_location_id, original_path, discovery_observation_id,
+            expected_byte_size, expected_mtime_ms, status, updated_at_ms
+          )
+          SELECT
+            ?,
+            f.id,
+            f.original_path,
+            d.id,
+            d.byte_size,
+            COALESCE(d.filesystem_mtime_ms, 0),
+            'pending',
+            ?
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          WHERE f.category = 'photo'
+            AND NOT EXISTS (
+              SELECT 1 FROM photo_semantic_embeddings e
+              WHERE e.file_location_id = f.id
+                AND e.discovery_observation_id = d.id
+                AND e.is_current = 1
+                AND e.model_id = ?
+                AND e.model_commit = ?
+                AND LOWER(e.model_manifest_sha256) = LOWER(?)
+                AND e.preprocessing_version = ?
+            )
+          ORDER BY f.id ASC;
+        `
+        )
+        .run(jobId, now, input.modelId, input.modelCommit, manifestSha, input.preprocessingVersion)
+
+      const totalPhotos = Number(insertItemsRes.changes)
+      const initialStatus = totalPhotos === 0 ? 'completed' : 'running'
+      const completedAt = totalPhotos === 0 ? now : null
+
+      this.db
+        .prepare(
+          `
+          UPDATE semantic_index_jobs
+          SET total_photos = ?, pending_photos = ?, status = ?, completed_at_ms = ?, updated_at_ms = ?
+          WHERE id = ?;
+        `
+        )
+        .run(totalPhotos, totalPhotos, initialStatus, completedAt, now, jobId)
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+
+    const created = this.getSemanticIndexJob(jobId)
+    if (!created) {
+      throw new Error('Failed to create semantic index job')
+    }
+    return created
+  }
+
+  public getSemanticIndexJob(jobId: string): SemanticIndexJobRecord | null {
+    this.assertOpen()
+    const row = this.db.prepare('SELECT * FROM semantic_index_jobs WHERE id = ?;').get(jobId) as
+      Record<string, unknown> | undefined
+    if (!row) return null
+    return this.mapSemanticIndexJobRow(row)
+  }
+
+  public getLatestSemanticIndexJob(): SemanticIndexJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare('SELECT * FROM semantic_index_jobs ORDER BY started_at_ms DESC, rowid DESC LIMIT 1;')
+      .get() as Record<string, unknown> | undefined
+    if (!row) return null
+    return this.mapSemanticIndexJobRow(row)
+  }
+
+  public markRunningSemanticIndexJobsAsInterrupted(): number {
+    this.assertOpen()
+    const now = Date.now()
+    const res = this.db
+      .prepare(
+        "UPDATE semantic_index_jobs SET status = 'interrupted', updated_at_ms = ? WHERE status = 'running';"
+      )
+      .run(now)
+    return Number(res.changes)
+  }
+
+  public updateSemanticIndexJobStatus(
+    jobId: string,
+    status: SemanticIndexJobRecord['status'],
+    lastError?: string | null
+  ): SemanticIndexJobRecord | null {
+    this.assertOpen()
+    const now = Date.now()
+    const completedAt =
+      status === 'completed' || status === 'cancelled' || status === 'failed' ? now : null
+
+    this.db
+      .prepare(
+        `
+        UPDATE semantic_index_jobs
+        SET status = ?,
+            updated_at_ms = ?,
+            completed_at_ms = COALESCE(?, completed_at_ms),
+            last_error = CASE WHEN ? IS NOT NULL THEN ? ELSE last_error END
+        WHERE id = ?;
+      `
+      )
+      .run(status, now, completedAt, lastError ?? null, lastError ?? null, jobId)
+
+    return this.getSemanticIndexJob(jobId)
+  }
+
+  public getNextPendingSemanticIndexJobItems(jobId: string, limit = 16): SemanticIndexJobItem[] {
+    this.assertOpen()
+    const safeLimit = Math.max(1, Math.min(64, Math.floor(limit)))
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, job_id, file_location_id, original_path, discovery_observation_id,
+               expected_byte_size, expected_mtime_ms, status, error_code, error_message, updated_at_ms
+        FROM semantic_index_job_items
+        WHERE job_id = ? AND status = 'pending'
+        ORDER BY id ASC
+        LIMIT ?;
+      `
+      )
+      .all(jobId, safeLimit) as Array<Record<string, unknown>>
+
+    return rows.map((r) => this.mapSemanticIndexJobItemRow(r))
+  }
+
+  public completeSemanticIndexJobItemWithEmbedding(params: {
+    jobId: string
+    itemId: number
+    reused: boolean
+    embedding: SavePhotoSemanticEmbeddingInput
+  }): void {
+    this.assertOpen()
+    // Validate vector before opening transaction or inside transaction so any invalid vector throws & rolls back
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
+    try {
+      const blob = validateAndSerializeEmbeddingVector(
+        params.embedding.vector,
+        params.embedding.embeddingDimensions
+      )
+      const now = Date.now()
+
+      const itemRow = this.db
+        .prepare(
+          'SELECT status, file_location_id FROM semantic_index_job_items WHERE id = ? AND job_id = ?;'
+        )
+        .get(params.itemId, params.jobId) as
+        { status: string; file_location_id: number } | undefined
+
+      if (!itemRow || itemRow.status !== 'pending') {
+        throw new Error(`Semantic index job item ${params.itemId} is no longer pending`)
+      }
+
+      // Revalidate current catalog observation revision before committing
+      const currentCatalogObs = this.db
+        .prepare(
+          `
+          SELECT d.id AS discovery_id, d.byte_size, d.filesystem_mtime_ms, h.sha256 AS active_hash
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+          WHERE f.id = ?;
+        `
+        )
+        .get(params.embedding.fileLocationId) as
+        | {
+            discovery_id: number
+            byte_size: number
+            filesystem_mtime_ms: number | null
+            active_hash: string | null
+          }
+        | undefined
+
+      if (!currentCatalogObs) {
+        throw new Error('SOURCE_REVISION_CHANGED: File location no longer present in catalog')
+      }
+
+      if (
+        currentCatalogObs.discovery_id !== params.embedding.discoveryObservationId ||
+        currentCatalogObs.byte_size !== params.embedding.observedByteSize ||
+        (currentCatalogObs.filesystem_mtime_ms !== null &&
+          Math.abs(currentCatalogObs.filesystem_mtime_ms - params.embedding.observedMtimeMs) > 1) ||
+        (currentCatalogObs.active_hash !== null &&
+          currentCatalogObs.active_hash.toLowerCase() !==
+            params.embedding.contentSha256.toLowerCase())
+      ) {
+        throw new Error(
+          'SOURCE_REVISION_CHANGED: Catalog observation changed before embedding commit'
+        )
+      }
+
+      const normalizedSha = params.embedding.contentSha256.toLowerCase()
+      const normalizedManifestSha = params.embedding.modelManifestSha256.toLowerCase()
+
+      this.db
+        .prepare(
+          `
+          UPDATE photo_semantic_embeddings
+          SET is_current = 0
+          WHERE file_location_id = ? AND model_id = ? AND preprocessing_version = ? AND is_current = 1;
+        `
+        )
+        .run(
+          params.embedding.fileLocationId,
+          params.embedding.modelId,
+          params.embedding.preprocessingVersion
+        )
+
+      this.db
+        .prepare(
+          `
+          INSERT INTO photo_semantic_embeddings (
+            file_id, file_location_id, discovery_observation_id,
+            content_sha256, content_revision, source_path,
+            observed_byte_size, observed_mtime_ms,
+            model_id, model_commit, model_manifest_sha256, preprocessing_version,
+            embedding_dimensions, embedding_blob, width, height, created_at_ms, is_current
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1);
+        `
+        )
+        .run(
+          params.embedding.fileId ?? params.embedding.fileLocationId,
+          params.embedding.fileLocationId,
+          params.embedding.discoveryObservationId,
+          normalizedSha,
+          params.embedding.contentRevision,
+          params.embedding.sourcePath,
+          params.embedding.observedByteSize,
+          params.embedding.observedMtimeMs,
+          params.embedding.modelId,
+          params.embedding.modelCommit,
+          normalizedManifestSha,
+          params.embedding.preprocessingVersion,
+          params.embedding.embeddingDimensions,
+          blob,
+          params.embedding.width ?? null,
+          params.embedding.height ?? null,
+          now
+        )
+
+      const itemStatus = params.reused ? 'reused' : 'completed'
+      this.db
+        .prepare(
+          `
+          UPDATE semantic_index_job_items
+          SET status = ?, error_code = NULL, error_message = NULL, updated_at_ms = ?
+          WHERE id = ? AND job_id = ?;
+        `
+        )
+        .run(itemStatus, now, params.itemId, params.jobId)
+
+      this.db
+        .prepare(
+          `
+          UPDATE semantic_index_jobs
+          SET processed_photos = processed_photos + 1,
+              reused_photos = reused_photos + ?,
+              pending_photos = CASE WHEN pending_photos > 0 THEN pending_photos - 1 ELSE 0 END,
+              updated_at_ms = ?
+          WHERE id = ?;
+        `
+        )
+        .run(params.reused ? 1 : 0, now, params.jobId)
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public recordSemanticIndexJobItemOutcome(params: {
+    jobId: string
+    itemId: number
+    status: 'unsupported' | 'failed' | 'skipped'
+    errorCode?: string | null
+    errorMessage?: string | null
+  }): void {
+    this.assertOpen()
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
+    try {
+      const itemRow = this.db
+        .prepare('SELECT status FROM semantic_index_job_items WHERE id = ? AND job_id = ?;')
+        .get(params.itemId, params.jobId) as { status: string } | undefined
+
+      if (!itemRow || itemRow.status !== 'pending') {
+        this.db.exec('ROLLBACK;')
+        return
+      }
+
+      this.db
+        .prepare(
+          `
+          UPDATE semantic_index_job_items
+          SET status = ?, error_code = ?, error_message = ?, updated_at_ms = ?
+          WHERE id = ? AND job_id = ?;
+        `
+        )
+        .run(
+          params.status,
+          params.errorCode ?? null,
+          params.errorMessage ?? null,
+          now,
+          params.itemId,
+          params.jobId
+        )
+
+      const isUnsupported = params.status === 'unsupported' ? 1 : 0
+      const isFailed = params.status === 'failed' ? 1 : 0
+
+      this.db
+        .prepare(
+          `
+          UPDATE semantic_index_jobs
+          SET unsupported_photos = unsupported_photos + ?,
+              failed_photos = failed_photos + ?,
+              pending_photos = CASE WHEN pending_photos > 0 THEN pending_photos - 1 ELSE 0 END,
+              updated_at_ms = ?
+          WHERE id = ?;
+        `
+        )
+        .run(isUnsupported, isFailed, now, params.jobId)
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public listSemanticIndexJobItems(options: {
+    jobId: string
+    status?: SemanticIndexJobItem['status']
+    limit?: number
+    offset?: number
+  }): {
+    items: SemanticIndexJobItem[]
+    totalCount: number
+    limit: number
+    offset: number
+  } {
+    this.assertOpen()
+    const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 50)))
+    const offset = Math.max(0, Math.floor(options.offset ?? 0))
+
+    const countRow = options.status
+      ? (this.db
+          .prepare(
+            'SELECT COUNT(*) AS total FROM semantic_index_job_items WHERE job_id = ? AND status = ?;'
+          )
+          .get(options.jobId, options.status) as { total: number } | undefined)
+      : (this.db
+          .prepare('SELECT COUNT(*) AS total FROM semantic_index_job_items WHERE job_id = ?;')
+          .get(options.jobId) as { total: number } | undefined)
+
+    const rows = options.status
+      ? (this.db
+          .prepare(
+            `
+            SELECT id, job_id, file_location_id, original_path, discovery_observation_id,
+                   expected_byte_size, expected_mtime_ms, status, error_code, error_message, updated_at_ms
+            FROM semantic_index_job_items
+            WHERE job_id = ? AND status = ?
+            ORDER BY id ASC
+            LIMIT ? OFFSET ?;
+          `
+          )
+          .all(options.jobId, options.status, limit, offset) as Array<Record<string, unknown>>)
+      : (this.db
+          .prepare(
+            `
+            SELECT id, job_id, file_location_id, original_path, discovery_observation_id,
+                   expected_byte_size, expected_mtime_ms, status, error_code, error_message, updated_at_ms
+            FROM semantic_index_job_items
+            WHERE job_id = ?
+            ORDER BY id ASC
+            LIMIT ? OFFSET ?;
+          `
+          )
+          .all(options.jobId, limit, offset) as Array<Record<string, unknown>>)
+
+    return {
+      items: rows.map((r) => this.mapSemanticIndexJobItemRow(r)),
+      totalCount: Number(countRow?.total ?? 0),
+      limit,
+      offset
+    }
+  }
+
+  private mapSemanticIndexJobRow(row: Record<string, unknown>): SemanticIndexJobRecord {
+    return {
+      id: String(row.id),
+      status: row.status as SemanticIndexJobRecord['status'],
+      modelId: String(row.model_id),
+      modelCommit: String(row.model_commit),
+      modelManifestSha256: String(row.model_manifest_sha256),
+      preprocessingVersion: String(row.preprocessing_version),
+      totalPhotos: Number(row.total_photos),
+      processedPhotos: Number(row.processed_photos),
+      reusedPhotos: Number(row.reused_photos),
+      unsupportedPhotos: Number(row.unsupported_photos),
+      failedPhotos: Number(row.failed_photos),
+      pendingPhotos: Number(row.pending_photos),
+      startedAtMs: Number(row.started_at_ms),
+      updatedAtMs: Number(row.updated_at_ms),
+      completedAtMs:
+        row.completed_at_ms !== null && row.completed_at_ms !== undefined
+          ? Number(row.completed_at_ms)
+          : null,
+      lastError:
+        row.last_error !== null && row.last_error !== undefined ? String(row.last_error) : null
+    }
+  }
+
+  private mapSemanticIndexJobItemRow(row: Record<string, unknown>): SemanticIndexJobItem {
+    return {
+      id: Number(row.id),
+      jobId: String(row.job_id),
+      fileLocationId: Number(row.file_location_id),
+      originalPath: String(row.original_path),
+      discoveryObservationId: Number(row.discovery_observation_id),
+      expectedByteSize: Number(row.expected_byte_size),
+      expectedMtimeMs: Number(row.expected_mtime_ms),
+      status: row.status as SemanticIndexJobItem['status'],
+      errorCode:
+        row.error_code !== null && row.error_code !== undefined ? String(row.error_code) : null,
+      errorMessage:
+        row.error_message !== null && row.error_message !== undefined
+          ? String(row.error_message)
+          : null,
+      updatedAtMs:
+        row.updated_at_ms !== null && row.updated_at_ms !== undefined
+          ? Number(row.updated_at_ms)
+          : null
     }
   }
 }

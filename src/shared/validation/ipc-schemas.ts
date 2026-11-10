@@ -521,13 +521,20 @@ export const PhotosDiagnosticsResponseSchema = z.object({
   activeWorkers: z.number().int().nonnegative(),
   terminatingWorkers: z.number().int().nonnegative().optional(),
   liveWorkers: z.number().int().nonnegative().optional(),
+  activeSemanticTasks: z.number().int().nonnegative().optional(),
+  semanticModelLoadedWorkers: z.number().int().nonnegative().optional(),
   queuedJobs: z.number().int().nonnegative(),
   totalDecodes: z.number().int().nonnegative(),
   cacheHits: z.number().int().nonnegative(),
   cacheMisses: z.number().int().nonnegative(),
   mainEventLoopDelayP95Ms: z.number().nonnegative().optional(),
   mainEventLoopDelayMaxMs: z.number().nonnegative().optional(),
-  mainEventLoopDelayMeanMs: z.number().nonnegative().optional()
+  mainEventLoopDelayMeanMs: z.number().nonnegative().optional(),
+  mainProcessRssBytes: z.number().int().nonnegative().optional(),
+  mainProcessHeapUsedBytes: z.number().int().nonnegative().optional(),
+  workerIsolatePeakHeapUsedBytes: z.number().int().nonnegative().optional(),
+  workerIsolateLastHeapUsedBytes: z.number().int().nonnegative().optional(),
+  workerIsolatePeakExternalBytes: z.number().int().nonnegative().optional()
 })
 export type PhotosDiagnosticsResponse = z.infer<typeof PhotosDiagnosticsResponseSchema>
 
@@ -939,6 +946,109 @@ export const SimilarityReconcileResponseSchema = z.object({
   unresolvedCount: z.number().int().nonnegative()
 })
 export type SimilarityReconcileResponse = z.infer<typeof SimilarityReconcileResponseSchema>
+
+// ============================================================================
+// Stage 6B: Semantic Model Provisioning & Resumable Semantic Index Schemas
+// ============================================================================
+
+export const SemanticModelProvisionStateSchema = z.enum([
+  'missing',
+  'installing',
+  'ready',
+  'cancelled',
+  'error'
+])
+export type SemanticModelProvisionState = z.infer<typeof SemanticModelProvisionStateSchema>
+
+export const SemanticModelStatusResponseSchema = z.object({
+  state: SemanticModelProvisionStateSchema,
+  modelId: z.string().min(1),
+  modelCommit: z.string().min(1),
+  modelManifestSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+  preprocessingVersion: z.string().min(1),
+  dimensions: z.number().int().positive(),
+  requiredBytes: z.number().int().positive(),
+  downloadedBytes: z.number().int().nonnegative(),
+  currentArtifact: z.string().nullable(),
+  verifiedAtMs: z.number().int().nullable(),
+  error: z.string().nullable(),
+  lastReplacementError: z.string().nullable()
+})
+export type SemanticModelStatusResponse = z.infer<typeof SemanticModelStatusResponseSchema>
+
+export const SemanticIndexJobStatusSchema = z.enum([
+  'idle',
+  'running',
+  'paused',
+  'completed',
+  'cancelled',
+  'interrupted',
+  'failed'
+])
+export type SemanticIndexJobStatus = z.infer<typeof SemanticIndexJobStatusSchema>
+
+export const SemanticIndexProgressResponseSchema = z.object({
+  jobId: z.string().nullable(),
+  status: SemanticIndexJobStatusSchema,
+  modelId: z.string().min(1),
+  modelCommit: z.string().min(1),
+  preprocessingVersion: z.string().min(1),
+  totalPhotos: z.number().int().nonnegative(),
+  processedPhotos: z.number().int().nonnegative(),
+  reusedPhotos: z.number().int().nonnegative(),
+  unsupportedPhotos: z.number().int().nonnegative(),
+  failedPhotos: z.number().int().nonnegative(),
+  pendingPhotos: z.number().int().nonnegative(),
+  totalCatalogPhotos: z.number().int().nonnegative(),
+  currentIndexedPhotos: z.number().int().nonnegative(),
+  startedAtMs: z.number().int().nullable(),
+  updatedAtMs: z.number().int().nullable(),
+  completedAtMs: z.number().int().nullable(),
+  lastError: z.string().nullable()
+})
+export type SemanticIndexProgressResponse = z.infer<typeof SemanticIndexProgressResponseSchema>
+
+export const SemanticIndexItemStatusSchema = z.enum([
+  'pending',
+  'completed',
+  'reused',
+  'unsupported',
+  'failed',
+  'skipped'
+])
+export type SemanticIndexItemStatus = z.infer<typeof SemanticIndexItemStatusSchema>
+
+export const SemanticIndexJobItemSchema = z.object({
+  id: z.number().int().positive(),
+  jobId: z.string().min(1),
+  fileLocationId: z.number().int().positive(),
+  originalPath: z.string().min(1),
+  discoveryObservationId: z.number().int().positive(),
+  expectedByteSize: z.number().int().nonnegative(),
+  expectedMtimeMs: z.number(),
+  status: SemanticIndexItemStatusSchema,
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  updatedAtMs: z.number().int().nullable()
+})
+export type SemanticIndexJobItem = z.infer<typeof SemanticIndexJobItemSchema>
+
+export const SemanticIndexJobItemsRequestSchema = z.object({
+  jobId: z.string().min(1).nullable().optional(),
+  status: SemanticIndexItemStatusSchema.optional(),
+  page: z.number().int().positive().default(1),
+  pageSize: z.number().int().positive().max(200).default(25)
+})
+export type SemanticIndexJobItemsRequest = z.input<typeof SemanticIndexJobItemsRequestSchema>
+
+export const SemanticIndexJobItemsResponseSchema = z.object({
+  jobId: z.string().nullable(),
+  items: z.array(SemanticIndexJobItemSchema),
+  totalCount: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  pageSize: z.number().int().positive()
+})
+export type SemanticIndexJobItemsResponse = z.infer<typeof SemanticIndexJobItemsResponseSchema>
 
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,

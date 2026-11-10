@@ -52,3 +52,10 @@ spikes/semantic-eval/package-lock.json
 spikes/semantic-eval/.model-cache/
 spikes/semantic-eval/.fixtures-temp/
 
+# Stage 6B Semantic Model binaries and staging caches
+*.onnx
+.model-cache/
+.model_staging_*/
+semantic-models/
+
+

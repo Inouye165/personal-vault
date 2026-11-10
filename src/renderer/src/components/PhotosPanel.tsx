@@ -25,6 +25,7 @@ import {
 import { usePhotos, PHOTO_BOUNDS } from '../hooks/usePhotos'
 import { usePhotoReview } from '../hooks/usePhotoReview'
 import { SimilarityReviewPanel } from './SimilarityReviewPanel'
+import { SemanticIndexPanel } from './SemanticIndexPanel'
 import type {
   PhotoFlagFilter,
   PhotoItem,
@@ -224,6 +225,7 @@ export function PhotosPanel() {
   const [renameInputValue, setRenameInputValue] = useState('')
   const [collectionActionError, setCollectionActionError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'similarity'>('grid')
+  const [showSemanticPanel, setShowSemanticPanel] = useState(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -369,6 +371,16 @@ export function PhotosPanel() {
             >
               Visual Similarity
             </button>
+            <button
+              id="photos-toggle-semantic-index"
+              data-testid="photos-toggle-semantic-index"
+              type="button"
+              className={`btn btn-sm ${showSemanticPanel ? 'btn-primary' : 'btn-secondary'}`}
+              aria-expanded={showSemanticPanel}
+              onClick={() => setShowSemanticPanel((prev) => !prev)}
+            >
+              Semantic Index
+            </button>
           </div>
 
           {viewMode === 'grid' && (
@@ -461,6 +473,8 @@ export function PhotosPanel() {
             </>
           )}
         </div>
+
+        {showSemanticPanel && <SemanticIndexPanel onClose={() => setShowSemanticPanel(false)} />}
 
         {viewMode === 'similarity' ? (
           <SimilarityReviewPanel />

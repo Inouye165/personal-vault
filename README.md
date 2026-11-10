@@ -74,6 +74,8 @@ npm run verify:photo-review # real Electron photo ratings, flags, collections, a
 npm run verify:photo-review:unpacked # real Electron photo review verification in unpacked desktop binary
 npm run verify:similarity # real Electron visual similarity analysis and candidate review verification
 npm run verify:similarity:unpacked # real Electron visual similarity verification in unpacked desktop binary
+npm run verify:semantic-index # real Electron semantic model provisioning and resumable indexing verification
+npm run verify:semantic-index:unpacked # real Electron semantic index verification in unpacked desktop binary
 ```
 
 Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.

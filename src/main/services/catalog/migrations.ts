@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 8
+export const CURRENT_SCHEMA_VERSION = 9
 
 interface Migration {
   readonly version: number
@@ -551,6 +551,99 @@ const MIGRATIONS: readonly Migration[] = [
           ON similarity_candidate_pairs(job_id, file_location_id_a, file_location_id_b);
         CREATE INDEX IF NOT EXISTS idx_sim_candidates_pair
           ON similarity_candidate_pairs(file_location_id_a, file_location_id_b);
+      `)
+    }
+  },
+  {
+    version: 9,
+    name: 'semantic_embeddings_and_index_jobs',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_semantic_embeddings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_id INTEGER,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+          content_revision TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms REAL NOT NULL,
+          model_id TEXT NOT NULL,
+          model_commit TEXT NOT NULL,
+          model_manifest_sha256 TEXT NOT NULL CHECK (length(model_manifest_sha256) = 64),
+          preprocessing_version TEXT NOT NULL,
+          embedding_dimensions INTEGER NOT NULL CHECK (embedding_dimensions = 512),
+          embedding_blob BLOB NOT NULL CHECK (length(embedding_blob) = 2048),
+          width INTEGER,
+          height INTEGER,
+          created_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_emb_unique_current
+          ON photo_semantic_embeddings(file_location_id, model_id, preprocessing_version)
+          WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS idx_semantic_emb_sha256_reuse
+          ON photo_semantic_embeddings(
+            content_sha256,
+            observed_byte_size,
+            model_id,
+            model_commit,
+            model_manifest_sha256,
+            preprocessing_version,
+            is_current
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_semantic_emb_coverage
+          ON photo_semantic_embeddings(
+            model_id,
+            model_commit,
+            model_manifest_sha256,
+            preprocessing_version,
+            is_current
+          );
+
+        CREATE TABLE IF NOT EXISTS semantic_index_jobs (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (
+            status IN ('idle', 'running', 'paused', 'completed', 'cancelled', 'interrupted', 'failed')
+          ),
+          model_id TEXT NOT NULL,
+          model_commit TEXT NOT NULL,
+          model_manifest_sha256 TEXT NOT NULL CHECK (length(model_manifest_sha256) = 64),
+          preprocessing_version TEXT NOT NULL,
+          total_photos INTEGER NOT NULL DEFAULT 0 CHECK (total_photos >= 0),
+          processed_photos INTEGER NOT NULL DEFAULT 0 CHECK (processed_photos >= 0),
+          reused_photos INTEGER NOT NULL DEFAULT 0 CHECK (reused_photos >= 0),
+          unsupported_photos INTEGER NOT NULL DEFAULT 0 CHECK (unsupported_photos >= 0),
+          failed_photos INTEGER NOT NULL DEFAULT 0 CHECK (failed_photos >= 0),
+          pending_photos INTEGER NOT NULL DEFAULT 0 CHECK (pending_photos >= 0),
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS semantic_index_job_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL REFERENCES semantic_index_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          original_path TEXT NOT NULL,
+          discovery_observation_id INTEGER NOT NULL,
+          expected_byte_size INTEGER NOT NULL,
+          expected_mtime_ms REAL NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'completed', 'reused', 'unsupported', 'failed', 'skipped')
+          ),
+          error_code TEXT,
+          error_message TEXT,
+          updated_at_ms INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_semantic_job_items_job_status
+          ON semantic_index_job_items(job_id, status, id);
       `)
     }
   }

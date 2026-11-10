@@ -5,7 +5,12 @@
     output: 'dist',
     buildResources: 'build'
   },
-  files: ['out/**/*'],
+  files: ['out/**/*', 'THIRD_PARTY_NOTICES.md'],
+  asarUnpack: [
+    'node_modules/sharp/**/*',
+    'node_modules/@img/**/*',
+    'node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**/*'
+  ],
   win: {
     target: [
       {

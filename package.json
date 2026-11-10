@@ -26,6 +26,8 @@
     "verify:photo-review:unpacked": "node scripts/verify-electron-photo-review.mjs --mode=unpacked",
     "verify:similarity": "node scripts/verify-electron-similarity.mjs",
     "verify:similarity:unpacked": "node scripts/verify-electron-similarity.mjs --mode=unpacked",
+    "verify:semantic-index": "node scripts/verify-electron-semantic-index.mjs",
+    "verify:semantic-index:unpacked": "node scripts/verify-electron-semantic-index.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -35,7 +37,9 @@
     "format": "prettier --write ."
   },
   "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
     "lucide-react": "^1.16.0",
+    "onnxruntime-node": "1.31.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sharp": "^0.35.5",
