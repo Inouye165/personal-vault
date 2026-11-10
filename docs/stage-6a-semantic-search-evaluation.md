@@ -1,23 +1,23 @@
 # Personal Vault — Stage 6A: Offline Semantic Search Feasibility & Technical Spike
 
-**Date**: November 9, 2026  
+**Date**: November 10, 2026  
 **Workspace**: `D:\organizer`  
 **Branch**: `feat/stage-6a-semantic-evaluation` (branched from `9b8faa7`, descending from accepted `543135a`)  
-**Stage Status**: Stage 6 In progress — Stage 6A Awaiting review
+**Stage Status**: Stage 6 In progress — **Stage 6A Complete (independently accepted at `155d7bd`)**; Substages 6B–6E Planned
 
 ---
 
 ## 1. Executive Summary & Recommendation
 
-This document presents the bounded technical evaluation and real-Electron executable spike for **Stage 6A: Offline Semantic Photo Search Feasibility**.
+This document presents the bounded technical evaluation and real-Electron executable spike for **Stage 6A: Offline Semantic Photo Search Feasibility**, independently reviewed and accepted at commit `155d7bd` (`155d7bd222654e0bce79741d546046616f4f0815`).
 
 ### Recommended Architecture for Stage 6B+
 
 - **Model**: **OpenAI CLIP ViT-B/32** (`openai/clip-vit-base-patch32`, 8-bit dynamic quantized ONNX export via `Xenova/clip-vit-base-patch32`, commit `6b7c523703ae26e39be4b03774966f8571c7f523`).
 - **Runtime**: **`onnxruntime-node` (`1.31.1`)** + **`@huggingface/tokenizers` (`0.2.0`)** + existing **`sharp` (`0.35.5`)** inside a bounded background Node `worker_threads.Worker`.
 - **Vector Representation**: **512-dimensional `Float32Array`** ($2,048\text{ bytes}$ per photo), unit $L_2$-normalized ($\|\mathbf{v}\|_2 = 1.0$).
-- **Similarity Index**: **Exact linear cosine scan (dot product) over `Float32Array` vectors stored in SQLite (`node:sqlite`)** with a declared cap of **$50,000$ indexed photos** ($97.66\text{ MiB}$ raw vector payload; measured **$26.78\text{ ms}$ median / $32.32\text{ ms}$ p95** in-memory scan and **$202.15\text{ ms}$** zero-retention SQLite streaming scan at $50,000$ synthetic vectors). No external vector database dependency (`sqlite-vec`, `hnswlib-node`, `lancedb`) is needed or recommended.
-- **Model Provisioning**: Explicit, user-consented offline model provisioning ($148.63\text{ MiB}$ total for quantized vision + text ONNX + tokenizer) verified by exact byte size and SHA-256 checksums before activation, or offline local bundle import. **Zero silent runtime downloads; zero uploads of personal content.**
+- **Similarity Index**: **Exact linear cosine scan (dot product) over `Float32Array` vectors stored in SQLite (`node:sqlite`)** with a **proposed cap of $50,000$ indexed photos** (proposed engineering bound, not yet user-approved; $97.66\text{ MiB}$ raw vector payload; implementation run **$26.78\text{ ms}$ median / $32.32\text{ ms}$ p95** and reviewer rerun **$34.21\text{ ms}$ median / $39.09\text{ ms}$ p95** in-memory scan; implementation run **$202.15\text{ ms}$** and reviewer rerun **$300.06\text{ ms}$–$340.32\text{ ms}$** zero-retention SQLite streaming scan at $50,000$ synthetic vectors). No external vector database dependency (`sqlite-vec`, `hnswlib-node`, `lancedb`) is needed or recommended.
+- **Model Provisioning (Proposed Choices)**: Explicit, user-consented offline model provisioning ($148.63\text{ MiB}$ total for quantized vision + text ONNX + tokenizer, proposed disk budget awaiting user product confirmation) verified by exact byte size and SHA-256 checksums before activation, or offline local bundle import. **Zero silent runtime downloads; zero uploads of personal content.**
 
 ---
 
@@ -64,6 +64,7 @@ Code and model weight licenses were verified against primary upstream repositori
 - `onnxruntime-node@1.31.1` uses **Node-API (N-API v6)** (`bin/napi-v6/win32/x64/onnxruntime_binding.node`).
 - Because N-API v6 is ABI-stable across Node versions, the exact same prebuilt binary loads without `@electron/rebuild` or C++ compilation in both **Node `v22.18.0`** (Vitest runner) and **Electron `45.2.3`** (embedded Node `v24.22.2`).
 - Verified by running `spikes/semantic-eval/run-electron-spike.mjs` under `electron.exe` with `ELECTRON_RUN_AS_NODE=1`.
+- **Scope of `ELECTRON_RUN_AS_NODE=1` Verification**: Running under `electron.exe` with `ELECTRON_RUN_AS_NODE=1` proves N-API v6 native addon loading (`onnxruntime_binding.node`), `sharp` image decoding, `@huggingface/tokenizers`, `worker_threads`, and `node:sqlite` inside the Electron 45.2.3 / Node 24.22.2 runtime binary. **It does not establish `BrowserWindow`/preload/IPC responsiveness or packaged-app (`app.asar` / `app.asar.unpacked`) compatibility**, which must be exercised in Stage 6B–6E.
 
 ### 4.2 Native DLL Footprint on Windows x64
 
@@ -102,7 +103,7 @@ Inspecting `node_modules/onnxruntime-node/bin/napi-v6/win32/x64/`:
 
 Every image processed for semantic embedding enforces the same inviolable read-only security and resource boundaries as Stage 5A/5C:
 
-- **Approved Root Containment**: Canonical `realpathSync` verification against registered catalog source roots.
+- **Approved Root Containment**: Canonical `realpathSync` verification against registered catalog source roots (to be enforced directly inside the production semantic worker in Stage 6B alongside pre/post `stat` and stream-hash verification).
 - **Read-Only Descriptor & Stability**: Opened with `open(path, 'r')`, pre/post `fstat` size and `mtimeMs` verification, streaming 64 KiB chunked SHA-256 verification, and post-read pathname/inode revalidation.
 - **Input Size Caps**: `MAX_SOURCE_SIZE_BYTES = 128 MiB`, `MAX_INPUT_PIXELS = 100,000,000` (100 MP).
 - **Supported Formats**: `.jpg`, `.jpeg`, `.jpe`, `.jfif`, `.png`, `.webp`, `.gif` (frame 0), `.avif`, `.tif`, `.tiff`.
@@ -110,13 +111,14 @@ Every image processed for semantic embedding enforces the same inviolable read-o
 
 ### 5.2 Preprocessing & Vector Normalization Specification
 
-- **Image Preprocessing (`clip_vit_b32_224_bilinear_center_rgb_v1`)**:
+- **Image Preprocessing**:
   1. EXIF orientation auto-rotation (`sharp(buffer).rotate()`).
   2. Colorspace conversion to 3-channel sRGB (`toColorspace('srgb').removeAlpha()`).
-  3. Resize shortest edge to $224\text{ px}$ and center-crop to $224\times 224\text{ px}$ (`resize(224, 224, { fit: 'cover', position: 'centre', kernel: 'cubic' })`).
+  3. Resize shortest edge to $224\text{ px}$ and center-crop to $224\times 224\text{ px}$ (`resize(224, 224, { fit: 'cover', position: 'centre', kernel: 'cubic' })`, matching CLIP's `resample: 3` bicubic specification in `preprocessor_config.json`).
   4. Rescale uint8 $[0, 255] \to [0.0, 1.0]$ and normalize per channel into planar CHW `Float32Array(3 * 224 * 224)`:
      - $\mu_{RGB} = [0.48145466, 0.4578275, 0.40821073]$
      - $\sigma_{RGB} = [0.26862954, 0.26130258, 0.27577711]$
+  - _Stage 6B Production Follow-Up_: The Stage 6A spike named the constant `clip_vit_b32_224_bilinear_center_rgb_v1` while executing `sharp.kernel.cubic` and calling `sharp(rawFileBuffer)` twice (once for `.metadata()` and once for `.rotate()...raw()`). Stage 6B must name the production identifier accurately (`clip_vit_b32_224_bicubic_center_rgb_v1`) and decode in a single `sharp` pass.
 - **Text Preprocessing**:
   1. Trim whitespace; reject empty queries (`EMPTY_QUERY`).
   2. BPE tokenization via `CLIPTokenizer` (`tokenizer.json`, lowercased, max length **77 tokens** including `<|startoftext|>` ID `49406` and `<|endoftext|>` ID `49407`). Queries exceeding 77 tokens are truncated to 76 tokens + `<|endoftext|>` (`49407`) with `truncated: true` metadata reported.
@@ -128,7 +130,7 @@ Every image processed for semantic embedding enforces the same inviolable read-o
 
 To respect Personal Vault's strict browsing bounds (**$\le 2$ live image decode workers including terminating ones**, **$\le 64$ queued decode jobs**, **$\le 200$ mounted DOM cells**, **$\le 2,000$ retained metadata items**):
 
-- **Shared Worker Pool Integration**: Image decoding and ONNX vision embedding run inside the existing `ThumbnailCoordinator` worker pool (or a dedicated action `'embed_image'` on the shared 2-worker pool) at **`priority: 'low'`**, while interactive thumbnail requests run at **`priority: 'high'`**.
+- **Shared Worker Pool Integration & Aggregate Accounting**: Image decoding and ONNX vision embedding must respect the aggregate $\le 2$ live worker cap (counting terminating workers until their `'exit'` event fires) and yield/pause background semantic indexing whenever interactive viewport thumbnail decodes are active.
 - **Aggregate Worker Cap**: Total live image/embedding workers (active + terminating) never exceed **2**.
 - **Backpressure**: Semantic indexing dispatches at most `BATCH_SIZE = 8` low-priority requests at a time, leaving at least 56 of the 64 queue slots free for interactive photo scrolling.
 - **Cancellation & Timeout**: Per-job timeout of 15 seconds (`JOB_TIMEOUT_MS`). Cancelling an indexing job aborts queued items immediately and awaits worker termination before freeing concurrency capacity. Incomplete or cancelled jobs transition to `status: 'cancelled'` and never claim completion.
@@ -142,8 +144,8 @@ To respect Personal Vault's strict browsing bounds (**$\le 2$ live image decode 
 - **CPU**: 13th Gen Intel Core i9-13900K (32 logical threads)
 - **RAM**: 34.1 GB
 - **OS**: Windows (`win32` `x64`)
-- **Electron Runtime**: Electron `45.2.3` (Node `24.22.2`, V8 `15.6.75.27-electron.0`)
-- **Command Executed**: `node spikes/semantic-eval/run-electron-spike.mjs` (exit code `0`)
+- **Electron Runtime**: Electron `45.2.3` (Node `24.22.2`, V8 `15.6.75.27-electron.0`, invoked via `ELECTRON_RUN_AS_NODE=1`)
+- **Command Executed**: `node spikes/semantic-eval/run-electron-spike.mjs` (exit code `0` on both implementation run and independent reviewer rerun at `155d7bd`)
 
 ### 6.2 Pinned Model Artifacts & Verified SHA-256 Checksums
 
@@ -160,19 +162,19 @@ Cached under gitignored `spikes/semantic-eval/.model-cache/Xenova--clip-vit-base
 | `special_tokens_map.json`          |             472 |      <0.01 | `c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac` |
 | **Total Provisioned Footprint**    | **155,851,918** | **148.63** | —                                                                  |
 
-### 6.3 Measured Latency, Throughput, Memory & UI Responsiveness
+### 6.3 Measured Latency, Throughput, Sampled Memory & Headless Event-Loop Probe
 
-| Metric                                                                      | Measured Value                                       | Target / Bound                         |
-| :-------------------------------------------------------------------------- | :--------------------------------------------------- | :------------------------------------- |
-| **Cold Model Load Latency** (Vision + Text ONNX + Tokenizer init)           | **$367.36\text{ ms}$**                               | $< 2,000\text{ ms}$                    |
-| **Warm Image Decode + Preprocess Mean** (`sharp` 224x224 RGB)               | **$2.85\text{ ms}$**                                 | —                                      |
-| **Warm Image ONNX Inference Mean** (`vision_model_quantized.onnx`)          | **$25.52\text{ ms}$**                                | —                                      |
-| **Warm End-to-End Image Embedding Mean**                                    | **$28.37\text{ ms}$**                                | $< 15,000\text{ ms}$ timeout           |
-| **Warm Single-Worker Throughput**                                           | **$35.24\text{ images/sec}$**                        | ($\sim 2,114\text{ images/min}$)       |
-| **Warm Text Query Embedding Mean** (Tokenize + `text_model_quantized.onnx`) | **$3.39\text{ ms}$**                                 | $< 50\text{ ms}$ interactive           |
-| **Worker Thread Peak RSS** (with both Vision & Text sessions loaded)        | **$453.98\text{ MiB}$**                              | Bounded in isolated worker             |
-| **Worker Thread Peak V8 Heap Used**                                         | **$16.94\text{ MiB}$**                               | —                                      |
-| **Main Process Event-Loop Delay during Worker Inference**                   | **p95 = $16.49\text{ ms}$, max = $24.40\text{ ms}$** | $\le 100\text{ ms}$ main-thread budget |
+| Metric                                                                                                     | Implementation Run Value                             | Independent Reviewer Rerun Value (`155d7bd`)         | Target / Notes                                                                                                                 |
+| :--------------------------------------------------------------------------------------------------------- | :--------------------------------------------------- | :--------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------- |
+| **Cold Model Load Latency** (Vision + Text ONNX + Tokenizer init)                                          | **$367.36\text{ ms}$**                               | **$467.56\text{ ms}$**                               | $< 2,000\text{ ms}$                                                                                                            |
+| **Warm Image Decode + Preprocess Mean** (`sharp` 224x224 RGB)                                              | **$2.85\text{ ms}$**                                 | **$4.86\text{ ms}$**                                 | —                                                                                                                              |
+| **Warm Image ONNX Inference Mean** (`vision_model_quantized.onnx`)                                         | **$25.52\text{ ms}$**                                | **$41.84\text{ ms}$**                                | —                                                                                                                              |
+| **Warm End-to-End Image Embedding Mean**                                                                   | **$28.37\text{ ms}$**                                | **$46.70\text{ ms}$**                                | $< 15,000\text{ ms}$ timeout                                                                                                   |
+| **Warm Single-Worker Throughput**                                                                          | **$35.24\text{ images/sec}$**                        | **$21.41\text{ images/sec}$**                        | Single worker on CPU                                                                                                           |
+| **Warm Text Query Embedding Mean** (Tokenize + `text_model_quantized.onnx`)                                | **$3.39\text{ ms}$**                                 | **$5.32\text{ ms}$**                                 | $< 50\text{ ms}$ interactive                                                                                                   |
+| **Sampled Process-Wide RSS (`process.memoryUsage().rss`)** (max of post-inference snapshots during worker) | **$453.98\text{ MiB}$** (end: $449.91\text{ MiB}$)   | **$455.34\text{ MiB}$** (end: $451.64\text{ MiB}$)   | Process-wide RSS (main + worker + shared native DLLs/arenas); sampled post-inference, not worker-exclusive or continuous peak  |
+| **Sampled Worker-Isolate V8 Heap Used (`heapUsed`)** (max of post-inference snapshots)                     | **$16.94\text{ MiB}$**                               | **$19.99\text{ MiB}$**                               | Worker V8 isolate heap only (sampled post-inference)                                                                           |
+| **Headless Parent Event-Loop Delay Probe (`ELECTRON_RUN_AS_NODE=1`)**                                      | **p95 = $16.49\text{ ms}$, max = $24.40\text{ ms}$** | **p95 = $16.28\text{ ms}$, max = $24.13\text{ ms}$** | Proves worker inference does not block parent Node loop; does **not** establish `BrowserWindow`/IPC/renderer UI responsiveness |
 
 ### 6.4 Ranked Retrieval Results on Synthetic Nonpersonal Fixtures
 
@@ -180,15 +182,15 @@ _Disclaimer_: The 10 synthetic raster fixtures (`generate-fixtures.mjs`) verify 
 
 **Declared Relevance Rubric**: For each query, the #1 ranked result (`top1File`) must belong to the query's declared `positiveIds`, and every positive fixture must score strictly higher than every declared negative fixture (`minPositiveScore > maxNegativeScore`).
 
-| Query ID       | Natural-Language Query Text                             |    Query Latency | Top-1 Ranked Fixture         | Top-1 Score | Min Positive Score | Max Negative Score | Positive–Negative Margin | Rubric Result |
-| :------------- | :------------------------------------------------------ | ---------------: | :--------------------------- | ----------: | -----------------: | -----------------: | -----------------------: | :------------ |
-| `q_sunset`     | `"a warm orange sunset over the ocean horizon"`         | $4.50\text{ ms}$ | `sunset_beach.jpg`           |    `0.2947` |           `0.2800` |           `0.1804` |                `+0.1144` | **PASS**      |
-| `q_forest`     | `"green pine trees in an evergreen forest"`             | $3.23\text{ ms}$ | `pine_woods.webp`            |    `0.3196` |           `0.3150` |           `0.2078` |                `+0.1118` | **PASS**      |
-| `q_car`        | `"a bright red car with black wheels on a road"`        | $3.28\text{ ms}$ | `crimson_sedan.png`          |    `0.3009` |           `0.2896` |           `0.2108` |                `+0.0901` | **PASS**      |
-| `q_mountain`   | `"snowy mountain peaks under a blue sky"`               | $2.79\text{ ms}$ | `snowy_mountain_peaks.jpg`   |    `0.2982` |           `0.2982` |           `0.1939` |                `+0.1043` | **PASS**      |
-| `q_sailboat`   | `"a white sailboat sailing on blue water"`              | $3.03\text{ ms}$ | `white_sailboat_sea.jpg`     |    `0.3032` |           `0.3032` |           `0.1882` |                `+0.1150` | **PASS**      |
-| `q_night_city` | `"city skyscraper buildings lit up at night with moon"` | $3.57\text{ ms}$ | `night_city_skyline.jpg`     |    `0.3177` |           `0.3177` |           `0.2158` |                `+0.1019` | **PASS**      |
-| `q_receipt`    | `"a paper receipt invoice with a barcode"`              | $3.35\text{ ms}$ | `paper_receipt_document.png` |    `0.3370` |           `0.3370` |           `0.2087` |                `+0.1283` | **PASS**      |
+| Query ID       | Natural-Language Query Text                             | Impl. Latency / Reviewer Rerun Latency | Top-1 Ranked Fixture         | Top-1 Score | Min Positive Score | Max Negative Score | Positive–Negative Margin | Rubric Result |
+| :------------- | :------------------------------------------------------ | -------------------------------------: | :--------------------------- | ----------: | -----------------: | -----------------: | -----------------------: | :------------ |
+| `q_sunset`     | `"a warm orange sunset over the ocean horizon"`         |    $4.50\text{ ms}$ / $9.59\text{ ms}$ | `sunset_beach.jpg`           |    `0.2947` |           `0.2800` |           `0.1804` |                `+0.1144` | **PASS**      |
+| `q_forest`     | `"green pine trees in an evergreen forest"`             |    $3.23\text{ ms}$ / $4.27\text{ ms}$ | `pine_woods.webp`            |    `0.3196` |           `0.3150` |           `0.2078` |                `+0.1118` | **PASS**      |
+| `q_car`        | `"a bright red car with black wheels on a road"`        |    $3.28\text{ ms}$ / $4.51\text{ ms}$ | `crimson_sedan.png`          |    `0.3009` |           `0.2896` |           `0.2108` |                `+0.0901` | **PASS**      |
+| `q_mountain`   | `"snowy mountain peaks under a blue sky"`               |    $2.79\text{ ms}$ / $4.62\text{ ms}$ | `snowy_mountain_peaks.jpg`   |    `0.2982` |           `0.2982` |           `0.1939` |                `+0.1043` | **PASS**      |
+| `q_sailboat`   | `"a white sailboat sailing on blue water"`              |    $3.03\text{ ms}$ / $4.63\text{ ms}$ | `white_sailboat_sea.jpg`     |    `0.3032` |           `0.3032` |           `0.1882` |                `+0.1150` | **PASS**      |
+| `q_night_city` | `"city skyscraper buildings lit up at night with moon"` |    $3.57\text{ ms}$ / $4.99\text{ ms}$ | `night_city_skyline.jpg`     |    `0.3177` |           `0.3177` |           `0.2158` |                `+0.1019` | **PASS**      |
+| `q_receipt`    | `"a paper receipt invoice with a barcode"`              |    $3.35\text{ ms}$ / $4.62\text{ ms}$ | `paper_receipt_document.png` |    `0.3370` |           `0.3370` |           `0.2087` |                `+0.1283` | **PASS**      |
 
 ### 6.5 Failure Modes & Cancellation Verification
 
@@ -205,23 +207,23 @@ Exercised in `run-electron-spike.mjs` steps 3, 4, and 7:
 
 ### 7.1 Comparison
 
-| Approach                                                                            | Added Dependencies & Native Surface                                                                  | Memory & Storage Overhead                                                                              | Query Latency at 10k / 50k Photos                                                                                                                              | Filter Composability (Stage 6C/6D SQL Filters)                                                                                                            | Recommendation                                                                              |
-| :---------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
-| **Bounded Exact Scan over SQLite BLOBs / `Float32Array`** (Cap $\le 50,000$ photos) | **Zero** new dependencies (uses built-in `node:sqlite` + JS `Float32Array`)                          | $2\text{ KiB}$/photo ($19.53\text{ MiB}$ raw vectors at 10k; $97.66\text{ MiB}$ at 50k)                | **$4.95\text{ ms}$** (10k in-RAM) / **$26.78\text{ ms}$** (50k in-RAM); **$42.15\text{ ms}$** (10k SQLite stream) / **$202.15\text{ ms}$** (50k SQLite stream) | **Exact**: SQL `WHERE` clauses filter candidate `file_location_id`s before or during scan with $100\%$ recall.                                            | **Recommended** (Least complex, zero native risk, exact results).                           |
-| **Dedicated Vector Extension / DB** (`sqlite-vec`, `hnswlib-node`, `lancedb`)       | Requires C++/Rust native addon or custom SQLite loadable extension (`db.enableLoadExtension(true)`). | HNSW graph adds $1.5\times$–$2.5\times$ RAM/disk overhead and requires index rebuilds on invalidation. | $1\text{ ms}$–$5\text{ ms}$ approximate nearest neighbor (ANN).                                                                                                | **Poor**: HNSW pre-filtering or post-filtering suffers from recall drop when combined with selective metadata filters (rating, collection, camera, date). | **Not Recommended** (Unnecessary complexity and security/ABI risk for $\le 50,000$ photos). |
+| Approach                                                                                     | Added Dependencies & Native Surface                                                                  | Memory & Storage Overhead                                                                              | Query Latency at 10k / 50k Photos                                                                                                                                                                                                      | Filter Composability (Stage 6C/6D SQL Filters)                                                                                                            | Recommendation                                                                              |
+| :------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
+| **Bounded Exact Scan over SQLite BLOBs / `Float32Array`** (Proposed Cap $\le 50,000$ photos) | **Zero** new dependencies (uses built-in `node:sqlite` + JS `Float32Array`)                          | $2\text{ KiB}$/photo ($19.53\text{ MiB}$ raw vectors at 10k; $97.66\text{ MiB}$ at 50k)                | **$4.95\text{ ms}$–$5.79\text{ ms}$** (10k in-RAM) / **$26.78\text{ ms}$–$34.21\text{ ms}$** (50k in-RAM); **$42.15\text{ ms}$–$55.09\text{ ms}$** (10k SQLite stream) / **$202.15\text{ ms}$–$340.32\text{ ms}$** (50k SQLite stream) | **Exact**: SQL `WHERE` clauses filter candidate `file_location_id`s before or during scan with $100\%$ recall.                                            | **Recommended** (Least complex, zero native risk, exact results).                           |
+| **Dedicated Vector Extension / DB** (`sqlite-vec`, `hnswlib-node`, `lancedb`)                | Requires C++/Rust native addon or custom SQLite loadable extension (`db.enableLoadExtension(true)`). | HNSW graph adds $1.5\times$–$2.5\times$ RAM/disk overhead and requires index rebuilds on invalidation. | $1\text{ ms}$–$5\text{ ms}$ approximate nearest neighbor (ANN).                                                                                                                                                                        | **Poor**: HNSW pre-filtering or post-filtering suffers from recall drop when combined with selective metadata filters (rating, collection, camera, date). | **Not Recommended** (Unnecessary complexity and security/ABI risk for $\le 50,000$ photos). |
 
 ### 7.2 Synthetic Vector Scan Benchmark (`spikes/semantic-eval/benchmark-index.mjs`)
 
-_Note: Measured under Electron `45.2.3` using synthetic L2-normalized 512-dimensional `Float32` vectors._
+_Note: Measured under Electron `45.2.3` (`ELECTRON_RUN_AS_NODE=1`) and Node `22.18.0` using synthetic L2-normalized 512-dimensional `Float32` vectors. Both the implementation run and the independent reviewer rerun at `155d7bd` are reported below._
 
-| Declared Library Size (Synthetic Vectors) | Raw Vector Payload (`512 * 4 B`) | SQLite Table Size on Disk (with index) | In-Memory `Float32Array` Exact Scan (Median / p95) | Zero-RAM-Retention `node:sqlite` `stmt.iterate()` Streaming Scan |
-| ----------------------------------------: | -------------------------------: | -------------------------------------: | -------------------------------------------------: | ---------------------------------------------------------------: |
-|                                 **1,000** |                $1.95\text{ MiB}$ |                      $3.98\text{ MiB}$ |            **$0.68\text{ ms}$** / $0.82\text{ ms}$ |                                             **$4.40\text{ ms}$** |
-|                                **10,000** |               $19.53\text{ MiB}$ |                     $39.67\text{ MiB}$ |            **$4.95\text{ ms}$** / $8.36\text{ ms}$ |                                            **$42.15\text{ ms}$** |
-|                                **25,000** |               $48.83\text{ MiB}$ |                     $99.17\text{ MiB}$ |          **$12.63\text{ ms}$** / $14.86\text{ ms}$ |                                           **$111.65\text{ ms}$** |
-|                 **50,000** (Declared Cap) |               $97.66\text{ MiB}$ |                    $198.35\text{ MiB}$ |          **$26.78\text{ ms}$** / $32.32\text{ ms}$ |                                           **$202.15\text{ ms}$** |
+|         Declared Library Size (Synthetic Vectors) | Raw Vector Payload (`512 * 4 B`) | SQLite Table Size on Disk (with index) | Impl. In-Memory `Float32Array` Scan (Median / p95) | Reviewer Rerun In-Memory Scan (Median / p95) | Impl. `node:sqlite` `stmt.iterate()` Streaming Scan | Reviewer Rerun `node:sqlite` Streaming Scan |
+| ------------------------------------------------: | -------------------------------: | -------------------------------------: | -------------------------------------------------: | -------------------------------------------: | --------------------------------------------------: | ------------------------------------------: |
+|                                         **1,000** |                $1.95\text{ MiB}$ |                      $3.98\text{ MiB}$ |            **$0.68\text{ ms}$** / $0.82\text{ ms}$ |      **$0.51\text{ ms}$** / $2.36\text{ ms}$ |                                **$4.40\text{ ms}$** |                       **$11.30\text{ ms}$** |
+|                                        **10,000** |               $19.53\text{ MiB}$ |                     $39.67\text{ MiB}$ |            **$4.95\text{ ms}$** / $8.36\text{ ms}$ |      **$5.79\text{ ms}$** / $8.07\text{ ms}$ |                               **$42.15\text{ ms}$** |                       **$55.09\text{ ms}$** |
+|                                        **25,000** |               $48.83\text{ MiB}$ |                     $99.17\text{ MiB}$ |          **$12.63\text{ ms}$** / $14.86\text{ ms}$ |    **$16.02\text{ ms}$** / $18.49\text{ ms}$ |                              **$111.65\text{ ms}$** |                      **$140.02\text{ ms}$** |
+| **50,000** (Proposed Cap — not yet user-approved) |               $97.66\text{ MiB}$ |                    $198.35\text{ MiB}$ |          **$26.78\text{ ms}$** / $32.32\text{ ms}$ |    **$34.21\text{ ms}$** / $39.09\text{ ms}$ |                              **$202.15\text{ ms}$** |                      **$340.32\text{ ms}$** |
 
-Even without keeping vectors cached in memory, streaming $50,000$ `BLOB` rows from `node:sqlite` via `stmt.iterate()` and computing 512-d dot products takes **$202.15\text{ ms}$** with $O(K)$ auxiliary JS heap memory. Combined with text query embedding ($3.39\text{ ms}$), total query latency is $\sim 45\text{ ms}$ at $10,000$ photos and $\sim 205\text{ ms}$ at $50,000$ photos.
+Even without keeping vectors cached in memory, streaming $50,000$ `BLOB` rows from `node:sqlite` via `stmt.iterate()` and computing 512-d dot products takes **$202.15\text{ ms}$** (implementation run) to **$300.06\text{ ms}$–$340.32\text{ ms}$** (reviewer rerun) with $O(K)$ auxiliary JS heap memory. Combined with text query embedding ($3.39\text{ ms}$–$5.32\text{ ms}$), total query latency is $\sim 45\text{ ms}$–$60\text{ ms}$ at $10,000$ photos and $\sim 205\text{ ms}$–$345\text{ ms}$ at the proposed $50,000$-photo cap.
 
 ---
 
@@ -343,7 +345,7 @@ _Not implemented in Stage 6A._ In later Stage 6 substages (Stage 6C/6D), metadat
 
 ---
 
-## 10. Limitations & Open Product Decisions for Review
+## 10. Limitations, Proposed Product Choices & Production Follow-Ups
 
 ### 10.1 Known Technical Limitations
 
@@ -351,15 +353,27 @@ _Not implemented in Stage 6A._ In later Stage 6 substages (Stage 6C/6D), metadat
 2. **Negation & Complex Spatial Queries**: CLIP-class bag-of-words text encoders struggle with negation (e.g., `"beach without people"` may still match people on a beach) and fine-grained counting.
 3. **English-Centric Tokenizer**: `openai/clip-vit-base-patch32` is primarily trained on English text queries.
 4. **Format Boundaries**: Apple HEIC/HEIF and camera RAW files remain unsupported for embedding (matching Stage 5A/5C) and are reported honestly in `unsupported_photos`.
+5. **Verification Scope in Stage 6A**: `ELECTRON_RUN_AS_NODE=1` verification exercises the native N-API v6 addon (`onnxruntime_binding.node`), `sharp`, `@huggingface/tokenizers`, `worker_threads`, and `node:sqlite` inside the Electron 45.2.3 runtime binary, but does not establish `BrowserWindow`/IPC responsiveness or packaged-app (`app.asar.unpacked`) compatibility.
 
-### 10.2 Open Product Decisions Requiring User / Reviewer Alignment Before Stage 6B
+### 10.2 Proposed Product Choices (Not Yet User-Approved)
 
-1. **Model Provisioning Mode**: Should Stage 6B support:
-   - **(A)** Both explicit in-app checksum-verified download from pinned URL **and** offline local directory import ("Select downloaded model folder from disk"), or
-   - **(B)** Strictly offline local directory import only (zero network code in main even when user clicks download)?
-2. **Disk & Index Cap Budget**: Is the proposed **$148.63\text{ MiB}$** model disk budget and **$50,000$-photo** semantic index cap ($97.66\text{ MiB}$ raw vectors / $\sim 198\text{ MiB}$ SQLite table) approved for Stage 6B?
-3. **Search Input Placement**: Should Stage 6B enable the existing top-bar `Header.tsx` search input when the `Photos` tab is active (replacing the `"Search photos (Stage 6)"` disabled state), or place semantic search controls inside the `PhotosPanel` toolbar alongside a dedicated indexing status panel?
-4. **Minimum Score Cutoff vs. Ranked Browsing**: Should semantic search apply a default relevance threshold (e.g., cosine similarity $\ge 0.23$) to hide non-matching photos, or return top-$K$ ranked results with a user-adjustable threshold slider/toggle?
+The following policy and budget choices remain explicitly **proposed** (not user-approved):
+
+1. **Model Provisioning Policy**: Whether Stage 6B should support:
+   - **(A)** Both explicit, user-initiated checksum-verified download from the pinned commit URL **and** offline local directory import ("Import Model Bundle from Disk"), or
+   - **(B)** Strictly offline local directory import only (zero network download code in the application).
+2. **Proposed Index Cap & Model Disk Budget**: A proposed **$50,000$-photo** semantic index cap ($97.66\text{ MiB}$ raw `Float32` vector payload / $\sim 198.35\text{ MiB}$ SQLite table) and a proposed **$148.63\text{ MiB}$** model disk footprint.
+
+### 10.3 Stage 6B+ Production Engineering Follow-Ups (Retained from Independent Review at `155d7bd`)
+
+1. **Correct Preprocessing Recipe Naming & Single-Pass Decode (Stage 6B)**:
+   - Align the preprocessing version identifier with the actual resampling kernel used (`clip_vit_b32_224_bicubic_center_rgb_v1` matching `sharp.kernel.cubic` / CLIP `resample: 3`), and avoid invoking `sharp(buffer)` twice by reading format metadata in a single decode pass.
+2. **Approved Scan-Root Enforcement in Production Worker (Stage 6B)**:
+   - Enforce canonical `realpathSync` containment against registered catalog `approvedRoots` directly inside the production semantic worker alongside pre/post `stat` and streaming SHA-256 verification.
+3. **Aggregate Worker & Resource Accounting (Stage 6B)**:
+   - Count terminating semantic/decode workers against the aggregate $\le 2$ live worker cap until the worker `'exit'` event fires (mirroring `ThumbnailCoordinator`), and pause/yield background semantic indexing whenever interactive viewport thumbnail decodes are active.
+4. **Real Unpacked Native-Runtime & Windowed IPC Verification (Stage 6B/6E)**:
+   - Exercise `onnxruntime-node` native binary resolution from `app.asar.unpacked` in a real `npm run build:unpack` verification script (`verify:semantic:unpacked`), and verify `BrowserWindow`/IPC/renderer responsiveness under active UI browsing.
 
 ---
 

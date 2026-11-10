@@ -1,12 +1,12 @@
 # Personal Vault - Development and Public Release Tracker
 
-Updated: November 9, 2026.
+Updated: November 10, 2026.
 
 This tracker covers all development through public release. Detailed tasks belong in [TODO.md](TODO.md); verification evidence and limitations belong in [HANDOFF.md](HANDOFF.md).
 
 ## Current position
 
-Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Awaiting review; Substages 6B-6E are Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
+Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substages 6B-6E are Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
@@ -19,7 +19,7 @@ The project has **eight main stages**. Lettered substages divide the work; they 
 | 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                |
 | 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                |
 | 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a` |
-| 6     | Semantic photo search and metadata filters                     | In progress | 6A Awaiting review; 6B-6E Planned        |
+| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`; 6B-6E Planned              |
 | 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                  |
 | 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                  |
 
@@ -173,17 +173,31 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ## Stage 6 - Semantic photo search
 
-**In progress; Substage 6A Awaiting review; Substages 6B-6E Planned.**
+**In progress; Substage 6A Complete (independently accepted at `155d7bd`); Substages 6B-6E Planned.**
 
-| Substage | Deliverable                                                                  | Status          | Submission reference                | Acceptance reference |
-| -------- | ---------------------------------------------------------------------------- | --------------- | ----------------------------------- | -------------------- |
-| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Awaiting review | `feat/stage-6a-semantic-evaluation` | Pending              |
-| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Planned         | Pending                             | Pending              |
-| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Planned         | Pending                             | Pending              |
-| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned         | Pending                             | Pending              |
-| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned         | Pending                             | Pending              |
+| Substage | Deliverable                                                                  | Status   | Submission reference                | Acceptance reference |
+| -------- | ---------------------------------------------------------------------------- | -------- | ----------------------------------- | -------------------- |
+| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
+| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Planned  | Pending                             | Pending              |
+| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Planned  | Pending                             | Pending              |
+| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned  | Pending                             | Pending              |
+| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned  | Pending                             | Pending              |
 
-- [ ] Evaluate local embedding models and resource/packaging requirements (6A submitted; awaiting review).
+### Stage 6A - Offline semantic search feasibility evaluation and real-Electron spike
+
+**Complete; independently accepted at `155d7bd`.**
+
+- [x] Evaluate local embedding models (`Xenova/clip-vit-base-patch32` quantized INT8 ONNX via `onnxruntime-node@1.31.1` + `@huggingface/tokenizers@0.2.0` + `sharp@0.35.5`, `Xenova/siglip-base-patch16-224`, and `@huggingface/transformers` WASM) and primary-source runtime/weight licenses (MIT for `onnxruntime-node` and CLIP weights; Apache-2.0 for `@huggingface/tokenizers`, `sharp`, and SigLIP weights) in `docs/stage-6a-semantic-search-evaluation.md`.
+- [x] Pinned offline model provenance (`Xenova/clip-vit-base-patch32` @ `6b7c523703ae26e39be4b03774966f8571c7f523`, 7 files, 155,851,918 bytes / 148.63 MiB) with SHA-256 verification (`spikes/semantic-eval/fetch-model.mjs`) and zero runtime network calls in `spikes/semantic-eval/semantic-worker.mjs`.
+- [x] Executable spike under Electron (`node spikes/semantic-eval/run-electron-spike.mjs` via `ELECTRON_RUN_AS_NODE=1`) and pure logic unit tests (`tests/main/semantic-spike-core.test.ts`):
+  - Implementation-host run: cold model load 367.36 ms; warm image embedding mean 28.37 ms (2.85 ms decode + 25.52 ms vision ONNX; 35.24 images/sec); warm text query mean 3.39 ms; sampled process-wide RSS during worker inference 453.98 MiB (main process RSS at completion 449.91 MiB) and sampled worker-isolate V8 heap max 16.94 MiB (post-inference point samples, not a continuous peak); headless parent event-loop delay probe p95 16.49 ms (max 24.40 ms); synthetic 512-d `Float32Array` exact scan at 50,000 vectors: 26.78 ms median / 32.32 ms p95 in-memory and 202.15 ms SQLite streaming (`stmt.iterate()`).
+  - Independent reviewer rerun at `155d7bd` (reviewer-executed; not re-run during closeout): 741 passing tests across 62 test files (`npm test` exit 0); `npm run typecheck`, `npm run lint`, `npm run format:check`, and `npm run build` all exit 0; cached `fetch-model.mjs` verified 7 files with 0 network downloads (exit 0); `run-electron-spike.mjs` passed (exit 0: cold load 467.56 ms, warm image mean 46.70 ms [4.86 ms decode + 41.84 ms vision ONNX; 21.41 images/sec], warm text query mean 5.32 ms, 7/7 synthetic queries passed rubric, sampled process-wide RSS 455.34 MiB [end 451.64 MiB], sampled worker-isolate V8 heap 19.99 MiB, headless parent event-loop delay p95 16.28 ms [max 24.13 ms], missing model `MISSING_MODEL`, unsupported HEIC `unsupported`, corrupt JPEG `DECODE_FAILED`, active cancellation `CANCELLED` + worker recovery, and 100% bitwise source preservation); `benchmark-index.mjs` passed (exit 0: 50,000-vector in-memory scan 34.21 ms median / 39.09 ms p95; SQLite streaming scan 300.06 ms–340.32 ms).
+- [x] Scope & evidence boundaries retained: `ELECTRON_RUN_AS_NODE=1` verification proves N-API v6 native addon loading and worker inference inside the Electron 45.2.3 runtime binary, and does **not** establish `BrowserWindow`/IPC responsiveness or packaged-app (`app.asar.unpacked`) compatibility. The 50,000-photo index cap and model provisioning choices (148.63 MiB checksum-verified download and/or local bundle import) remain explicitly **proposed**, not user-approved.
+- [x] Stage 6B+ production follow-ups retained from independent review: align preprocessing identifier naming (`clip_vit_b32_224_bicubic_center_rgb_v1` matching `sharp.kernel.cubic`) with single-pass `sharp` decode, enforce `approvedRoots` containment directly inside the production semantic worker, count terminating workers in aggregate worker/resource accounting ($\le 2$ live workers) while yielding to interactive thumbnail decodes, and exercise real unpacked native-runtime (`app.asar.unpacked`) and `BrowserWindow`/IPC verification.
+
+### Stage 6 Checklist
+
+- [x] Evaluate local embedding models and resource/packaging requirements (6A Complete; independently accepted at `155d7bd`).
 - [ ] Implement content-based photo search and a persistent search index (6B/6D Planned).
 - [ ] Filter by available date, camera, lens, resolution, and file-type metadata (6C/6D Planned).
 - [ ] Preserve unknown dates/locations and separate inferences from recorded facts (6B-6E Planned).

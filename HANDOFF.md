@@ -9,10 +9,11 @@
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
 - **Stage 4 status**: Complete (independently accepted at `1a1fb69`, closeout at `8a17bfe`).
-- **Stage 5 status**: **Complete; Substage 5A independently accepted at `951fd25`, 5B at `4071948`, 5C at `543135a`**.
+- **Stage 5 status**: **Complete; Substage 5A independently accepted at `951fd25`, 5B at `4071948`, 5C at `543135a`** (Stage 5 closeout at `9b8faa7`).
 - **Stage 6 status**: **In progress**:
-  - **Stage 6A (Offline Semantic Search Feasibility & Technical Spike)**: **Awaiting review** on `feat/stage-6a-semantic-evaluation`.
+  - **Stage 6A (Offline Semantic Search Feasibility & Technical Spike)**: **Complete** (independently accepted at `155d7bd` / `155d7bd222654e0bce79741d546046616f4f0815` on `feat/stage-6a-semantic-evaluation`).
   - **Substages 6B–6E**: **Planned** (not started).
+- **Evidence source**: Stage 6A verification results (741 tests across 62 files, repository quality gates, cached model verification, `ELECTRON_RUN_AS_NODE=1` spike rerun, and synthetic vector benchmark) are as reported by the independent reviewer at `155d7bd`; they were not re-run during this documentation closeout.
 - **Constraints**: Never implement on `main`; no push or merge authorized. Preserve source preservation invariance: source files strictly read-only. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
@@ -143,17 +144,48 @@ The following unrelated files remain intact and untouched:
 
 ---
 
-## 5. Stage 6A Summary, Scope Exclusions & Next Steps
+## 5. Stage 6A Summary, Independent Review Evidence, Scope Boundaries & Next Steps
 
-- **Stage 6A Deliverable**: Bounded offline semantic search evaluation (`docs/stage-6a-semantic-search-evaluation.md`), isolated executable real-Electron spike (`spikes/semantic-eval/`), and unit tests for pure vector/revision logic (`tests/main/semantic-spike-core.test.ts`).
-- **Recommendation**: CLIP ViT-B/32 quantized ONNX (`Xenova/clip-vit-base-patch32` @ `6b7c5237`, MIT license, $148.63\text{ MiB}$) executed in a worker thread via `onnxruntime-node@1.31.1` (MIT) + `@huggingface/tokenizers@0.2.0` (Apache-2.0) + `sharp@0.35.5` (Apache-2.0), paired with an exact linear scan over 512-d `Float32Array` vectors in `node:sqlite` (capped at $\le 50,000$ photos).
-- **Measured Real-Electron Spike Results (`node spikes/semantic-eval/run-electron-spike.mjs`, exit 0)**:
-  - Cold ONNX session + tokenizer load: $367.36\text{ ms}$.
-  - Warm per-image embedding mean: $28.37\text{ ms}$ ($2.85\text{ ms}$ decode + $25.52\text{ ms}$ inference; $35.24\text{ images/sec}$).
-  - Warm text query embedding mean: $3.39\text{ ms}$.
-  - Worker peak RSS: $453.98\text{ MiB}$ (heap $16.94\text{ MiB}$); main event-loop delay p95 $16.49\text{ ms}$ ($\le 100\text{ ms}$ limit).
-  - Synthetic 512-d `Float32` index scan: $4.95\text{ ms}$ in-memory / $42.15\text{ ms}$ SQLite streaming at $10,000$ vectors; $26.78\text{ ms}$ in-memory / $202.15\text{ ms}$ SQLite streaming at $50,000$ vectors.
-  - All 7/7 synthetic nonpersonal queries passed the declared relevance rubric; missing-model (`MISSING_MODEL`), unsupported format (`HEIC`), corrupt image (`DECODE_FAILED`), active cancellation (`CANCELLED`), and bitwise source preservation verified.
+### 5.1 Deliverable & Recommendation
+
+- **Stage 6A Status**: **Complete; independently accepted at `155d7bd` (`155d7bd222654e0bce79741d546046616f4f0815`)**.
+- **Stage 6A Deliverable**: Bounded offline semantic search evaluation (`docs/stage-6a-semantic-search-evaluation.md`), isolated executable Electron spike (`spikes/semantic-eval/`), and unit tests for pure vector/revision logic (`tests/main/semantic-spike-core.test.ts`).
+- **Recommendation**: CLIP ViT-B/32 quantized ONNX (`Xenova/clip-vit-base-patch32` @ `6b7c523703ae26e39be4b03774966f8571c7f523`, MIT license, $148.63\text{ MiB}$) executed in a worker thread via `onnxruntime-node@1.31.1` (MIT) + `@huggingface/tokenizers@0.2.0` (Apache-2.0) + `sharp@0.35.5` (Apache-2.0), paired with an exact linear scan over 512-d `Float32Array` vectors in `node:sqlite`.
+- **Proposed Product Choices (Not User-Approved)**: The **$50,000$-photo** semantic index cap ($97.66\text{ MiB}$ raw vector payload / $\sim 198.35\text{ MiB}$ SQLite table) and model provisioning choices ($148.63\text{ MiB}$ explicit checksum-verified download and/or local bundle import) are **proposed** engineering/product bounds, not user-approved decisions.
+
+### 5.2 Implementation-Host vs. Independent Reviewer Rerun Measurements (`155d7bd`)
+
+All verification results at `155d7bd` below were executed and reported by the independent reviewer (not re-run during this closeout):
+
+- **Repository Quality Gates (Independent Reviewer at `155d7bd`)**:
+  - `npm test`: **741 passed across 62 test files** (exit 0), including `tests/main/semantic-spike-core.test.ts` (8 tests).
+  - `npm run typecheck`: **Clean pass** (exit 0).
+  - `npm run lint`: **Clean pass** (exit 0).
+  - `npm run format:check`: **Clean pass** (exit 0).
+  - `npm run build`: **Clean pass** (exit 0).
+  - `node spikes/semantic-eval/fetch-model.mjs`: **Clean pass** (exit 0; verified all 7 cached files / $148.63\text{ MiB}$ against pinned SHA-256 digests with 0 network downloads).
+- **Electron Spike (`node spikes/semantic-eval/run-electron-spike.mjs` via `ELECTRON_RUN_AS_NODE=1`, exit 0)** & **Vector Benchmark (`node spikes/semantic-eval/benchmark-index.mjs`, exit 0)**:
+
+| Metric                                                                        | Implementation Run Value                                              | Independent Reviewer Rerun Value (`155d7bd`)                            | Evidence Scope / Notes                                                                                                                                                       |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Cold ONNX Session + Tokenizer Load**                                        | $367.36\text{ ms}$                                                    | $467.56\text{ ms}$                                                      | Vision + Text INT8 ONNX + `CLIPTokenizer`                                                                                                                                    |
+| **Warm Per-Image Embedding Mean**                                             | $28.37\text{ ms}$ ($2.85\text{ ms}$ decode + $25.52\text{ ms}$ infer) | $46.70\text{ ms}$ ($4.86\text{ ms}$ decode + $41.84\text{ ms}$ infer)   | $35.24\text{ img/s}$ (impl.) / $21.41\text{ img/s}$ (reviewer rerun)                                                                                                         |
+| **Warm Text Query Embedding Mean**                                            | $3.39\text{ ms}$                                                      | $5.32\text{ ms}$                                                        | 7/7 synthetic nonpersonal queries passed relevance rubric ($\text{margin} \ge +0.0901$)                                                                                      |
+| **Sampled Process-Wide RSS (`process.memoryUsage().rss`)**                    | $453.98\text{ MiB}$ (end: $449.91\text{ MiB}$)                        | $455.34\text{ MiB}$ (end: $451.64\text{ MiB}$)                          | Sampled post-inference max across entire OS process (main + worker + shared native DLLs); **not** worker-exclusive or continuous peak                                        |
+| **Sampled Worker-Isolate V8 Heap (`heapUsed`)**                               | $16.94\text{ MiB}$                                                    | $19.99\text{ MiB}$                                                      | Sampled post-inference max of worker V8 isolate heap                                                                                                                         |
+| **Headless Parent Event-Loop Delay Probe (`ELECTRON_RUN_AS_NODE=1`)**         | p95 = $16.49\text{ ms}$, max = $24.40\text{ ms}$                      | p95 = $16.28\text{ ms}$, max = $24.13\text{ ms}$                        | Headless parent Node loop probe only; does **not** establish `BrowserWindow`/IPC/renderer UI responsiveness                                                                  |
+| **Synthetic 512-d `Float32Array` Exact Scan (10,000 vectors)**                | $4.95\text{ ms}$ in-mem / $42.15\text{ ms}$ SQLite                    | $5.79\text{ ms}$ in-mem / $55.09\text{ ms}$ SQLite                      | Synthetic L2-normalized vectors                                                                                                                                              |
+| **Synthetic 512-d `Float32Array` Exact Scan (50,000 vectors — proposed cap)** | $26.78\text{ ms}$ in-mem / $202.15\text{ ms}$ SQLite                  | $34.21\text{ ms}$ in-mem / $300.06\text{ ms}$–$340.32\text{ ms}$ SQLite | Proposed $50,000$-photo cap (not yet user-approved)                                                                                                                          |
+| **Failure Modes, Cancellation & Source Preservation**                         | Verified                                                              | Verified                                                                | Missing model (`MISSING_MODEL`), HEIC (`unsupported`), corrupt JPEG (`DECODE_FAILED`), active cancellation (`CANCELLED` + worker recovery), 100% bitwise source preservation |
+
+### 5.3 Verification Scope Limitations & Retained Stage 6B+ Production Follow-Ups
+
+- **`ELECTRON_RUN_AS_NODE=1` Verification Boundary**: Executing under `electron.exe` with `ELECTRON_RUN_AS_NODE=1` proves N-API v6 native addon loading (`onnxruntime-node`), `sharp`, `@huggingface/tokenizers`, `worker_threads`, and `node:sqlite` inside the Electron 45.2.3 runtime binary. **It does not establish `BrowserWindow`/IPC responsiveness or packaged-app (`app.asar` / `app.asar.unpacked`) compatibility.**
+- **Retained Stage 6B+ Production Follow-Ups**:
+  1. **Correct Preprocessing Recipe Naming & Single-Pass Decode**: Rename the preprocessing version constant to reflect the actual bicubic kernel (`clip_vit_b32_224_bicubic_center_rgb_v1` matching `sharp.kernel.cubic` / CLIP `resample: 3`) and avoid double `sharp(buffer)` instantiation.
+  2. **Approved-Root Enforcement**: Enforce canonical `realpathSync` containment against registered catalog `approvedRoots` directly inside the production semantic worker alongside pre/post `stat` and stream-hash verification.
+  3. **Aggregate Worker & Resource Accounting**: Count terminating workers against the aggregate $\le 2$ live decode/inference worker cap until process `'exit'` and yield/pause background semantic indexing when interactive viewport thumbnail decodes are active.
+  4. **Real Unpacked Native-Runtime & Windowed Verification**: Exercise `onnxruntime-node` native binary resolution from `app.asar.unpacked` in a real `npm run build:unpack` smoke/verification script and verify `BrowserWindow`/IPC responsiveness in Stage 6B–6E.
 - **Scope Exclusions**: No production search UI, IPC, or catalog schema changes implemented in Stage 6A; header search placeholder untouched; model cache and spike `node_modules` gitignored and isolated from app bundles.
-- **Stage 6 Status**: In progress — Stage 6A Awaiting review; Substages 6B–6E Planned.
+- **Stage 6 Status**: In progress — Stage 6A Complete (independently accepted at `155d7bd`); Substages 6B–6E Planned.
 - **Git State**: Committed locally on `feat/stage-6a-semantic-evaluation` branched from `9b8faa7`. Do NOT push or merge.
