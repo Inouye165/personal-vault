@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substage 6B: Model provisioning, resumable semantic indexing, and persistent SQLite index is Awaiting review on `feat/stage-6b-semantic-index`; Substages 6C-6E are Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
+Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substage 6B: Model provisioning, resumable semantic indexing, and persistent SQLite index is Complete, independently accepted at `0b0c814`; Substages 6C-6E are Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status      | Acceptance                                      |
-| ----- | -------------------------------------------------------------- | ----------- | ----------------------------------------------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                       |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                       |
-| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                       |
-| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                       |
-| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a`        |
-| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`; 6B Awaiting review; 6C-6E Planned |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                         |
-| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                         |
+| Stage | Deliverable                                                    | Status      | Acceptance                                |
+| ----- | -------------------------------------------------------------- | ----------- | ----------------------------------------- |
+| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                 |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                 |
+| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                 |
+| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                 |
+| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a`  |
+| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`, 6B `0b0c814`; 6C-6E Planned |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                   |
+| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                   |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -173,15 +173,15 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ## Stage 6 - Semantic photo search
 
-**In progress; Substage 6A Complete (independently accepted at `155d7bd`); Substage 6B Awaiting review (`feat/stage-6b-semantic-index`); Substages 6C-6E Planned.**
+**In progress; Substages 6A and 6B Complete (independently accepted at `155d7bd` and `0b0c814`); Substages 6C-6E Planned.**
 
-| Substage | Deliverable                                                                  | Status          | Submission reference                | Acceptance reference |
-| -------- | ---------------------------------------------------------------------------- | --------------- | ----------------------------------- | -------------------- |
-| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete        | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
-| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Awaiting review | `feat/stage-6b-semantic-index`      | Pending              |
-| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Planned         | Pending                             | Pending              |
-| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned         | Pending                             | Pending              |
-| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned         | Pending                             | Pending              |
+| Substage | Deliverable                                                                  | Status   | Submission reference                | Acceptance reference |
+| -------- | ---------------------------------------------------------------------------- | -------- | ----------------------------------- | -------------------- |
+| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
+| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete | `feat/stage-6b-semantic-index`      | `0b0c814`            |
+| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Planned  | Pending                             | Pending              |
+| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned  | Pending                             | Pending              |
+| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned  | Pending                             | Pending              |
 
 ### Stage 6A - Offline semantic search feasibility evaluation and real-Electron spike
 
@@ -197,18 +197,18 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ### Stage 6B - Model provisioning, resumable semantic indexing, and persistent SQLite index
 
-**Awaiting review on `feat/stage-6b-semantic-index`.**
+**Complete; independently accepted at `0b0c814`.**
 
 - [x] Modular production model provisioning (`src/main/services/semantic/manifest.ts`, `model-manager.ts`) without importing runtime code from `spikes/`:
   - Pinned `Xenova/clip-vit-base-patch32` @ `6b7c523703ae26e39be4b03774966f8571c7f523` (7 files, 155,851,918 bytes / ~148.63 MiB), preprocessing recipe `clip_vit_b32_224_bicubic_center_rgb_v1` (actual bicubic `sharp.kernel.cubic` center-crop 224x224 RGB), and 512-d `Float32Array` vector dimensions.
   - Explicit in-app download (`semantic:download-model`) and offline folder import (`semantic:import-model-folder` with main-process native folder picker) displaying the ~148.63 MiB model requirement before installation; zero automatic startup or inference downloads.
-  - App-owned storage in `<userData>/models/` with canonical realpath separation against registered source roots and active vault storage; exclusive staging (`.pv_model_staging_<pid>_<uuid>`), off-main SHA-256 verification (`validate_files` worker task), safe atomic publication (`model_manifest.json`), startup cleanup of abandoned staging directories, and preservation of existing verified installs on failed replacement.
+  - App-owned storage in `<userData>/models/` with canonical realpath separation against registered source roots and active vault storage; exclusive staging, off-main SHA-256 verification, safe atomic publication with completion receipt, startup cleanup of abandoned staging directories, and preservation of existing verified installs on failed replacement.
   - Strict download policy: HTTPS only to approved Hugging Face / XetHub CDN origins (`huggingface.co`, `cas-bridge.xethub.hf.co`, `cdn-lfs.hf.co`, `cdn-lfs-us-1.hf.co`, `cdn-lfs-eu-1.hf.co`), redirect hop limit (<= 5), exact byte size and SHA-256 validation, and zero outbound transmission of personal files, metadata, or queries.
   - Pre-load integrity revalidation off main before starting or resuming any indexing job.
   - `THIRD_PARTY_NOTICES.md` included in packaged builds (`electron-builder.json5`) alongside `asarUnpack` rules for `onnxruntime-node` native binaries (`app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node`).
 - [x] Persistent SQLite index (Migration 9, `CURRENT_SCHEMA_VERSION = 9` in `src/main/services/catalog/migrations.ts`):
   - `photo_semantic_embeddings`, `semantic_index_jobs`, and `semantic_index_job_items` tables keeping derived vectors strictly separate from immutable recorded facts.
-  - Vectors bound to `file_location_id`, `discovery_observation_id`, `content_sha256`, `content_revision`, `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`, and `vector_dimensions = 512`, validated for finite float32 values, L2 unit normalization (`||v||_2 ≈ 1.0`), and exact 2,048-byte blob length.
+  - Vectors bound to `file_location_id`, `discovery_observation_id`, `content_sha256`, `content_revision`, `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`, and `vector_dimensions = 512`, validated for finite float32 values, L2 unit normalization, and exact 2,048-byte blob length.
   - Disk-backed job scope snapshotting without any 50,000-photo permanent catalog cap (verified at 50,001 photos with bounded paginated batches in `tests/main/catalog-semantic-index.test.ts`).
   - Content-addressed embedding reuse only after off-main live source file SHA-256 and sub-millisecond timestamp verification (`verify_source` worker action); pre-commit catalog revision revalidation (`REVISION_MISMATCH`); model/recipe invalidation (`invalidateEmbeddingsForModelOrRecipe`).
 - [x] Shared worker pool & resource bounds (`src/main/services/thumbnails/worker.ts`, `coordinator.ts`, `src/main/services/semantic/coordinator.ts`):
@@ -217,14 +217,15 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
   - Enforces <= 2 live image-processing workers (counting terminating workers until `'exit'`), <= 1 active `semantic_embed` task, <= 1 worker holding a loaded ONNX session, and <= 64 total queued jobs (reserving >= 32 slots for interactive high-priority thumbnail decodes and yielding background indexing while interactive decodes are active).
   - Prompt IPC acknowledgment on start/resume; cooperative pause/cancel and immediate active worker termination on cancel/timeout; startup recovery marking running/paused jobs `interrupted`.
 - [x] Narrow typed IPC (`semantic:*`) with bidirectional Zod validation and sender checks, plus compact `SemanticIndexPanel` in the Photos tab with honest coverage/progress counts, stale-response guards, and clear messaging that indexing prepares offline semantic search for Stage 6D without fabricating factual labels.
-- [x] Real-Electron verification (`npm run verify:semantic-index` 10/10 passed in built mode; `npm run verify:semantic-index:unpacked` 11/11 passed in unpacked mode) and all 21 quality/verification gates passing (exit 0).
+- [x] Independent reviewer verification passed at `0b0c814`: 827 tests passed across 67 test files (exit 0); all 21 required quality, build, and real-Electron verification commands exited with code 0 (`verify:semantic-index` passed 10/10 in built mode; `verify:semantic-index:unpacked` passed 11/11 in unpacked mode with native `app.asar.unpacked` `onnxruntime_binding.node` verification and zero bundled `spikes/`; all 13 prior-stage regression suites passed).
+- [x] Scope boundaries retained: CPU-only execution baseline preserved; discovered source files strictly read-only and invariant across all operations; natural-language search UI deferred to Stage 6D; Stage 6C (read-only EXIF extraction and technical metadata filters) identified as the next planned assignment.
 
 ### Stage 6 Checklist
 
 - [x] Evaluate local embedding models and resource/packaging requirements (6A Complete; independently accepted at `155d7bd`).
-- [ ] Implement content-based photo search and a persistent search index (6B Awaiting review; 6D Planned).
+- [ ] Implement content-based photo search and a persistent search index (6B Complete; 6D Planned).
 - [ ] Filter by available date, camera, lens, resolution, and file-type metadata (6C/6D Planned).
-- [ ] Preserve unknown dates/locations and separate inferences from recorded facts (6B Awaiting review; 6C-6E Planned).
+- [ ] Preserve unknown dates/locations and separate inferences from recorded facts (6B Complete; 6C-6E Planned).
 
 Exit: users can find photos by content and available metadata using the supported offline workflow.
 
