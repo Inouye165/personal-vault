@@ -236,6 +236,9 @@ describe('Stage 6C — Photo Metadata Parser, Provenance & Normalization', () =>
     expect(badLeapRes.captureLocalIso).toBeNull()
     expect(badLeapRes.rawCaptureDateText).toBe('2023:02:29 12:00:00')
     expect(badLeapRes.captureDateParseError).toMatch(/calendar|invalid/i)
+    expect(badLeapRes.captureDateConflict).toContain(
+      'DateTimeOriginal ("2023:02:29 12:00:00") is invalid while DateTimeDigitized ("2023:03:01 12:00:00") is present; keeping capture date Unknown rather than masking invalid primary tag'
+    )
 
     // Invalid timezone offset (+29:00) -> rejected with raw evidence preserved
     const badOffsetBuf = await createJpegFixture({
@@ -256,6 +259,62 @@ describe('Stage 6C — Photo Metadata Parser, Provenance & Normalization', () =>
     expect(badOffsetRes.captureOffsetMinutes).toBeNull()
     expect(badOffsetRes.captureDateParseError).toMatch(/offset/i)
     expect(badOffsetRes.rawMetadataJson).toContain('+29:00')
+  })
+
+  it('preserves Unknown capture date when DateTimeOriginal is present but invalid, even if DateTimeDigitized is valid (conservative policy)', async () => {
+    // 1. Syntactically malformed DateTimeOriginal paired with valid DateTimeDigitized
+    const corruptOrigBuf = await createJpegFixture({
+      exifTags: [
+        { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: 'INVALID:DATE:SYNTAX' },
+        { tagId: EXIF_TAG_IDS.DateTimeDigitized, type: 'ascii', value: '2024:08:12 14:30:00' },
+        { tagId: EXIF_TAG_IDS.OffsetTimeDigitized, type: 'ascii', value: '+02:00' }
+      ]
+    })
+    const corruptOrigPath = join(tempDir, 'corrupt-orig-valid-digi.jpg')
+    writeFileSync(corruptOrigPath, corruptOrigBuf)
+
+    const corruptRes = await extractPhotoMetadataFromFile({
+      sourcePath: corruptOrigPath,
+      recordedExtension: '.jpg',
+      approvedRoots: [tempDir]
+    })
+
+    // Conservative policy: capture date remains Unknown (null)
+    expect(corruptRes.captureCalendarDate).toBeNull()
+    expect(corruptRes.captureLocalIso).toBeNull()
+    expect(corruptRes.captureUtcEpochMs).toBeNull()
+    expect(corruptRes.captureDateSourceTag).toBe('DateTimeOriginal')
+    expect(corruptRes.rawCaptureDateText).toBe('INVALID:DATE:SYNTAX')
+    expect(corruptRes.captureDateParseError).toMatch(/Malformed EXIF timestamp/i)
+    expect(corruptRes.captureDateConflict).toBe(
+      'DateTimeOriginal ("INVALID:DATE:SYNTAX") is invalid while DateTimeDigitized ("2024:08:12 14:30:00") is present; keeping capture date Unknown rather than masking invalid primary tag'
+    )
+
+    // 2. Impossible calendar date (Feb 29 on non-leap year 2025) paired with valid DateTimeDigitized
+    const impossibleOrigBuf = await createJpegFixture({
+      exifTags: [
+        { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:02:29 18:00:00' },
+        { tagId: EXIF_TAG_IDS.DateTimeDigitized, type: 'ascii', value: '2025:03:01 09:00:00' }
+      ]
+    })
+    const impossibleOrigPath = join(tempDir, 'impossible-orig-valid-digi.jpg')
+    writeFileSync(impossibleOrigPath, impossibleOrigBuf)
+
+    const impossibleRes = await extractPhotoMetadataFromFile({
+      sourcePath: impossibleOrigPath,
+      recordedExtension: '.jpg',
+      approvedRoots: [tempDir]
+    })
+
+    expect(impossibleRes.captureCalendarDate).toBeNull()
+    expect(impossibleRes.captureLocalIso).toBeNull()
+    expect(impossibleRes.captureUtcEpochMs).toBeNull()
+    expect(impossibleRes.captureDateSourceTag).toBe('DateTimeOriginal')
+    expect(impossibleRes.rawCaptureDateText).toBe('2025:02:29 18:00:00')
+    expect(impossibleRes.captureDateParseError).toBe('Invalid calendar date 2025-02-29')
+    expect(impossibleRes.captureDateConflict).toBe(
+      'DateTimeOriginal ("2025:02:29 18:00:00") is invalid while DateTimeDigitized ("2025:03:01 09:00:00") is present; keeping capture date Unknown rather than masking invalid primary tag'
+    )
   })
 
   it('computes orientation-adjusted display dimensions and rejects excessive/impossible dimensions safely', async () => {

@@ -136,6 +136,10 @@ if (parentPort) {
           if (message.stuck || process.env.PV_TEST_STUCK_METADATA === '1') {
             return
           }
+          const workerDelay = Number(process.env.PV_TEST_WORKER_METADATA_DELAY_MS ?? 0)
+          if (workerDelay > 0) {
+            await new Promise((r) => setTimeout(r, workerDelay))
+          }
           const extracted = await extractPhotoMetadataFromFile(
             message.params as ExtractPhotoMetadataInput
           )
@@ -153,6 +157,10 @@ if (parentPort) {
         if (message.action === 'semantic_embed') {
           if (message.stuck || process.env.PV_TEST_STUCK_SEMANTIC === '1') {
             return
+          }
+          const workerDelay = Number(process.env.PV_TEST_WORKER_SEMANTIC_DELAY_MS ?? 0)
+          if (workerDelay > 0) {
+            await new Promise((r) => setTimeout(r, workerDelay))
           }
           const result = await decodeSemanticEmbedding(message.params as SemanticDecodeInputParams)
           const mem = process.memoryUsage()

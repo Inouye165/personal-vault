@@ -1353,8 +1353,8 @@ async function main() {
     const port3 = await getFreePort()
     currentApp = await launchApp(userDataDir, port3, {
       PV_TEST_MODEL_IMPORT_DIR: offlineModelFixtureDir,
-      PV_METADATA_ITEM_DELAY_MS: '35',
-      PV_SEMANTIC_ITEM_DELAY_MS: '35'
+      PV_TEST_WORKER_METADATA_DELAY_MS: '45',
+      PV_TEST_WORKER_SEMANTIC_DELAY_MS: '45'
     })
     cdp = currentApp.cdp
 
@@ -1482,8 +1482,19 @@ async function main() {
       })()`
     )
 
-    // Launch BOTH semantic indexing and metadata extraction simultaneously!
+    // Start semantic indexing first so the vision session initializes
     await evaluate(cdp, `window.api.startSemanticIndexing()`)
+
+    // Await semantic indexing active in worker pool before launching metadata extraction
+    for (let i = 0; i < 80; i++) {
+      const diag = await evaluate(cdp, `window.api.getPhotosDiagnostics()`)
+      if ((diag?.activeSemanticTasks ?? 0) > 0 || (diag?.semanticModelLoadedWorkers ?? 0) > 0) {
+        break
+      }
+      await sleep(80)
+    }
+
+    // Launch metadata extraction so BOTH jobs compete concurrently across the worker pool!
     await evaluate(cdp, `document.querySelector('[data-testid="metadata-start-btn"]').click()`)
 
     const ipcLatencies = []
@@ -1500,11 +1511,12 @@ async function main() {
     let peakMountedCells = 0
     let peakRendererJsHeapBytes = 0
     let sawConcurrentActivity = false
+    let sawSimultaneousActiveTasks = false
 
     let finalMetaProg = null
     let finalSemProg = null
 
-    for (let step = 0; step < 300; step++) {
+    for (let step = 0; step < 400; step++) {
       const scrollPos = (step % 12) * 320
       await evaluate(
         cdp,
@@ -1532,6 +1544,9 @@ async function main() {
         peakQueuedJobs = Math.max(peakQueuedJobs, diag.queuedJobs)
         if ((diag.activeSemanticTasks ?? 0) > 0 || (diag.activeMetadataTasks ?? 0) > 0) {
           sawConcurrentActivity = true
+        }
+        if ((diag.activeSemanticTasks ?? 0) > 0 && (diag.activeMetadataTasks ?? 0) > 0) {
+          sawSimultaneousActiveTasks = true
         }
         if (typeof diag.mainEventLoopDelayP95Ms === 'number') {
           peakMainEventLoopP95 = Math.max(peakMainEventLoopP95, diag.mainEventLoopDelayP95Ms)
@@ -1572,7 +1587,7 @@ async function main() {
         finalSemProg = sProg
         break
       }
-      await sleep(100)
+      await sleep(50)
     }
 
     await evaluate(cdp, `window.__recording = false`)
@@ -1589,6 +1604,11 @@ async function main() {
     if (!sawConcurrentActivity) {
       throw new Error('Expected active worker sampling during concurrent metadata + semantic run')
     }
+    if (!sawSimultaneousActiveTasks) {
+      throw new Error(
+        'Expected observed simultaneous active metadata and semantic worker tasks in diagnostics'
+      )
+    }
     if (finalMetaProg.coverage.unprocessedCount !== 0) {
       throw new Error(
         `Expected 0 unprocessed photos after final metadata run, got: ${finalMetaProg.coverage.unprocessedCount}`
@@ -1598,6 +1618,11 @@ async function main() {
     const frameTimes = (Array.isArray(rawFrameTimes) ? rawFrameTimes : [])
       .filter((t) => typeof t === 'number' && t > 0)
       .sort((a, b) => a - b)
+    if (frameTimes.length < 50) {
+      throw new Error(
+        `Meaningful nonempty frame-sample set required; sampled only ${frameTimes.length} frames (bound >= 50)`
+      )
+    }
     const frameP95 = frameTimes[Math.floor(frameTimes.length * 0.95)] ?? 0
     const frameMax = frameTimes[frameTimes.length - 1] ?? 0
 
@@ -1652,6 +1677,9 @@ async function main() {
     }
     if (peakActiveMetadataTasks > 1) {
       throw new Error(`Peak active metadata tasks (${peakActiveMetadataTasks}) exceeded bound of 1`)
+    }
+    if (peakLoadedModelWorkers > 1) {
+      throw new Error(`Peak loaded model workers (${peakLoadedModelWorkers}) exceeded bound of 1`)
     }
     if (peakQueuedJobs > 64) {
       throw new Error(`Peak queued jobs (${peakQueuedJobs}) exceeded bound of 64`)
