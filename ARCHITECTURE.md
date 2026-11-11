@@ -83,19 +83,26 @@ src/
 │       │   ├── errors.ts     # Domain errors (ActiveJobConflictError, JobNotFoundError, JobStateError)
 │       │   ├── types.ts      # Job options, progress, and event contracts
 │       │   └── index.ts      # Public jobs exports
-│       ├── thumbnails/    # Stage 5A/5C/6B: shared decode, dHash, and semantic inference worker pool
+│       ├── thumbnails/    # Stage 5A/5C/6B/6C: shared decode, dHash, semantic inference, and EXIF extraction worker pool
 │       │   ├── coordinator.ts # ThumbnailCoordinator (<=2 live workers, <=64 queue, priority scheduling)
 │       │   ├── decoder.ts    # Sharp decode & 224x224 bicubic CLIP preprocessing outside main
-│       │   ├── worker.ts     # Node worker_threads entry (thumbnails, dHash, ONNX CLIP inference, off-main SHA-256)
+│       │   ├── worker.ts     # Node worker_threads entry (thumbnails, dHash, ONNX CLIP, EXIF metadata, off-main SHA-256)
 │       │   ├── cache.ts      # Disposable WebP disk cache
 │       │   └── types.ts      # Worker request/response discriminated unions
-│       └── semantic/      # Stage 6B: offline CLIP model provisioning & resumable semantic index coordinator
-│           ├── manifest.ts   # Pinned model identity, 7 artifact digests/sizes, recipe, approved CDN hosts
-│           ├── vector.ts     # 512-d Float32Array validation, L2 normalization, and blob conversion
-│           ├── model-manager.ts # SemanticModelManager (download, offline import, staging, off-main verification)
-│           ├── coordinator.ts # SemanticIndexCoordinator (resumable job execution, reuse verification, yielding)
-│           ├── types.ts      # Model status, job progress, and coordinator interfaces
-│           └── index.ts      # Public semantic exports
+│       ├── semantic/      # Stage 6B: offline CLIP model provisioning & resumable semantic index coordinator
+│       │   ├── manifest.ts   # Pinned model identity, 7 artifact digests/sizes, recipe, approved CDN hosts
+│       │   ├── vector.ts     # 512-d Float32Array validation, L2 normalization, and blob conversion
+│       │   ├── model-manager.ts # SemanticModelManager (download, offline import, staging, off-main verification)
+│       │   ├── coordinator.ts # SemanticIndexCoordinator (resumable job execution, reuse verification, yielding)
+│       │   ├── types.ts      # Model status, job progress, and coordinator interfaces
+│       │   └── index.ts      # Public semantic exports
+│       └── metadata/      # Stage 6C: read-only EXIF technical metadata extraction & normalization
+│           ├── types.ts      # Technical metadata, date interpretation, facet, and job contracts
+│           ├── date-policy.ts # EXIF DateTimeOriginal/DateTimeDigitized precedence, offset/wall-clock & leap-year validation
+│           ├── normalize.ts  # Display dimensions (orientation 1..8), camera/lens normalization, format mismatch checks
+│           ├── extractor.ts  # Worker-safe header & EXIF parser (sharp header + exifreader@4.54.0, no full raster decode)
+│           ├── coordinator.ts # PhotoMetadataCoordinator (snapshotted scope, live SHA-256 reuse, cancel/resume)
+│           └── index.ts      # Public metadata service exports
 ├── preload/
 │   ├── index.ts           # Exposes window.api via contextBridge; validates every response
 │   └── index.d.ts         # TypeScript declaration for window.api
@@ -124,12 +131,13 @@ src/
 - Original path, original filename, byte size, filesystem creation timestamp, filesystem modification timestamp, SHA-256 hash.
 - Cannot be edited, guessed, or modified by classification engines.
 
-### 4.2 Inferred Values (Derived & Mutable)
+### 4.2 Extracted & Inferred Values (Derived & Provenance-Tagged)
 
-- Extracted or inferred by heuristics, OCR, or local AI classification models.
-- Inferred capture date (from EXIF or filename heuristic), inferred location, document category (e.g. `receipts`, `legal`, `instructions`).
-- Always recorded alongside a confidence score and provenance marker.
-- When capture dates or GPS coordinates are not present, they remain explicit `null` / `undefined`.
+- Extracted from embedded container metadata or inferred by OCR / local AI models, strictly separated from recorded filesystem facts.
+- Photograph technical metadata (Stage 6C): raw EXIF tag strings, parser recipe version (`exif_tech_v1`), encoded dimensions & EXIF orientation, orientation-adjusted display dimensions, camera/lens normalized keys, and interpreted capture dates derived solely from EXIF `DateTimeOriginal` (or documented `DateTimeDigitized` fallback) — never fabricated from filesystem creation/modification times, EXIF modification `DateTime`, or filenames.
+- Document category inferences (Stage 7, e.g. `receipts`, `legal`, `instructions`) and semantic embeddings (Stage 6B).
+- Always recorded alongside explicit provenance markers (source tag, parser/model recipe, content revision).
+- When capture dates, camera/lens tags, dimensions, or locations are absent or invalid, they remain explicit `null` ("Unknown").
 
 ---
 
@@ -465,3 +473,29 @@ src/
       - Aggregate worker queue: **$\le 64$ queued requests**, reserving $\ge 32$ slots for high-priority interactive thumbnail requests; `SemanticIndexCoordinator` yields whenever high-priority thumbnail decodes are queued or active.
       - Thumbnail scroll cancellation isolation: `ThumbnailCoordinator.cancelRequest(locationId)` cancels only thumbnail `decode` and `validate_cache` items, never terminating background `fingerprint` or `semantic_embed` worker tasks for the same `locationId`.
       - Packaging: `electron-builder.json5` unpacks `node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**/*` alongside `sharp` into `app.asar.unpacked`, bundles `THIRD_PARTY_NOTICES.md`, and excludes `spikes/` and model caches.
+
+16. **Photo Metadata Extraction & Fact/Inference-Separated SQL Filters (Stage 6C)**:
+    - **Inviolable Principles & Four-Way Provenance Separation**:
+      - Source files remain strictly read-only (`open(path, 'r')`) inside the worker thread, enforcing `approvedRoots` canonical containment, symlink/junction rejection, pre/post descriptor `fstat` stability, sub-millisecond `mtimeMs`/`birthtimeMs` verification, and streaming SHA-256 verification.
+      - Separates four distinct layers: (1) immutable filesystem observations & verified SHA-256 hashes (`file_locations`, `discovery_observations`, `hash_observations`); (2) extracted technical metadata bound to `parser_recipe_version = 'exif_tech_v1'` and `content_revision` (`photo_technical_metadata`, preserving bounded `raw_tags_json` evidence); (3) interpreted capture dates derived from EXIF tags; and (4) user review annotations (`photo_annotations`, `collection_memberships`) and machine embeddings (`photo_semantic_embeddings`).
+      - Works completely offline and without requiring a provisioned semantic model. GPS coordinates, maps, reverse geocoding, metadata editing, and writing EXIF are excluded.
+    - **Parser Selection, Licensing & Header-Only Inspection**:
+      - Uses `exifreader@4.54.0` (MPL-2.0, zero transitive runtime dependencies, locked exact version; documented in `THIRD_PARTY_NOTICES.md` and bundled into `out/main/thumbnail_worker.js` via `electron.vite.config.ts` `externalizeDepsPlugin({ exclude: ['exifreader'] })` for unpacked ASAR compatibility) alongside `sharp@0.35.5` header inspection (`sharp(buffer).metadata()`), avoiding full raster pixel decoding solely to read technical metadata.
+      - Inspects container magic bytes (`jpeg`, `png`, `webp`, `gif`, `tiff`, `avif`, `heic`, `cr2`, `nef`, `arw`, `dng`, `orf`, `rw2`, `raf`) independently of filename extensions. Apple HEIC/HEIF without patent-encumbered HEVC codecs and camera RAW containers report honest `unsupported` status (`UNSUPPORTED_FORMAT`) rather than masquerading as empty metadata.
+    - **Capture-Date Precedence, Timezone Honesty & Conflict Policy (`date-policy.ts`)**:
+      - **Precedence**: Prefers valid EXIF `DateTimeOriginal` (combined with `OffsetTimeOriginal` and `SubSecTimeOriginal`). Falls back to valid EXIF `DateTimeDigitized` (`CreateDate`, combined with `OffsetTimeDigitized` and `SubSecTimeDigitized`) only when `DateTimeOriginal` is absent or fails validation, recording `capture_date_source_tag = 'DateTimeDigitized'` (and recording a parse-error / fallback conflict note when `DateTimeOriginal` was present yet malformed). Image modification tags (`DateTime` / `ModifyDate`), filesystem `birthtimeMs`/`mtimeMs`, and filenames are **never** used to populate capture dates.
+      - **Timezone Honesty**: Timestamps carrying a valid explicit offset (`Z` or `±HH:MM` within `-14:00..+14:00`) record `capture_timezone_kind = 'explicit_offset'`, `capture_offset_minutes`, and `capture_utc_ms`. Timestamps without an offset record `capture_timezone_kind = 'local_wall_clock_unknown_tz'` with `capture_offset_minutes = NULL` and `capture_utc_ms = NULL` — never coerced to the host timezone or UTC.
+      - **Calendar Validation & Range Filtering**: Validates real Gregorian calendar dates (including leap-year rules for February 29), 24-hour clock bounds, subsecond digits (`<= 9` digits), and tag conflicts (such as valid `DateTimeOriginal` vs. differing `DateTimeDigitized` calendar date, or malformed offset strings). Date-range SQL filters compare `capture_calendar_date` (`YYYY-MM-DD` recorded capture wall-clock date) deterministically without host-timezone dependence. Raw tag strings remain preserved in `raw_tags_json` when interpretation fails.
+    - **Dimensions, Camera/Lens Normalization & File-Type Basis (`normalize.ts`)**:
+      - Preserves `encoded_width_px`, `encoded_height_px`, and EXIF `exif_orientation` (`1..8`), rejecting impossible or excessive dimensions (`< 1`, `> 100,000` px per axis, or `> 100,000,000` pixels). Computes orientation-adjusted `display_width_px` and `display_height_px` (orientations `5..8` swap width and height); SQL minimum width/height filters (`minWidthPx`, `minHeightPx`) apply consistently to `display_width_px` and `display_height_px`.
+      - Preserves sanitized original `camera_make_raw`, `camera_model_raw`, and `lens_model_raw` strings (`<= 256` chars, Unicode NFC, control/null bytes stripped) alongside separate lowercase normalized matching keys (`camera_display`, `camera_normalized`, `lens_normalized`), deduplicating redundant Make prefixes in Model strings without inventing model labels.
+      - Keeps `recorded_extension` (filesystem suffix) strictly separate from `detected_format` (verified container header) and flags discrepancies via `extension_format_mismatch = 1`. File-type SQL filters explicitly label whether matching uses `detected_format` or `filename_extension`.
+    - **SQLite Migration 10 (`CURRENT_SCHEMA_VERSION = 10`), Bounded Facets & Combined SQL Filters**:
+      - Adds `photo_technical_metadata` (revision-bound with `extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')`, `is_current` partial unique index, content-reuse index, and filter/facet indexes on `capture_calendar_date`, `camera_normalized`, `lens_normalized`, `display_width_px`/`display_height_px`, and `detected_format`), `photo_metadata_jobs`, and `photo_metadata_job_items`.
+      - Effective status distinguishes `unprocessed` (no metadata row yet) and `stale` (`content_revision` or `parser_recipe_version` superseded) from processed terminal rows (`extracted`, `no_metadata`, `unsupported`, `failed`). `Unknown` metadata filters match only processed photos whose target field is `NULL` (`m.id IS NOT NULL`), ensuring incomplete extraction coverage never masquerades as exhaustive `Unknown` results.
+      - Combines capture date range (`+ includeUnknownCaptureDate`), camera (`+ onlyUnknownCamera`), lens (`+ onlyUnknownLens`), minimum display width/height (`+ includeUnknownDimensions`), and file type (`detected_format` or `filename_extension` `+ onlyUnknownDetectedFormat`) with Stage 5B rating, flag, and collection filters using SQL `AND` before `LIMIT ? OFFSET ?` pagination.
+      - Camera, lens, and file-type option lists use bounded searchable/paginated SQL facet queries (`getPhotoMetadataFacet`, `LIMIT <= 100`, `OFFSET >= 0`) with accurate `unknownCount` and `unextractedCount`, avoiding whole-catalog materialization.
+    - **Shared Worker Governance, Resumable Scope & Stale-Response Safety**:
+      - Executes inside `ThumbnailCoordinator` (`<= 2` live workers including terminating, `<= 1` active `extract_photo_metadata` task, `<= 1` active `semantic_embed` task, `<= 64` queue reserving `>= 8` interactive slots and yielding whenever high-priority thumbnail decodes are queued or active, `15,000 ms` timeout, `<= 8 MiB` EXIF buffer cap, `<= 32 KiB` raw tag JSON cap).
+      - `PhotoMetadataCoordinator` snapshots exact authorized catalog scope in `photo_metadata_job_items` in bounded 500-item batches (no permanent collection-size cap); resume processes only originally snapshotted `pending` items; unchanged content reuse requires live off-main source SHA-256 verification (`verify_source`); commits revalidate catalog `content_revision` transactionally (`REVISION_MISMATCH`).
+      - Narrow typed IPC (`metadata:start-extraction`, `metadata:pause-extraction`, `metadata:resume-extraction`, `metadata:cancel-extraction`, `metadata:get-progress`, `metadata:progress-event`, `metadata:get-photo-detail`, `metadata:get-facets`, plus expanded `photos:get-page`) with bidirectional Zod schemas, top-level sender validation, and renderer monotonic sequence/generation guards (`usePhotos.ts`, `usePhotoMetadata.ts`, `PhotoMetadataFilterPanel.tsx`, `PhotosPanel.tsx`).

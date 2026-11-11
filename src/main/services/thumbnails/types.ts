@@ -46,6 +46,7 @@ export interface ThumbnailDiagnostics {
   readonly terminatingWorkers?: number
   readonly liveWorkers?: number
   readonly activeSemanticTasks?: number
+  readonly activeMetadataTasks?: number
   readonly semanticModelLoadedWorkers?: number
   readonly queuedJobs: number
   readonly totalDecodes: number
@@ -157,4 +158,40 @@ export type FingerprintJobResult =
       readonly locationId: number
       readonly code: string
       readonly message: string
+    }
+
+export interface MetadataExtractRequestParams {
+  readonly locationId: number
+  readonly sourcePath: string
+  readonly recordedExtension: string
+  readonly expectedByteSize: number
+  readonly expectedMtimeMs: number | null
+  readonly expectedSha256?: string | null
+  readonly priority?: 'low' | 'normal'
+}
+
+export type MetadataExtractJobResult =
+  | {
+      readonly status: 'ok'
+      readonly locationId: number
+      readonly extracted: import('../metadata/types').ExtractedPhotoMetadataResult
+    }
+  | {
+      readonly status: 'error'
+      readonly locationId: number
+      readonly code: string
+      readonly message: string
+    }
+
+export type MetadataSourceVerifyResult =
+  | {
+      readonly ok: true
+      readonly sha256: string
+      readonly observedByteSize: number
+      readonly observedMtimeMs: number
+    }
+  | {
+      readonly ok: false
+      readonly errorCode: string
+      readonly errorMessage: string
     }

@@ -28,6 +28,8 @@
     "verify:similarity:unpacked": "node scripts/verify-electron-similarity.mjs --mode=unpacked",
     "verify:semantic-index": "node scripts/verify-electron-semantic-index.mjs",
     "verify:semantic-index:unpacked": "node scripts/verify-electron-semantic-index.mjs --mode=unpacked",
+    "verify:metadata": "node scripts/verify-electron-metadata.mjs",
+    "verify:metadata:unpacked": "node scripts/verify-electron-metadata.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -38,6 +40,7 @@
   },
   "dependencies": {
     "@huggingface/tokenizers": "0.2.0",
+    "exifreader": "4.54.0",
     "lucide-react": "^1.16.0",
     "onnxruntime-node": "1.31.1",
     "react": "^19.0.0",

@@ -34,7 +34,7 @@ function devInlineScriptHashes(): Plugin {
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['exifreader'] })],
     resolve: {
       alias: {
         '@shared': resolve('src/shared')

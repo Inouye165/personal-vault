@@ -22,14 +22,22 @@ import {
   FolderPlus,
   Edit2
 } from 'lucide-react'
-import { usePhotos, PHOTO_BOUNDS } from '../hooks/usePhotos'
+import {
+  usePhotos,
+  PHOTO_BOUNDS,
+  countActiveMetadataFilters,
+  hasActiveMetadataFilters
+} from '../hooks/usePhotos'
 import { usePhotoReview } from '../hooks/usePhotoReview'
+import { usePhotoMetadata } from '../hooks/usePhotoMetadata'
 import { SimilarityReviewPanel } from './SimilarityReviewPanel'
 import { SemanticIndexPanel } from './SemanticIndexPanel'
+import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import type {
   PhotoFlagFilter,
   PhotoItem,
   PhotoRatingFilter,
+  PhotoTechnicalMetadataDetail,
   ThumbnailResult
 } from '../../../shared/validation/ipc-schemas'
 import type { PhotoRating } from '../../../shared/types/domain'
@@ -50,6 +58,90 @@ function formatDate(ms: number | null): string {
     minute: '2-digit',
     second: '2-digit'
   })
+}
+
+function renderInferredCaptureDateValue(
+  photo: PhotoItem,
+  detail: PhotoTechnicalMetadataDetail | null
+): ReactElement | string {
+  const meta = detail?.currentMetadata ?? null
+  const effStatus = detail?.effectiveStatus ?? 'unprocessed'
+
+  if (meta?.captureLocalIso) {
+    const hasSubsecInIso = /\.\d+$/.test(meta.captureLocalIso)
+    const formattedIso = `${meta.captureLocalIso}${!hasSubsecInIso && meta.captureSubseconds ? `.${meta.captureSubseconds}` : ''}${meta.captureOffsetText ?? ''}`
+    const tzLabel =
+      meta.captureTimezoneStatus === 'offset_present'
+        ? `Explicit EXIF offset (${meta.captureOffsetText})`
+        : meta.captureTimezoneStatus === 'local_wall_clock_unknown_tz'
+          ? 'Local wall-clock time (timezone unknown — no EXIF offset)'
+          : meta.captureTimezoneStatus === 'invalid_offset'
+            ? 'Local wall-clock time (timezone unknown — invalid EXIF offset)'
+            : 'Timezone unknown'
+
+    return (
+      <div className="metadata-provenance-stack">
+        <span className="mono-value">{formattedIso}</span>
+        <span className="sub-text">{tzLabel}</span>
+        {meta.captureDateSourceTag && (
+          <span className="sub-text">Derived from EXIF `{meta.captureDateSourceTag}`</span>
+        )}
+        {meta.captureDateConflict && (
+          <span className="metadata-warning-inline">{meta.captureDateConflict}</span>
+        )}
+      </div>
+    )
+  }
+
+  if (!detail || effStatus === 'unprocessed') {
+    if (photo.inferredCaptureTimeMs !== null) {
+      return formatDate(photo.inferredCaptureTimeMs)
+    }
+    return 'Unknown (not extracted yet)'
+  }
+
+  if (effStatus === 'stale') {
+    return 'Unknown (not extracted yet — stale revision)'
+  }
+
+  if (meta?.captureDateParseError) {
+    return (
+      <div className="metadata-provenance-stack">
+        <span>Unknown</span>
+        <span className="metadata-warning-inline">
+          Invalid EXIF tag ({meta.captureDateParseError})
+        </span>
+      </div>
+    )
+  }
+
+  if (effStatus === 'unsupported') {
+    return 'Unknown (unsupported image format)'
+  }
+
+  if (effStatus === 'failed') {
+    return 'Unknown (extraction failed)'
+  }
+
+  return 'Unknown'
+}
+
+function formatEffectiveExtractionStatus(detail: PhotoTechnicalMetadataDetail | null): string {
+  if (!detail || detail.effectiveStatus === 'unprocessed') {
+    return 'Not extracted yet'
+  }
+  switch (detail.effectiveStatus) {
+    case 'extracted':
+      return 'Extracted'
+    case 'no_metadata':
+      return 'Extracted (no embedded EXIF)'
+    case 'unsupported':
+      return `Unsupported format${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
+    case 'failed':
+      return `Extraction failed${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
+    case 'stale':
+      return 'Stale (source or parser recipe changed; re-run extraction)'
+  }
 }
 
 interface PhotoCardCellProps {
@@ -168,10 +260,13 @@ export function PhotosPanel() {
     ratingFilter,
     flagFilter,
     collectionId,
+    metadataFilters,
+    filterGeneration,
     selectPhoto,
     setRatingFilter,
     setFlagFilter,
     setCollectionId,
+    updateMetadataFilters,
     resetFilters,
     updatePhotoLocal,
     removePhotoFromFilterView,
@@ -226,11 +321,52 @@ export function PhotosPanel() {
   const [collectionActionError, setCollectionActionError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'similarity'>('grid')
   const [showSemanticPanel, setShowSemanticPanel] = useState(false)
+  const [showMetadataPanel, setShowMetadataPanel] = useState(false)
+
+  const {
+    progress: metadataProgress,
+    isBusy: isMetadataBusy,
+    actionError: metadataActionError,
+    selectedDetail: selectedMetadataDetail,
+    isLoadingDetail: isLoadingMetadataDetail,
+    cameraFacet,
+    lensFacet,
+    fileTypeFacet,
+    setCameraFacetSearch,
+    setCameraFacetOffset,
+    setLensFacetSearch,
+    setLensFacetOffset,
+    setFileTypeFacetOffset,
+    startExtraction: startMetadataExtraction,
+    pauseExtraction: pauseMetadataExtraction,
+    resumeExtraction: resumeMetadataExtraction,
+    cancelExtraction: cancelMetadataExtraction
+  } = usePhotoMetadata({
+    selectedPhoto,
+    isPanelOpen: showMetadataPanel,
+    fileTypeBasis: metadataFilters.fileTypeBasis,
+    onExtractionSettled: () => {
+      if (hasActiveMetadataFilters(metadataFilters)) {
+        void refresh()
+      }
+    }
+  })
 
   const containerRef = useRef<HTMLDivElement>(null)
-  const [scrollTop, setScrollTop] = useState(0)
+  const [scrollState, setScrollState] = useState<{ generation: number; top: number }>({
+    generation: 0,
+    top: 0
+  })
+  const scrollTop = scrollState.generation === filterGeneration ? scrollState.top : 0
   const [containerHeight, setContainerHeight] = useState(600)
   const [containerWidth, setContainerWidth] = useState(800)
+
+  // Reset scroll viewport DOM position whenever filters change or reset so result pages never mix
+  useEffect(() => {
+    if (filterGeneration > 0 && containerRef.current) {
+      containerRef.current.scrollTop = 0
+    }
+  }, [filterGeneration])
 
   // Measure container dimensions for virtualization
   useEffect(() => {
@@ -250,7 +386,7 @@ export function PhotosPanel() {
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget
-    setScrollTop(target.scrollTop)
+    setScrollState({ generation: filterGeneration, top: target.scrollTop })
   }
 
   // Virtualization calculations based on totalCount for full extent
@@ -341,6 +477,12 @@ export function PhotosPanel() {
 
   // Track collection IDs photo belongs to
   const membershipCollectionIds = new Set(memberships.map((m) => m.collectionId))
+  const activeMetadataFilterCount = countActiveMetadataFilters(metadataFilters)
+  const hasAnyActiveFilter =
+    ratingFilter !== 'all' ||
+    flagFilter !== 'all' ||
+    collectionId !== null ||
+    activeMetadataFilterCount > 0
 
   return (
     <div className="photos-layout">
@@ -370,6 +512,20 @@ export function PhotosPanel() {
               onClick={() => setViewMode('similarity')}
             >
               Visual Similarity
+            </button>
+            <button
+              id="photos-toggle-metadata-filters"
+              data-testid="photos-toggle-metadata-filters"
+              type="button"
+              className={`btn btn-sm ${showMetadataPanel || activeMetadataFilterCount > 0 ? 'btn-primary' : 'btn-secondary'}`}
+              aria-expanded={showMetadataPanel}
+              onClick={() => {
+                setViewMode('grid')
+                setShowMetadataPanel((prev) => !prev)
+              }}
+            >
+              Metadata &amp; Filters
+              {activeMetadataFilterCount > 0 ? ` (${activeMetadataFilterCount})` : ''}
             </button>
             <button
               id="photos-toggle-semantic-index"
@@ -474,6 +630,31 @@ export function PhotosPanel() {
           )}
         </div>
 
+        {showMetadataPanel && viewMode === 'grid' && (
+          <PhotoMetadataFilterPanel
+            progress={metadataProgress}
+            isBusy={isMetadataBusy}
+            actionError={metadataActionError}
+            matchingCount={totalCount}
+            metadataFilters={metadataFilters}
+            cameraFacet={cameraFacet}
+            lensFacet={lensFacet}
+            fileTypeFacet={fileTypeFacet}
+            onUpdateFilters={updateMetadataFilters}
+            onResetFilters={resetFilters}
+            onCameraSearchChange={setCameraFacetSearch}
+            onCameraOffsetChange={setCameraFacetOffset}
+            onLensSearchChange={setLensFacetSearch}
+            onLensOffsetChange={setLensFacetOffset}
+            onFileTypeOffsetChange={setFileTypeFacetOffset}
+            onStartExtraction={startMetadataExtraction}
+            onPauseExtraction={pauseMetadataExtraction}
+            onResumeExtraction={resumeMetadataExtraction}
+            onCancelExtraction={cancelMetadataExtraction}
+            onClose={() => setShowMetadataPanel(false)}
+          />
+        )}
+
         {showSemanticPanel && <SemanticIndexPanel onClose={() => setShowSemanticPanel(false)} />}
 
         {viewMode === 'similarity' ? (
@@ -510,12 +691,12 @@ export function PhotosPanel() {
                 <ImageIcon size={24} />
                 <div className="notice-content">
                   <strong>
-                    {ratingFilter !== 'all' || flagFilter !== 'all' || collectionId !== null
+                    {hasAnyActiveFilter
                       ? 'No photographs match the current filter criteria'
                       : 'No photographs discovered yet'}
                   </strong>
                   <p>
-                    {ratingFilter !== 'all' || flagFilter !== 'all' || collectionId !== null
+                    {hasAnyActiveFilter
                       ? 'Try selecting different filters or click Reset filters.'
                       : 'Connect a source folder and run a scan to discover photographs.'}
                   </p>
@@ -994,6 +1175,9 @@ export function PhotosPanel() {
                 <dt>File Name</dt>
                 <dd title={selectedPhoto.fileName}>{selectedPhoto.fileName}</dd>
 
+                <dt>Recorded Extension</dt>
+                <dd>{selectedPhoto.extension || '(none)'}</dd>
+
                 <dt>Original Source Path</dt>
                 <dd className="path-text" title={selectedPhoto.originalPath}>
                   {selectedPhoto.originalPath}
@@ -1019,11 +1203,165 @@ export function PhotosPanel() {
               <h4>Inferred Metadata</h4>
               <dl className="details-list">
                 <dt>Capture Date</dt>
-                <dd>{formatDate(selectedPhoto.inferredCaptureTimeMs)}</dd>
+                <dd>{renderInferredCaptureDateValue(selectedPhoto, selectedMetadataDetail)}</dd>
 
                 <dt>Capture Location</dt>
                 <dd>Unknown</dd>
               </dl>
+            </div>
+
+            <div className="details-section" data-testid="photo-technical-metadata-section">
+              <h4>Embedded Technical Metadata</h4>
+              {(() => {
+                const effStatus = selectedMetadataDetail?.effectiveStatus ?? 'unprocessed'
+                const meta = selectedMetadataDetail?.currentMetadata ?? null
+                const isUnprocessed =
+                  !selectedMetadataDetail || effStatus === 'unprocessed' || effStatus === 'stale'
+                const unknownFallback = isUnprocessed ? 'Unknown (not extracted yet)' : 'Unknown'
+
+                return (
+                  <>
+                    <dl className="details-list">
+                      <dt>Extraction Status</dt>
+                      <dd>
+                        {isLoadingMetadataDetail && !selectedMetadataDetail
+                          ? 'Loading metadata…'
+                          : formatEffectiveExtractionStatus(selectedMetadataDetail)}
+                      </dd>
+
+                      <dt>Detected Container</dt>
+                      <dd>
+                        <div className="metadata-provenance-stack">
+                          <span>
+                            {meta?.detectedFormat
+                              ? meta.detectedFormat.toUpperCase()
+                              : unknownFallback}
+                          </span>
+                          {meta?.extensionFormatMismatch && (
+                            <span className="badge-warning metadata-mismatch-badge">
+                              Extension / container mismatch ({meta.recordedExtension || '(none)'}{' '}
+                              vs {meta.detectedFormat})
+                            </span>
+                          )}
+                        </div>
+                      </dd>
+
+                      <dt>Display Dimensions</dt>
+                      <dd>
+                        {meta?.displayWidthPx && meta?.displayHeightPx ? (
+                          <span>
+                            {meta.displayWidthPx.toLocaleString()} ×{' '}
+                            {meta.displayHeightPx.toLocaleString()} px{' '}
+                            <span className="sub-text">(orientation-adjusted)</span>
+                          </span>
+                        ) : (
+                          unknownFallback
+                        )}
+                      </dd>
+
+                      <dt>Encoded Dimensions</dt>
+                      <dd>
+                        {meta?.encodedWidthPx && meta?.encodedHeightPx ? (
+                          <span>
+                            {meta.encodedWidthPx.toLocaleString()} ×{' '}
+                            {meta.encodedHeightPx.toLocaleString()} px
+                            {meta.exifOrientation !== null
+                              ? ` · Orientation ${meta.exifOrientation}`
+                              : ' · Orientation unspecified'}
+                          </span>
+                        ) : (
+                          unknownFallback
+                        )}
+                      </dd>
+
+                      <dt>Camera</dt>
+                      <dd>
+                        {meta?.cameraDisplay ? (
+                          <div className="metadata-provenance-stack">
+                            <span>{meta.cameraDisplay}</span>
+                            <span className="sub-text">
+                              Raw Make: {meta.cameraMakeRaw ?? '—'} · Model:{' '}
+                              {meta.cameraModelRaw ?? '—'}
+                            </span>
+                          </div>
+                        ) : (
+                          unknownFallback
+                        )}
+                      </dd>
+
+                      <dt>Lens</dt>
+                      <dd>
+                        {meta?.lensDisplay ? (
+                          <div className="metadata-provenance-stack">
+                            <span>{meta.lensDisplay}</span>
+                            <span className="sub-text">
+                              Raw LensMake: {meta.lensMakeRaw ?? '—'} · LensModel:{' '}
+                              {meta.lensModelRaw ?? '—'}
+                            </span>
+                          </div>
+                        ) : (
+                          unknownFallback
+                        )}
+                      </dd>
+
+                      {(meta?.rawCaptureDateText ||
+                        meta?.captureDateConflict ||
+                        meta?.captureDateParseError) && (
+                        <>
+                          <dt>Date Tag Evidence</dt>
+                          <dd>
+                            <div className="metadata-provenance-stack">
+                              {meta.rawCaptureDateText && (
+                                <span className="mono-value">
+                                  Raw `{meta.captureDateSourceTag ?? 'EXIF'}`:{' '}
+                                  {meta.rawCaptureDateText}
+                                  {meta.captureSubseconds
+                                    ? ` (SubSec: ${meta.captureSubseconds})`
+                                    : ''}
+                                </span>
+                              )}
+                              {meta.captureDateConflict && (
+                                <span className="metadata-warning-inline">
+                                  {meta.captureDateConflict}
+                                </span>
+                              )}
+                              {meta.captureDateParseError && (
+                                <span className="metadata-warning-inline">
+                                  {meta.captureDateParseError}
+                                </span>
+                              )}
+                            </div>
+                          </dd>
+                        </>
+                      )}
+
+                      <dt>Parser Provenance</dt>
+                      <dd>
+                        <div className="metadata-provenance-stack">
+                          <span className="sub-text">
+                            Recipe: `{selectedMetadataDetail?.parserRecipeVersion ?? 'exif_tech_v1'}
+                            `
+                          </span>
+                          {selectedMetadataDetail &&
+                            selectedMetadataDetail.historicalMetadataCount > 0 && (
+                              <span className="sub-text">
+                                {selectedMetadataDetail.historicalMetadataCount} historical
+                                revision(s) preserved
+                              </span>
+                            )}
+                        </div>
+                      </dd>
+                    </dl>
+
+                    {meta?.rawMetadataJson && (
+                      <details className="metadata-raw-json-details">
+                        <summary>Raw Embedded Tag Evidence (JSON)</summary>
+                        <pre className="metadata-raw-json-pre">{meta.rawMetadataJson}</pre>
+                      </details>
+                    )}
+                  </>
+                )
+              })()}
             </div>
 
             <div className="details-section">

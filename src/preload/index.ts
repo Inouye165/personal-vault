@@ -71,6 +71,12 @@ import {
   SemanticIndexProgressResponseSchema,
   SemanticIndexJobItemsRequestSchema,
   SemanticIndexJobItemsResponseSchema,
+  PhotoMetadataProgressResponseSchema,
+  StartPhotoMetadataExtractionRequestSchema,
+  GetPhotoMetadataDetailRequestSchema,
+  GetPhotoMetadataDetailResponseSchema,
+  GetPhotoMetadataFacetsRequestSchema,
+  GetPhotoMetadataFacetsResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -138,7 +144,13 @@ import {
   type SemanticModelStatusResponse,
   type SemanticIndexProgressResponse,
   type SemanticIndexJobItemsRequest,
-  type SemanticIndexJobItemsResponse
+  type SemanticIndexJobItemsResponse,
+  type PhotoMetadataProgressResponse,
+  type StartPhotoMetadataExtractionRequest,
+  type GetPhotoMetadataDetailRequest,
+  type GetPhotoMetadataDetailResponse,
+  type GetPhotoMetadataFacetsRequest,
+  type GetPhotoMetadataFacetsResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -844,6 +856,102 @@ const api: VaultApi = {
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, listener)
     }
+  },
+
+  async getPhotoMetadataProgress(): Promise<PhotoMetadataProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_GET_PROGRESS)
+    const result = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotoMetadataProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startPhotoMetadataExtraction(
+    request: StartPhotoMetadataExtractionRequest = {}
+  ): Promise<PhotoMetadataProgressResponse> {
+    const parsed = validatePayload(StartPhotoMetadataExtractionRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid startPhotoMetadataExtraction request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_START_EXTRACTION, parsed.data)
+    const result = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startPhotoMetadataExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pausePhotoMetadataExtraction(): Promise<PhotoMetadataProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_PAUSE_EXTRACTION)
+    const result = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pausePhotoMetadataExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumePhotoMetadataExtraction(): Promise<PhotoMetadataProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_RESUME_EXTRACTION)
+    const result = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumePhotoMetadataExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelPhotoMetadataExtraction(): Promise<PhotoMetadataProgressResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_CANCEL_EXTRACTION)
+    const result = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelPhotoMetadataExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onPhotoMetadataProgress(callback: (progress: PhotoMetadataProgressResponse) => void): () => void {
+    const listener = (_event: unknown, raw: unknown): void => {
+      const result = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      } else {
+        console.error(`Invalid PhotoMetadataProgress event payload from main: ${result.error}`)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.METADATA_PROGRESS_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.METADATA_PROGRESS_EVENT, listener)
+    }
+  },
+
+  async getPhotoMetadataDetail(
+    request: GetPhotoMetadataDetailRequest
+  ): Promise<GetPhotoMetadataDetailResponse> {
+    const parsed = validatePayload(GetPhotoMetadataDetailRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getPhotoMetadataDetail request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_GET_PHOTO_DETAIL, parsed.data)
+    const result = validatePayload(GetPhotoMetadataDetailResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotoMetadataDetail response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getPhotoMetadataFacets(
+    request: GetPhotoMetadataFacetsRequest
+  ): Promise<GetPhotoMetadataFacetsResponse> {
+    const parsed = validatePayload(GetPhotoMetadataFacetsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getPhotoMetadataFacets request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_GET_FACETS, parsed.data)
+    const result = validatePayload(GetPhotoMetadataFacetsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotoMetadataFacets response from main: ${result.error}`)
+    }
+    return result.data
   }
 }
 

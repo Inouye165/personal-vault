@@ -65,7 +65,13 @@ import type {
   SemanticModelStatusResponse,
   SemanticIndexProgressResponse,
   SemanticIndexJobItemsRequest,
-  SemanticIndexJobItemsResponse
+  SemanticIndexJobItemsResponse,
+  PhotoMetadataProgressResponse,
+  StartPhotoMetadataExtractionRequest,
+  GetPhotoMetadataDetailRequest,
+  GetPhotoMetadataDetailResponse,
+  GetPhotoMetadataFacetsRequest,
+  GetPhotoMetadataFacetsResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -138,6 +144,22 @@ export interface VaultApi {
   onSemanticIndexProgress: (
     callback: (progress: SemanticIndexProgressResponse) => void
   ) => () => void
+  getPhotoMetadataProgress: () => Promise<PhotoMetadataProgressResponse>
+  startPhotoMetadataExtraction: (
+    request?: StartPhotoMetadataExtractionRequest
+  ) => Promise<PhotoMetadataProgressResponse>
+  pausePhotoMetadataExtraction: () => Promise<PhotoMetadataProgressResponse>
+  resumePhotoMetadataExtraction: () => Promise<PhotoMetadataProgressResponse>
+  cancelPhotoMetadataExtraction: () => Promise<PhotoMetadataProgressResponse>
+  onPhotoMetadataProgress: (
+    callback: (progress: PhotoMetadataProgressResponse) => void
+  ) => () => void
+  getPhotoMetadataDetail: (
+    request: GetPhotoMetadataDetailRequest
+  ) => Promise<GetPhotoMetadataDetailResponse>
+  getPhotoMetadataFacets: (
+    request: GetPhotoMetadataFacetsRequest
+  ) => Promise<GetPhotoMetadataFacetsResponse>
 }
 
 declare global {

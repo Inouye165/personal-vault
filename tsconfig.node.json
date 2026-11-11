@@ -33,6 +33,7 @@
     "src/preload/**/*.d.ts",
     "src/shared/**/*.ts",
     "spikes/**/*.d.mts",
+    "tests/helpers/**/*.ts",
     "tests/shared/**/*.ts",
     "tests/main/**/*.ts",
     "tests/preload/**/*.ts"

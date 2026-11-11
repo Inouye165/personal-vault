@@ -85,9 +85,19 @@ import type {
   SemanticIndexJobRecord,
   CreateSemanticIndexJobInput,
   SemanticIndexJobItem,
-  SemanticIndexCoverageResult
+  SemanticIndexCoverageResult,
+  PhotoTechnicalMetadataRecord,
+  SavePhotoTechnicalMetadataInput,
+  PhotoMetadataCoverageResult,
+  PhotoMetadataJobRecord,
+  CreatePhotoMetadataJobInput,
+  PhotoMetadataJobItemRecord,
+  GetPhotoMetadataFacetsOptions,
+  PhotoMetadataFacetsResult,
+  PhotoTechnicalMetadataDetailResult
 } from './types'
 import { validateAndSerializeEmbeddingVector, deserializeEmbeddingVector } from '../semantic/vector'
+import { METADATA_LIMITS, METADATA_PARSER_RECIPE_VERSION } from '../metadata/types'
 import type { AnnotationJournal } from '../annotations/journal'
 import type {
   AnnotationJournalEntry,
@@ -744,6 +754,11 @@ export class CatalogDatabase {
                 'UPDATE photo_semantic_embeddings SET is_current = 0 WHERE file_location_id = ? AND is_current = 1;'
               )
               .run(existingFile.id)
+            this.db
+              .prepare(
+                'UPDATE photo_technical_metadata SET is_current = 0 WHERE file_location_id = ? AND is_current = 1;'
+              )
+              .run(existingFile.id)
             this.reconcilePhotoAnnotations(existingFile.id)
             updatedCount++
           } else {
@@ -902,6 +917,11 @@ export class CatalogDatabase {
         this.db
           .prepare(
             'UPDATE photo_semantic_embeddings SET is_current = 0 WHERE file_location_id = ? AND is_current = 1 AND content_sha256 != ?;'
+          )
+          .run(fileAndObs.file_id, normalizedSha256)
+        this.db
+          .prepare(
+            'UPDATE photo_technical_metadata SET is_current = 0 WHERE file_location_id = ? AND is_current = 1 AND content_sha256 IS NOT NULL AND content_sha256 != ?;'
           )
           .run(fileAndObs.file_id, normalizedSha256)
         this.reconcilePhotoAnnotations(fileAndObs.file_id)
@@ -1105,7 +1125,158 @@ export class CatalogDatabase {
       params.push(options.collectionId)
     }
 
+    // Stage 6C: SQL-backed technical metadata & file-type filters (combined with AND before pagination)
+    const hasDateRange = Boolean(options.captureDateFrom || options.captureDateTo)
+    const hasDateFilter = Boolean(hasDateRange || options.includeUnknownCaptureDate)
+    const hasCameraFilter = Boolean(options.cameraNormalized || options.onlyUnknownCamera)
+    const hasLensFilter = Boolean(options.lensNormalized || options.onlyUnknownLens)
+    const hasMinDimensions =
+      typeof options.minWidthPx === 'number' || typeof options.minHeightPx === 'number'
+    const hasDimensionFilter = Boolean(hasMinDimensions || options.includeUnknownDimensions)
+    const fileTypeBasis = options.fileTypeBasis ?? 'detected_format'
+    const hasDetectedFormatFilter =
+      fileTypeBasis === 'detected_format' &&
+      Boolean(options.fileTypeValue || options.onlyUnknownDetectedFormat)
+    const hasExtensionFilter =
+      fileTypeBasis === 'filename_extension' && Boolean(options.fileTypeValue)
+
+    const needsTechMetaJoin =
+      hasDateFilter ||
+      hasCameraFilter ||
+      hasLensFilter ||
+      hasDimensionFilter ||
+      hasDetectedFormatFilter
+
+    const joinParams: SQLInputValue[] = []
+    let techMetaJoinClause = ''
+    if (needsTechMetaJoin) {
+      const recipeVersion = options.parserRecipeVersion ?? METADATA_PARSER_RECIPE_VERSION
+      techMetaJoinClause = `
+        LEFT JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id
+         AND tm.is_current = 1
+         AND tm.parser_recipe_version = ?
+         AND tm.discovery_observation_id = d.id
+      `
+      joinParams.push(recipeVersion)
+    }
+
+    if (hasDateFilter) {
+      if (hasDateRange && options.includeUnknownCaptureDate) {
+        const rangeSub: string[] = [
+          "tm.extraction_status IN ('extracted', 'no_metadata')",
+          'tm.capture_calendar_date IS NOT NULL'
+        ]
+        if (options.captureDateFrom) {
+          rangeSub.push('tm.capture_calendar_date >= ?')
+          params.push(options.captureDateFrom)
+        }
+        if (options.captureDateTo) {
+          rangeSub.push('tm.capture_calendar_date <= ?')
+          params.push(options.captureDateTo)
+        }
+        conditions.push(
+          `((${rangeSub.join(' AND ')}) OR (tm.extraction_status IN ('extracted', 'no_metadata') AND tm.capture_calendar_date IS NULL))`
+        )
+      } else if (hasDateRange) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.capture_calendar_date IS NOT NULL')
+        if (options.captureDateFrom) {
+          conditions.push('tm.capture_calendar_date >= ?')
+          params.push(options.captureDateFrom)
+        }
+        if (options.captureDateTo) {
+          conditions.push('tm.capture_calendar_date <= ?')
+          params.push(options.captureDateTo)
+        }
+      } else if (options.includeUnknownCaptureDate) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.capture_calendar_date IS NULL')
+      }
+    }
+
+    if (hasCameraFilter) {
+      if (options.onlyUnknownCamera) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.camera_normalized IS NULL')
+      } else if (options.cameraNormalized) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.camera_normalized = ?')
+        params.push(options.cameraNormalized.trim().toLowerCase())
+      }
+    }
+
+    if (hasLensFilter) {
+      if (options.onlyUnknownLens) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.lens_normalized IS NULL')
+      } else if (options.lensNormalized) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.lens_normalized = ?')
+        params.push(options.lensNormalized.trim().toLowerCase())
+      }
+    }
+
+    if (hasDimensionFilter) {
+      if (hasMinDimensions && options.includeUnknownDimensions) {
+        const knownSub: string[] = [
+          "tm.extraction_status IN ('extracted', 'no_metadata')",
+          'tm.display_width_px IS NOT NULL',
+          'tm.display_height_px IS NOT NULL'
+        ]
+        if (typeof options.minWidthPx === 'number') {
+          knownSub.push('tm.display_width_px >= ?')
+          params.push(options.minWidthPx)
+        }
+        if (typeof options.minHeightPx === 'number') {
+          knownSub.push('tm.display_height_px >= ?')
+          params.push(options.minHeightPx)
+        }
+        conditions.push(
+          `((${knownSub.join(' AND ')}) OR (tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed') AND (tm.display_width_px IS NULL OR tm.display_height_px IS NULL)))`
+        )
+      } else if (hasMinDimensions) {
+        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
+        conditions.push('tm.display_width_px IS NOT NULL')
+        conditions.push('tm.display_height_px IS NOT NULL')
+        if (typeof options.minWidthPx === 'number') {
+          conditions.push('tm.display_width_px >= ?')
+          params.push(options.minWidthPx)
+        }
+        if (typeof options.minHeightPx === 'number') {
+          conditions.push('tm.display_height_px >= ?')
+          params.push(options.minHeightPx)
+        }
+      } else if (options.includeUnknownDimensions) {
+        conditions.push(
+          "tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
+        )
+        conditions.push('(tm.display_width_px IS NULL OR tm.display_height_px IS NULL)')
+      }
+    }
+
+    if (hasExtensionFilter && options.fileTypeValue) {
+      const trimmedExt = options.fileTypeValue.trim().toLowerCase()
+      const normExt = trimmedExt.startsWith('.') ? trimmedExt : `.${trimmedExt}`
+      conditions.push('LOWER(f.extension) = ?')
+      params.push(normExt)
+    } else if (hasDetectedFormatFilter) {
+      if (options.onlyUnknownDetectedFormat) {
+        conditions.push(
+          "tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
+        )
+        conditions.push('tm.detected_format IS NULL')
+      } else if (options.fileTypeValue) {
+        conditions.push(
+          "tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
+        )
+        conditions.push('tm.detected_format = ?')
+        params.push(options.fileTypeValue.trim().toLowerCase())
+      }
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const allFilterParams = [...joinParams, ...params]
 
     // 1. Total count query
     const countSql = `
@@ -1115,9 +1286,12 @@ export class CatalogDatabase {
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
       LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
         AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
+      ${techMetaJoinClause}
       ${whereClause};
     `
-    const countRow = this.db.prepare(countSql).get(...params) as unknown as { total: number }
+    const countRow = this.db.prepare(countSql).get(...allFilterParams) as unknown as {
+      total: number
+    }
     const totalCount = countRow.total
 
     // 2. Paginated rows query
@@ -1137,11 +1311,14 @@ export class CatalogDatabase {
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
       LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
         AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
+      ${techMetaJoinClause}
       ${whereClause}
       ORDER BY f.id ASC
       LIMIT ? OFFSET ?;
     `
-    const rows = this.db.prepare(querySql).all(...params, limit, offset) as unknown as RawFileRow[]
+    const rows = this.db
+      .prepare(querySql)
+      .all(...allFilterParams, limit, offset) as unknown as RawFileRow[]
     const items = rows.map((r) => this.mapFileRow(r))
 
     return {
@@ -5573,6 +5750,1017 @@ export class CatalogDatabase {
         row.updated_at_ms !== null && row.updated_at_ms !== undefined
           ? Number(row.updated_at_ms)
           : null
+    }
+  }
+
+  // =========================================================================
+  // Stage 6C: Photo Technical Metadata, Resumable Jobs, Coverage & Facets
+  // =========================================================================
+
+  public getPhotoMetadataCoverage(
+    parserRecipeVersion: string = METADATA_PARSER_RECIPE_VERSION
+  ): PhotoMetadataCoverageResult {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          COUNT(*) AS total_photos,
+          COALESCE(SUM(CASE WHEN tm.extraction_status = 'extracted' THEN 1 ELSE 0 END), 0) AS extracted_count,
+          COALESCE(SUM(CASE WHEN tm.extraction_status = 'no_metadata' THEN 1 ELSE 0 END), 0) AS no_metadata_count,
+          COALESCE(SUM(CASE WHEN tm.extraction_status = 'unsupported' THEN 1 ELSE 0 END), 0) AS unsupported_count,
+          COALESCE(SUM(CASE WHEN tm.extraction_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+          COALESCE(SUM(CASE
+            WHEN tm.id IS NULL AND EXISTS (
+              SELECT 1 FROM photo_technical_metadata h WHERE h.file_location_id = f.id
+            ) THEN 1 ELSE 0 END
+          ), 0) AS stale_count,
+          COALESCE(SUM(CASE
+            WHEN tm.id IS NULL AND NOT EXISTS (
+              SELECT 1 FROM photo_technical_metadata h WHERE h.file_location_id = f.id
+            ) THEN 1 ELSE 0 END
+          ), 0) AS unprocessed_count
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        LEFT JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id
+         AND tm.is_current = 1
+         AND tm.parser_recipe_version = ?
+         AND tm.discovery_observation_id = d.id
+        WHERE f.category = 'photo';
+      `
+      )
+      .get(parserRecipeVersion) as Record<string, unknown> | undefined
+
+    return {
+      parserRecipeVersion,
+      totalPhotos: Number(row?.total_photos ?? 0),
+      extractedCount: Number(row?.extracted_count ?? 0),
+      noMetadataCount: Number(row?.no_metadata_count ?? 0),
+      unsupportedCount: Number(row?.unsupported_count ?? 0),
+      failedCount: Number(row?.failed_count ?? 0),
+      staleCount: Number(row?.stale_count ?? 0),
+      unprocessedCount: Number(row?.unprocessed_count ?? 0)
+    }
+  }
+
+  public createPhotoMetadataJob(input: CreatePhotoMetadataJobInput): PhotoMetadataJobRecord {
+    this.assertOpen()
+    const jobId = input.jobId ?? randomUUID()
+    const now = Date.now()
+    const recipe = input.parserRecipeVersion || METADATA_PARSER_RECIPE_VERSION
+    const retryFailed = Boolean(input.retryFailed)
+
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
+    try {
+      this.db
+        .prepare(
+          `
+          INSERT INTO photo_metadata_jobs (
+            id, status, parser_recipe_version,
+            total_photos, processed_photos, extracted_photos, absent_metadata_photos,
+            reused_photos, unsupported_photos, failed_photos, pending_photos,
+            started_at_ms, updated_at_ms, completed_at_ms, last_error
+          ) VALUES (?, 'running', ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?, NULL, NULL);
+        `
+        )
+        .run(jobId, recipe, now, now)
+
+      // Snapshot authorized photo scope using bounded cursor batches (500 rows per step)
+      const batchSize = METADATA_LIMITS.JOB_SNAPSHOT_BATCH_SIZE
+      const selectBatchStmt = retryFailed
+        ? this.db.prepare(
+            `
+            SELECT
+              f.id AS file_location_id,
+              f.original_path,
+              f.extension,
+              d.id AS discovery_observation_id,
+              d.byte_size,
+              d.filesystem_mtime_ms
+            FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            WHERE f.category = 'photo'
+              AND f.id > ?
+              AND NOT EXISTS (
+                SELECT 1 FROM photo_technical_metadata tm
+                WHERE tm.file_location_id = f.id
+                  AND tm.discovery_observation_id = d.id
+                  AND tm.is_current = 1
+                  AND tm.parser_recipe_version = ?
+                  AND tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported')
+              )
+            ORDER BY f.id ASC
+            LIMIT ?;
+          `
+          )
+        : this.db.prepare(
+            `
+            SELECT
+              f.id AS file_location_id,
+              f.original_path,
+              f.extension,
+              d.id AS discovery_observation_id,
+              d.byte_size,
+              d.filesystem_mtime_ms
+            FROM file_locations f
+            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+            WHERE f.category = 'photo'
+              AND f.id > ?
+              AND NOT EXISTS (
+                SELECT 1 FROM photo_technical_metadata tm
+                WHERE tm.file_location_id = f.id
+                  AND tm.discovery_observation_id = d.id
+                  AND tm.is_current = 1
+                  AND tm.parser_recipe_version = ?
+              )
+            ORDER BY f.id ASC
+            LIMIT ?;
+          `
+          )
+
+      const insertItemStmt = this.db.prepare(
+        `
+        INSERT INTO photo_metadata_job_items (
+          job_id, file_location_id, original_path, recorded_extension,
+          discovery_observation_id, expected_byte_size, expected_mtime_ms,
+          status, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?);
+      `
+      )
+
+      let lastFileId = 0
+      let totalSnapshotted = 0
+
+      while (true) {
+        const batchRows = selectBatchStmt.all(lastFileId, recipe, batchSize) as Array<{
+          file_location_id: number
+          original_path: string
+          extension: string
+          discovery_observation_id: number
+          byte_size: number
+          filesystem_mtime_ms: number | null
+        }>
+
+        if (batchRows.length === 0) {
+          break
+        }
+
+        for (const row of batchRows) {
+          insertItemStmt.run(
+            jobId,
+            row.file_location_id,
+            row.original_path,
+            row.extension,
+            row.discovery_observation_id,
+            row.byte_size,
+            row.filesystem_mtime_ms,
+            now
+          )
+          lastFileId = row.file_location_id
+          totalSnapshotted++
+        }
+
+        if (batchRows.length < batchSize) {
+          break
+        }
+      }
+
+      const initialStatus = totalSnapshotted === 0 ? 'completed' : 'running'
+      const completedAt = totalSnapshotted === 0 ? now : null
+
+      this.db
+        .prepare(
+          `
+          UPDATE photo_metadata_jobs
+          SET total_photos = ?,
+              pending_photos = ?,
+              status = ?,
+              completed_at_ms = ?,
+              updated_at_ms = ?
+          WHERE id = ?;
+        `
+        )
+        .run(totalSnapshotted, totalSnapshotted, initialStatus, completedAt, now, jobId)
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+
+    const created = this.getPhotoMetadataJob(jobId)
+    if (!created) {
+      throw new Error('Failed to create photo metadata extraction job')
+    }
+    return created
+  }
+
+  public getPhotoMetadataJob(jobId: string): PhotoMetadataJobRecord | null {
+    this.assertOpen()
+    const row = this.db.prepare('SELECT * FROM photo_metadata_jobs WHERE id = ?;').get(jobId) as
+      Record<string, unknown> | undefined
+    if (!row) return null
+    return this.mapPhotoMetadataJobRow(row)
+  }
+
+  public getLatestPhotoMetadataJob(): PhotoMetadataJobRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare('SELECT * FROM photo_metadata_jobs ORDER BY started_at_ms DESC, rowid DESC LIMIT 1;')
+      .get() as Record<string, unknown> | undefined
+    if (!row) return null
+    return this.mapPhotoMetadataJobRow(row)
+  }
+
+  public markRunningPhotoMetadataJobsAsInterrupted(): number {
+    this.assertOpen()
+    const now = Date.now()
+    const res = this.db
+      .prepare(
+        "UPDATE photo_metadata_jobs SET status = 'interrupted', updated_at_ms = ? WHERE status = 'running';"
+      )
+      .run(now)
+    return Number(res.changes)
+  }
+
+  public updatePhotoMetadataJobStatus(
+    jobId: string,
+    status: PhotoMetadataJobRecord['status'],
+    lastError?: string | null
+  ): PhotoMetadataJobRecord | null {
+    this.assertOpen()
+    const now = Date.now()
+    const completedAt =
+      status === 'completed' || status === 'cancelled' || status === 'failed' ? now : null
+
+    this.db
+      .prepare(
+        `
+        UPDATE photo_metadata_jobs
+        SET status = ?,
+            updated_at_ms = ?,
+            completed_at_ms = COALESCE(?, completed_at_ms),
+            last_error = CASE WHEN ? IS NOT NULL THEN ? ELSE last_error END
+        WHERE id = ?;
+      `
+      )
+      .run(status, now, completedAt, lastError ?? null, lastError ?? null, jobId)
+
+    return this.getPhotoMetadataJob(jobId)
+  }
+
+  public getNextPendingPhotoMetadataJobItems(
+    jobId: string,
+    limit: number = METADATA_LIMITS.JOB_FETCH_BATCH_SIZE
+  ): PhotoMetadataJobItemRecord[] {
+    this.assertOpen()
+    const safeLimit = Math.max(1, Math.min(64, Math.floor(limit)))
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, job_id, file_location_id, original_path, recorded_extension,
+               discovery_observation_id, expected_byte_size, expected_mtime_ms,
+               status, error_code, error_message, updated_at_ms
+        FROM photo_metadata_job_items
+        WHERE job_id = ? AND status = 'pending'
+        ORDER BY id ASC
+        LIMIT ?;
+      `
+      )
+      .all(jobId, safeLimit) as Array<Record<string, unknown>>
+
+    return rows.map((r) => this.mapPhotoMetadataJobItemRow(r))
+  }
+
+  public listPhotoMetadataJobItems(options: {
+    jobId: string
+    status?: PhotoMetadataJobItemRecord['status']
+    limit?: number
+    offset?: number
+  }): { items: PhotoMetadataJobItemRecord[]; totalCount: number } {
+    this.assertOpen()
+    const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 50)))
+    const offset = Math.max(0, Math.floor(options.offset ?? 0))
+    const statusCond = options.status ? 'AND status = ?' : ''
+    const countParams: SQLInputValue[] = options.status
+      ? [options.jobId, options.status]
+      : [options.jobId]
+    const rowParams: SQLInputValue[] = options.status
+      ? [options.jobId, options.status, limit, offset]
+      : [options.jobId, limit, offset]
+
+    const countRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM photo_metadata_job_items WHERE job_id = ? ${statusCond};`
+      )
+      .get(...countParams) as { cnt: number } | undefined
+
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, job_id, file_location_id, original_path, recorded_extension,
+               discovery_observation_id, expected_byte_size, expected_mtime_ms,
+               status, error_code, error_message, updated_at_ms
+        FROM photo_metadata_job_items
+        WHERE job_id = ? ${statusCond}
+        ORDER BY id ASC
+        LIMIT ? OFFSET ?;
+      `
+      )
+      .all(...rowParams) as Array<Record<string, unknown>>
+
+    return {
+      items: rows.map((r) => this.mapPhotoMetadataJobItemRow(r)),
+      totalCount: Number(countRow?.cnt ?? 0)
+    }
+  }
+
+  public hasReusablePhotoTechnicalMetadataCandidate(params: {
+    observedByteSize: number
+    parserRecipeVersion: string
+  }): boolean {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT 1 AS ok
+        FROM photo_technical_metadata
+        WHERE observed_byte_size = ?
+          AND parser_recipe_version = ?
+          AND extraction_status IN ('extracted', 'no_metadata')
+        LIMIT 1;
+      `
+      )
+      .get(params.observedByteSize, params.parserRecipeVersion) as { ok: number } | undefined
+    return Boolean(row)
+  }
+
+  public findReusablePhotoTechnicalMetadata(params: {
+    contentSha256: string
+    observedByteSize: number
+    parserRecipeVersion: string
+  }): PhotoTechnicalMetadataRecord | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT *
+        FROM photo_technical_metadata
+        WHERE content_sha256 = ?
+          AND observed_byte_size = ?
+          AND parser_recipe_version = ?
+          AND extraction_status IN ('extracted', 'no_metadata')
+        ORDER BY is_current DESC, id DESC
+        LIMIT 1;
+      `
+      )
+      .get(
+        params.contentSha256.toLowerCase(),
+        params.observedByteSize,
+        params.parserRecipeVersion
+      ) as Record<string, unknown> | undefined
+
+    if (!row) return null
+    return this.mapPhotoTechnicalMetadataRow(row)
+  }
+
+  public completePhotoMetadataJobItem(params: {
+    jobId: string
+    itemId: number
+    reused: boolean
+    metadata: SavePhotoTechnicalMetadataInput
+  }): void {
+    this.assertOpen()
+    const now = Date.now()
+
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
+    try {
+      const itemRow = this.db
+        .prepare(
+          'SELECT status, file_location_id FROM photo_metadata_job_items WHERE id = ? AND job_id = ?;'
+        )
+        .get(params.itemId, params.jobId) as
+        { status: string; file_location_id: number } | undefined
+
+      if (!itemRow || itemRow.status !== 'pending') {
+        throw new Error(`Photo metadata job item ${params.itemId} is no longer pending`)
+      }
+
+      // Transactionally revalidate current catalog observation before committing
+      const currentObs = this.db
+        .prepare(
+          `
+          SELECT d.id AS discovery_id, d.byte_size, d.filesystem_mtime_ms, h.sha256 AS active_hash
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+          WHERE f.id = ?;
+        `
+        )
+        .get(params.metadata.fileLocationId) as
+        | {
+            discovery_id: number
+            byte_size: number
+            filesystem_mtime_ms: number | null
+            active_hash: string | null
+          }
+        | undefined
+
+      if (!currentObs) {
+        throw new Error('SOURCE_REVISION_CHANGED: File location no longer present in catalog')
+      }
+
+      if (
+        currentObs.discovery_id !== params.metadata.discoveryObservationId ||
+        (params.metadata.observedByteSize !== null &&
+          currentObs.byte_size !== params.metadata.observedByteSize) ||
+        (params.metadata.observedMtimeMs !== null &&
+          currentObs.filesystem_mtime_ms !== null &&
+          !isObservationTimestampMatching(
+            params.metadata.observedMtimeMs,
+            currentObs.filesystem_mtime_ms
+          )) ||
+        (params.metadata.contentSha256 !== null &&
+          currentObs.active_hash !== null &&
+          currentObs.active_hash.toLowerCase() !== params.metadata.contentSha256.toLowerCase())
+      ) {
+        throw new Error(
+          'SOURCE_REVISION_CHANGED: Catalog observation changed before metadata commit'
+        )
+      }
+
+      const normalizedSha = params.metadata.contentSha256
+        ? params.metadata.contentSha256.toLowerCase()
+        : null
+
+      // Supersede any existing current row for this location & recipe without erasing history
+      this.db
+        .prepare(
+          `
+          UPDATE photo_technical_metadata
+          SET is_current = 0
+          WHERE file_location_id = ? AND parser_recipe_version = ? AND is_current = 1;
+        `
+        )
+        .run(params.metadata.fileLocationId, params.metadata.parserRecipeVersion)
+
+      this.db
+        .prepare(
+          `
+          INSERT INTO photo_technical_metadata (
+            file_location_id, discovery_observation_id, parser_recipe_version, extraction_status,
+            content_sha256, content_revision, observed_byte_size, observed_mtime_ms,
+            recorded_extension, detected_format, extension_format_mismatch,
+            encoded_width_px, encoded_height_px, exif_orientation, display_width_px, display_height_px,
+            capture_date_source_tag, raw_capture_date_text, capture_subseconds,
+            capture_offset_minutes, capture_offset_text, capture_timezone_status,
+            capture_calendar_date, capture_local_iso, capture_utc_epoch_ms,
+            capture_date_parse_error, capture_date_conflict,
+            camera_make_raw, camera_model_raw, camera_display, camera_normalized,
+            lens_make_raw, lens_model_raw, lens_display, lens_normalized,
+            raw_metadata_json, error_code, error_message, created_at_ms, is_current
+          ) VALUES (
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, 1
+          );
+        `
+        )
+        .run(
+          params.metadata.fileLocationId,
+          params.metadata.discoveryObservationId,
+          params.metadata.parserRecipeVersion,
+          params.metadata.extractionStatus,
+          normalizedSha,
+          params.metadata.contentRevision,
+          params.metadata.observedByteSize,
+          params.metadata.observedMtimeMs,
+          params.metadata.recordedExtension,
+          params.metadata.detectedFormat,
+          params.metadata.extensionFormatMismatch ? 1 : 0,
+          params.metadata.encodedWidthPx,
+          params.metadata.encodedHeightPx,
+          params.metadata.exifOrientation,
+          params.metadata.displayWidthPx,
+          params.metadata.displayHeightPx,
+          params.metadata.captureDateSourceTag,
+          params.metadata.rawCaptureDateText,
+          params.metadata.captureSubseconds,
+          params.metadata.captureOffsetMinutes,
+          params.metadata.captureOffsetText,
+          params.metadata.captureTimezoneStatus,
+          params.metadata.captureCalendarDate,
+          params.metadata.captureLocalIso,
+          params.metadata.captureUtcEpochMs,
+          params.metadata.captureDateParseError,
+          params.metadata.captureDateConflict,
+          params.metadata.cameraMakeRaw,
+          params.metadata.cameraModelRaw,
+          params.metadata.cameraDisplay,
+          params.metadata.cameraNormalized,
+          params.metadata.lensMakeRaw,
+          params.metadata.lensModelRaw,
+          params.metadata.lensDisplay,
+          params.metadata.lensNormalized,
+          params.metadata.rawMetadataJson,
+          params.metadata.errorCode,
+          params.metadata.errorMessage,
+          now
+        )
+
+      const mStatus = params.metadata.extractionStatus
+      const jobItemStatus = params.reused ? 'reused' : mStatus
+
+      this.db
+        .prepare(
+          `
+          UPDATE photo_metadata_job_items
+          SET status = ?, error_code = ?, error_message = ?, updated_at_ms = ?
+          WHERE id = ? AND job_id = ?;
+        `
+        )
+        .run(
+          jobItemStatus,
+          params.metadata.errorCode,
+          params.metadata.errorMessage,
+          now,
+          params.itemId,
+          params.jobId
+        )
+
+      const isExtracted = mStatus === 'extracted' ? 1 : 0
+      const isNoMetadata = mStatus === 'no_metadata' ? 1 : 0
+      const isProcessed = isExtracted || isNoMetadata ? 1 : 0
+      const isReused = isProcessed && params.reused ? 1 : 0
+      const isUnsupported = mStatus === 'unsupported' ? 1 : 0
+      const isFailed = mStatus === 'failed' ? 1 : 0
+
+      this.db
+        .prepare(
+          `
+          UPDATE photo_metadata_jobs
+          SET processed_photos = processed_photos + ?,
+              extracted_photos = extracted_photos + ?,
+              absent_metadata_photos = absent_metadata_photos + ?,
+              reused_photos = reused_photos + ?,
+              unsupported_photos = unsupported_photos + ?,
+              failed_photos = failed_photos + ?,
+              pending_photos = CASE WHEN pending_photos > 0 THEN pending_photos - 1 ELSE 0 END,
+              updated_at_ms = ?
+          WHERE id = ?;
+        `
+        )
+        .run(
+          isProcessed,
+          isExtracted,
+          isNoMetadata,
+          isReused,
+          isUnsupported,
+          isFailed,
+          now,
+          params.jobId
+        )
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public recordPhotoMetadataJobItemTransientFailure(params: {
+    jobId: string
+    itemId: number
+    errorCode: string
+    errorMessage: string
+  }): void {
+    this.assertOpen()
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
+    try {
+      const itemRow = this.db
+        .prepare('SELECT status FROM photo_metadata_job_items WHERE id = ? AND job_id = ?;')
+        .get(params.itemId, params.jobId) as { status: string } | undefined
+
+      if (!itemRow || itemRow.status !== 'pending') {
+        this.db.exec('ROLLBACK;')
+        return
+      }
+
+      this.db
+        .prepare(
+          `
+          UPDATE photo_metadata_job_items
+          SET status = 'failed', error_code = ?, error_message = ?, updated_at_ms = ?
+          WHERE id = ? AND job_id = ?;
+        `
+        )
+        .run(params.errorCode, params.errorMessage, now, params.itemId, params.jobId)
+
+      this.db
+        .prepare(
+          `
+          UPDATE photo_metadata_jobs
+          SET failed_photos = failed_photos + 1,
+              pending_photos = CASE WHEN pending_photos > 0 THEN pending_photos - 1 ELSE 0 END,
+              updated_at_ms = ?
+          WHERE id = ?;
+        `
+        )
+        .run(now, params.jobId)
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public getPhotoTechnicalMetadataDetail(
+    fileLocationId: number,
+    parserRecipeVersion: string = METADATA_PARSER_RECIPE_VERSION
+  ): PhotoTechnicalMetadataDetailResult | null {
+    this.assertOpen()
+    const fileRow = this.db
+      .prepare(
+        `
+        SELECT f.id, f.extension, d.id AS discovery_id
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        WHERE f.id = ?;
+      `
+      )
+      .get(fileLocationId) as { id: number; extension: string; discovery_id: number } | undefined
+
+    if (!fileRow) {
+      return null
+    }
+
+    const currentRevision = this.getPhotoRevisionString(fileLocationId)
+
+    const currentMetaRow = this.db
+      .prepare(
+        `
+        SELECT *
+        FROM photo_technical_metadata
+        WHERE file_location_id = ?
+          AND discovery_observation_id = ?
+          AND parser_recipe_version = ?
+          AND is_current = 1
+        LIMIT 1;
+      `
+      )
+      .get(fileLocationId, fileRow.discovery_id, parserRecipeVersion) as
+      Record<string, unknown> | undefined
+
+    const histRow = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS total_rows
+        FROM photo_technical_metadata
+        WHERE file_location_id = ?;
+      `
+      )
+      .get(fileLocationId) as { total_rows: number } | undefined
+
+    const totalRows = Number(histRow?.total_rows ?? 0)
+    const currentMetadata = currentMetaRow
+      ? this.mapPhotoTechnicalMetadataRow(currentMetaRow)
+      : null
+    const historicalMetadataCount = currentMetadata ? Math.max(0, totalRows - 1) : totalRows
+
+    let effectiveStatus: PhotoTechnicalMetadataDetailResult['effectiveStatus']
+    if (currentMetadata) {
+      effectiveStatus = currentMetadata.extractionStatus
+    } else if (totalRows > 0) {
+      effectiveStatus = 'stale'
+    } else {
+      effectiveStatus = 'unprocessed'
+    }
+
+    return {
+      fileLocationId,
+      currentRevision,
+      effectiveStatus,
+      parserRecipeVersion,
+      recordedExtension: fileRow.extension,
+      historicalMetadataCount,
+      currentMetadata
+    }
+  }
+
+  public getPhotoMetadataFacets(options: GetPhotoMetadataFacetsOptions): PhotoMetadataFacetsResult {
+    this.assertOpen()
+    const recipe = options.parserRecipeVersion || METADATA_PARSER_RECIPE_VERSION
+    const limit = Math.max(
+      1,
+      Math.min(
+        METADATA_LIMITS.FACET_MAX_LIMIT,
+        Math.floor(options.limit ?? METADATA_LIMITS.FACET_DEFAULT_LIMIT)
+      )
+    )
+    const offset = Math.max(0, Math.floor(options.offset ?? 0))
+    const search = options.search?.trim().toLowerCase() ?? ''
+
+    const cov = this.getPhotoMetadataCoverage(recipe)
+    const unprocessedCount = cov.unprocessedCount + cov.staleCount
+
+    if (options.field === 'filename_extension') {
+      const searchCond = search ? 'AND LOWER(f.extension) LIKE ?' : ''
+      const queryParams: SQLInputValue[] = search
+        ? [`%${search}%`, limit + 1, offset]
+        : [limit + 1, offset]
+
+      const rows = this.db
+        .prepare(
+          `
+          SELECT LOWER(f.extension) AS norm_val, LOWER(f.extension) AS disp_val, COUNT(*) AS cnt
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          WHERE f.category = 'photo'
+            AND f.extension IS NOT NULL
+            AND f.extension != ''
+            ${searchCond}
+          GROUP BY LOWER(f.extension)
+          ORDER BY cnt DESC, norm_val ASC
+          LIMIT ? OFFSET ?;
+        `
+        )
+        .all(...queryParams) as Array<{ norm_val: string; disp_val: string; cnt: number }>
+
+      const hasMore = rows.length > limit
+      const sliced = hasMore ? rows.slice(0, limit) : rows
+
+      return {
+        field: options.field,
+        items: sliced.map((r) => ({
+          normalizedValue: r.norm_val,
+          displayLabel: r.disp_val,
+          count: Number(r.cnt)
+        })),
+        unknownCount: 0,
+        unprocessedCount,
+        offset,
+        limit,
+        hasMore
+      }
+    }
+
+    if (options.field === 'detected_format') {
+      const searchCond = search ? 'AND tm.detected_format LIKE ?' : ''
+      const queryParams: SQLInputValue[] = search
+        ? [recipe, `%${search}%`, limit + 1, offset]
+        : [recipe, limit + 1, offset]
+
+      const rows = this.db
+        .prepare(
+          `
+          SELECT tm.detected_format AS norm_val, UPPER(tm.detected_format) AS disp_val, COUNT(*) AS cnt
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          JOIN photo_technical_metadata tm
+            ON tm.file_location_id = f.id
+           AND tm.is_current = 1
+           AND tm.parser_recipe_version = ?
+           AND tm.discovery_observation_id = d.id
+          WHERE f.category = 'photo'
+            AND tm.detected_format IS NOT NULL
+            ${searchCond}
+          GROUP BY tm.detected_format
+          ORDER BY cnt DESC, norm_val ASC
+          LIMIT ? OFFSET ?;
+        `
+        )
+        .all(...queryParams) as Array<{ norm_val: string; disp_val: string; cnt: number }>
+
+      const unknownRow = this.db
+        .prepare(
+          `
+          SELECT COUNT(*) AS cnt
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          JOIN photo_technical_metadata tm
+            ON tm.file_location_id = f.id
+           AND tm.is_current = 1
+           AND tm.parser_recipe_version = ?
+           AND tm.discovery_observation_id = d.id
+          WHERE f.category = 'photo'
+            AND tm.detected_format IS NULL;
+        `
+        )
+        .get(recipe) as { cnt: number } | undefined
+
+      const hasMore = rows.length > limit
+      const sliced = hasMore ? rows.slice(0, limit) : rows
+
+      return {
+        field: options.field,
+        items: sliced.map((r) => ({
+          normalizedValue: r.norm_val,
+          displayLabel: r.disp_val,
+          count: Number(r.cnt)
+        })),
+        unknownCount: Number(unknownRow?.cnt ?? 0),
+        unprocessedCount,
+        offset,
+        limit,
+        hasMore
+      }
+    }
+
+    const normCol = options.field === 'camera' ? 'camera_normalized' : 'lens_normalized'
+    const dispCol = options.field === 'camera' ? 'camera_display' : 'lens_display'
+    const searchCond = search ? `AND tm.${normCol} LIKE ?` : ''
+    const queryParams: SQLInputValue[] = search
+      ? [recipe, `%${search}%`, limit + 1, offset]
+      : [recipe, limit + 1, offset]
+
+    const rows = this.db
+      .prepare(
+        `
+        SELECT tm.${normCol} AS norm_val, MAX(tm.${dispCol}) AS disp_val, COUNT(*) AS cnt
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id
+         AND tm.is_current = 1
+         AND tm.parser_recipe_version = ?
+         AND tm.discovery_observation_id = d.id
+        WHERE f.category = 'photo'
+          AND tm.extraction_status IN ('extracted', 'no_metadata')
+          AND tm.${normCol} IS NOT NULL
+          ${searchCond}
+        GROUP BY tm.${normCol}
+        ORDER BY cnt DESC, norm_val ASC
+        LIMIT ? OFFSET ?;
+      `
+      )
+      .all(...queryParams) as Array<{ norm_val: string; disp_val: string; cnt: number }>
+
+    const unknownRow = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS cnt
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id
+         AND tm.is_current = 1
+         AND tm.parser_recipe_version = ?
+         AND tm.discovery_observation_id = d.id
+        WHERE f.category = 'photo'
+          AND tm.extraction_status IN ('extracted', 'no_metadata')
+          AND tm.${normCol} IS NULL;
+      `
+      )
+      .get(recipe) as { cnt: number } | undefined
+
+    const hasMore = rows.length > limit
+    const sliced = hasMore ? rows.slice(0, limit) : rows
+
+    return {
+      field: options.field,
+      items: sliced.map((r) => ({
+        normalizedValue: r.norm_val,
+        displayLabel: r.disp_val ?? r.norm_val,
+        count: Number(r.cnt)
+      })),
+      unknownCount: Number(unknownRow?.cnt ?? 0),
+      unprocessedCount,
+      offset,
+      limit,
+      hasMore
+    }
+  }
+
+  private mapPhotoMetadataJobRow(row: Record<string, unknown>): PhotoMetadataJobRecord {
+    return {
+      id: String(row.id),
+      status: row.status as PhotoMetadataJobRecord['status'],
+      parserRecipeVersion: String(row.parser_recipe_version),
+      totalPhotos: Number(row.total_photos),
+      processedPhotos: Number(row.processed_photos),
+      extractedPhotos: Number(row.extracted_photos),
+      absentMetadataPhotos: Number(row.absent_metadata_photos),
+      reusedPhotos: Number(row.reused_photos),
+      unsupportedPhotos: Number(row.unsupported_photos),
+      failedPhotos: Number(row.failed_photos),
+      pendingPhotos: Number(row.pending_photos),
+      startedAtMs: Number(row.started_at_ms),
+      updatedAtMs: Number(row.updated_at_ms),
+      completedAtMs:
+        row.completed_at_ms !== null && row.completed_at_ms !== undefined
+          ? Number(row.completed_at_ms)
+          : null,
+      lastError:
+        row.last_error !== null && row.last_error !== undefined ? String(row.last_error) : null
+    }
+  }
+
+  private mapPhotoMetadataJobItemRow(row: Record<string, unknown>): PhotoMetadataJobItemRecord {
+    return {
+      id: Number(row.id),
+      jobId: String(row.job_id),
+      fileLocationId: Number(row.file_location_id),
+      originalPath: String(row.original_path),
+      recordedExtension: String(row.recorded_extension),
+      discoveryObservationId: Number(row.discovery_observation_id),
+      expectedByteSize: Number(row.expected_byte_size),
+      expectedMtimeMs:
+        row.expected_mtime_ms !== null && row.expected_mtime_ms !== undefined
+          ? Number(row.expected_mtime_ms)
+          : null,
+      status: row.status as PhotoMetadataJobItemRecord['status'],
+      errorCode:
+        row.error_code !== null && row.error_code !== undefined ? String(row.error_code) : null,
+      errorMessage:
+        row.error_message !== null && row.error_message !== undefined
+          ? String(row.error_message)
+          : null,
+      updatedAtMs:
+        row.updated_at_ms !== null && row.updated_at_ms !== undefined
+          ? Number(row.updated_at_ms)
+          : null
+    }
+  }
+
+  private mapPhotoTechnicalMetadataRow(row: Record<string, unknown>): PhotoTechnicalMetadataRecord {
+    const strOrNull = (val: unknown): string | null =>
+      val !== null && val !== undefined ? String(val) : null
+    const numOrNull = (val: unknown): number | null =>
+      val !== null && val !== undefined ? Number(val) : null
+
+    return {
+      id: Number(row.id),
+      fileLocationId: Number(row.file_location_id),
+      discoveryObservationId: Number(row.discovery_observation_id),
+      parserRecipeVersion: String(row.parser_recipe_version),
+      extractionStatus: row.extraction_status as PhotoTechnicalMetadataRecord['extractionStatus'],
+      contentSha256: strOrNull(row.content_sha256),
+      contentRevision: String(row.content_revision),
+      observedByteSize: numOrNull(row.observed_byte_size),
+      observedMtimeMs: numOrNull(row.observed_mtime_ms),
+      recordedExtension: String(row.recorded_extension),
+      detectedFormat: strOrNull(row.detected_format),
+      extensionFormatMismatch: Number(row.extension_format_mismatch) === 1,
+
+      encodedWidthPx: numOrNull(row.encoded_width_px),
+      encodedHeightPx: numOrNull(row.encoded_height_px),
+      exifOrientation: numOrNull(row.exif_orientation),
+      displayWidthPx: numOrNull(row.display_width_px),
+      displayHeightPx: numOrNull(row.display_height_px),
+
+      captureDateSourceTag: strOrNull(
+        row.capture_date_source_tag
+      ) as PhotoTechnicalMetadataRecord['captureDateSourceTag'],
+      rawCaptureDateText: strOrNull(row.raw_capture_date_text),
+      captureSubseconds: strOrNull(row.capture_subseconds),
+      captureOffsetMinutes: numOrNull(row.capture_offset_minutes),
+      captureOffsetText: strOrNull(row.capture_offset_text),
+      captureTimezoneStatus: String(
+        row.capture_timezone_status
+      ) as PhotoTechnicalMetadataRecord['captureTimezoneStatus'],
+      captureCalendarDate: strOrNull(row.capture_calendar_date),
+      captureLocalIso: strOrNull(row.capture_local_iso),
+      captureUtcEpochMs: numOrNull(row.capture_utc_epoch_ms),
+      captureDateParseError: strOrNull(row.capture_date_parse_error),
+      captureDateConflict: strOrNull(row.capture_date_conflict),
+
+      cameraMakeRaw: strOrNull(row.camera_make_raw),
+      cameraModelRaw: strOrNull(row.camera_model_raw),
+      cameraDisplay: strOrNull(row.camera_display),
+      cameraNormalized: strOrNull(row.camera_normalized),
+      lensMakeRaw: strOrNull(row.lens_make_raw),
+      lensModelRaw: strOrNull(row.lens_model_raw),
+      lensDisplay: strOrNull(row.lens_display),
+      lensNormalized: strOrNull(row.lens_normalized),
+
+      rawMetadataJson: strOrNull(row.raw_metadata_json),
+      errorCode: strOrNull(row.error_code),
+      errorMessage: strOrNull(row.error_message),
+      createdAtMs: Number(row.created_at_ms),
+      isCurrent: Number(row.is_current) === 1
     }
   }
 }

@@ -441,13 +441,48 @@ export type PhotoRatingFilter = z.infer<typeof PhotoRatingFilterSchema>
 export const PhotoFlagFilterSchema = z.enum(['all', 'none', 'pick', 'reject'])
 export type PhotoFlagFilter = z.infer<typeof PhotoFlagFilterSchema>
 
-export const GetPhotosPageRequestSchema = z.object({
-  offset: z.number().int().nonnegative(),
-  limit: z.number().int().positive().max(200),
-  ratingFilter: PhotoRatingFilterSchema.default('all'),
-  flagFilter: PhotoFlagFilterSchema.default('all'),
-  collectionId: z.number().int().positive().nullable().default(null)
-})
+function isValidCalendarDateString(val: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val)
+  if (!m) return false
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  if (year < 1826 || year > 9999 || month < 1 || month > 12 || day < 1) return false
+  const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+  const daysInMonth = [31, isLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= (daysInMonth[month - 1] ?? 0)
+}
+
+export const CalendarDateIsoSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD calendar date')
+  .refine(isValidCalendarDateString, 'Invalid Gregorian calendar date')
+
+export const PhotoFileTypeBasisSchema = z.enum(['detected_format', 'filename_extension'])
+export type PhotoFileTypeBasis = z.infer<typeof PhotoFileTypeBasisSchema>
+
+export const GetPhotosPageRequestSchema = z
+  .object({
+    offset: z.number().int().nonnegative(),
+    limit: z.number().int().positive().max(200),
+    ratingFilter: PhotoRatingFilterSchema.default('all'),
+    flagFilter: PhotoFlagFilterSchema.default('all'),
+    collectionId: z.number().int().positive().nullable().default(null),
+    captureDateFrom: CalendarDateIsoSchema.nullable().default(null),
+    captureDateTo: CalendarDateIsoSchema.nullable().default(null),
+    includeUnknownCaptureDate: z.boolean().default(false),
+    cameraNormalized: z.string().max(256).nullable().default(null),
+    onlyUnknownCamera: z.boolean().default(false),
+    lensNormalized: z.string().max(256).nullable().default(null),
+    onlyUnknownLens: z.boolean().default(false),
+    minWidthPx: z.number().int().min(1).max(100_000).nullable().default(null),
+    minHeightPx: z.number().int().min(1).max(100_000).nullable().default(null),
+    includeUnknownDimensions: z.boolean().default(false),
+    fileTypeBasis: PhotoFileTypeBasisSchema.default('detected_format'),
+    fileTypeValue: z.string().max(32).nullable().default(null),
+    onlyUnknownDetectedFormat: z.boolean().default(false)
+  })
+  .strict()
 export type GetPhotosPageRequest = z.input<typeof GetPhotosPageRequestSchema>
 
 export const GetPhotosPageResponseSchema = z.object({
@@ -522,6 +557,7 @@ export const PhotosDiagnosticsResponseSchema = z.object({
   terminatingWorkers: z.number().int().nonnegative().optional(),
   liveWorkers: z.number().int().nonnegative().optional(),
   activeSemanticTasks: z.number().int().nonnegative().optional(),
+  activeMetadataTasks: z.number().int().nonnegative().optional(),
   semanticModelLoadedWorkers: z.number().int().nonnegative().optional(),
   queuedJobs: z.number().int().nonnegative(),
   totalDecodes: z.number().int().nonnegative(),
@@ -1049,6 +1085,191 @@ export const SemanticIndexJobItemsResponseSchema = z.object({
   pageSize: z.number().int().positive()
 })
 export type SemanticIndexJobItemsResponse = z.infer<typeof SemanticIndexJobItemsResponseSchema>
+
+// ============================================================================
+// Stage 6C: Photo Technical Metadata Extraction, Provenance & Bounded Facets
+// ============================================================================
+
+export const PhotoMetadataExtractionStatusSchema = z.enum([
+  'unprocessed',
+  'extracted',
+  'no_metadata',
+  'unsupported',
+  'failed',
+  'stale'
+])
+export type PhotoMetadataExtractionStatus = z.infer<typeof PhotoMetadataExtractionStatusSchema>
+
+export const PhotoMetadataJobStatusSchema = z.enum([
+  'idle',
+  'running',
+  'paused',
+  'completed',
+  'cancelled',
+  'interrupted',
+  'failed'
+])
+export type PhotoMetadataJobStatus = z.infer<typeof PhotoMetadataJobStatusSchema>
+
+export const PhotoMetadataCoverageSchema = z.object({
+  parserRecipeVersion: z.string().min(1),
+  totalPhotos: z.number().int().nonnegative(),
+  extractedCount: z.number().int().nonnegative(),
+  noMetadataCount: z.number().int().nonnegative(),
+  unsupportedCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  staleCount: z.number().int().nonnegative(),
+  unprocessedCount: z.number().int().nonnegative()
+})
+export type PhotoMetadataCoverage = z.infer<typeof PhotoMetadataCoverageSchema>
+
+export const PhotoMetadataProgressResponseSchema = z.object({
+  jobId: z.string().nullable(),
+  status: PhotoMetadataJobStatusSchema,
+  parserRecipeVersion: z.string().min(1),
+  totalPhotos: z.number().int().nonnegative(),
+  processedPhotos: z.number().int().nonnegative(),
+  extractedPhotos: z.number().int().nonnegative(),
+  absentMetadataPhotos: z.number().int().nonnegative(),
+  reusedPhotos: z.number().int().nonnegative(),
+  unsupportedPhotos: z.number().int().nonnegative(),
+  failedPhotos: z.number().int().nonnegative(),
+  pendingPhotos: z.number().int().nonnegative(),
+  startedAtMs: z.number().int().nullable(),
+  updatedAtMs: z.number().int().nullable(),
+  completedAtMs: z.number().int().nullable(),
+  lastError: z.string().nullable(),
+  coverage: PhotoMetadataCoverageSchema
+})
+export type PhotoMetadataProgressResponse = z.infer<typeof PhotoMetadataProgressResponseSchema>
+
+export const StartPhotoMetadataExtractionRequestSchema = z
+  .object({
+    retryFailed: z.boolean().default(false)
+  })
+  .strict()
+export type StartPhotoMetadataExtractionRequest = z.input<
+  typeof StartPhotoMetadataExtractionRequestSchema
+>
+
+export const PhotoTechnicalMetadataSchema = z.object({
+  id: z.number().int().positive(),
+  fileLocationId: z.number().int().positive(),
+  discoveryObservationId: z.number().int().positive(),
+  parserRecipeVersion: z.string().min(1),
+  extractionStatus: z.enum(['extracted', 'no_metadata', 'unsupported', 'failed', 'stale']),
+  contentSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/i)
+    .nullable(),
+  contentRevision: z.string().min(1),
+  observedByteSize: z.number().int().nonnegative().nullable(),
+  observedMtimeMs: z.number().nullable(),
+  recordedExtension: z.string(),
+  detectedFormat: z.string().nullable(),
+  extensionFormatMismatch: z.boolean(),
+
+  encodedWidthPx: z.number().int().positive().nullable(),
+  encodedHeightPx: z.number().int().positive().nullable(),
+  exifOrientation: z.number().int().min(1).max(8).nullable(),
+  displayWidthPx: z.number().int().positive().nullable(),
+  displayHeightPx: z.number().int().positive().nullable(),
+
+  captureDateSourceTag: z.enum(['DateTimeOriginal', 'DateTimeDigitized']).nullable(),
+  rawCaptureDateText: z.string().nullable(),
+  captureSubseconds: z.string().nullable(),
+  captureOffsetMinutes: z.number().int().min(-840).max(840).nullable(),
+  captureOffsetText: z.string().nullable(),
+  captureTimezoneStatus: z.enum([
+    'offset_present',
+    'local_wall_clock_unknown_tz',
+    'invalid_offset',
+    'unknown'
+  ]),
+  captureCalendarDate: CalendarDateIsoSchema.nullable(),
+  captureLocalIso: z.string().nullable(),
+  captureUtcEpochMs: z.number().int().nullable(),
+  captureDateParseError: z.string().nullable(),
+  captureDateConflict: z.string().nullable(),
+
+  cameraMakeRaw: z.string().nullable(),
+  cameraModelRaw: z.string().nullable(),
+  cameraDisplay: z.string().nullable(),
+  cameraNormalized: z.string().nullable(),
+  lensMakeRaw: z.string().nullable(),
+  lensModelRaw: z.string().nullable(),
+  lensDisplay: z.string().nullable(),
+  lensNormalized: z.string().nullable(),
+
+  rawMetadataJson: z
+    .string()
+    .max(16 * 1024 + 512)
+    .nullable(),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  createdAtMs: z.number().int().nonnegative(),
+  isCurrent: z.boolean()
+})
+export type PhotoTechnicalMetadata = z.infer<typeof PhotoTechnicalMetadataSchema>
+
+export const PhotoTechnicalMetadataDetailSchema = z.object({
+  fileLocationId: z.number().int().positive(),
+  currentRevision: z.string().min(1),
+  effectiveStatus: PhotoMetadataExtractionStatusSchema,
+  parserRecipeVersion: z.string().min(1),
+  recordedExtension: z.string(),
+  historicalMetadataCount: z.number().int().nonnegative(),
+  currentMetadata: PhotoTechnicalMetadataSchema.nullable()
+})
+export type PhotoTechnicalMetadataDetail = z.infer<typeof PhotoTechnicalMetadataDetailSchema>
+
+export const GetPhotoMetadataDetailRequestSchema = z
+  .object({
+    fileLocationId: z.number().int().positive()
+  })
+  .strict()
+export type GetPhotoMetadataDetailRequest = z.infer<typeof GetPhotoMetadataDetailRequestSchema>
+
+export const GetPhotoMetadataDetailResponseSchema = z.object({
+  detail: PhotoTechnicalMetadataDetailSchema.nullable()
+})
+export type GetPhotoMetadataDetailResponse = z.infer<typeof GetPhotoMetadataDetailResponseSchema>
+
+export const PhotoMetadataFacetFieldSchema = z.enum([
+  'camera',
+  'lens',
+  'detected_format',
+  'filename_extension'
+])
+export type PhotoMetadataFacetField = z.infer<typeof PhotoMetadataFacetFieldSchema>
+
+export const GetPhotoMetadataFacetsRequestSchema = z
+  .object({
+    field: PhotoMetadataFacetFieldSchema,
+    search: z.string().max(120).optional(),
+    limit: z.number().int().min(1).max(50).default(25),
+    offset: z.number().int().nonnegative().default(0)
+  })
+  .strict()
+export type GetPhotoMetadataFacetsRequest = z.input<typeof GetPhotoMetadataFacetsRequestSchema>
+
+export const PhotoMetadataFacetItemSchema = z.object({
+  normalizedValue: z.string().min(1),
+  displayLabel: z.string().min(1),
+  count: z.number().int().nonnegative()
+})
+export type PhotoMetadataFacetItem = z.infer<typeof PhotoMetadataFacetItemSchema>
+
+export const GetPhotoMetadataFacetsResponseSchema = z.object({
+  field: PhotoMetadataFacetFieldSchema,
+  items: z.array(PhotoMetadataFacetItemSchema),
+  unknownCount: z.number().int().nonnegative(),
+  unprocessedCount: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  hasMore: z.boolean()
+})
+export type GetPhotoMetadataFacetsResponse = z.infer<typeof GetPhotoMetadataFacetsResponseSchema>
 
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,

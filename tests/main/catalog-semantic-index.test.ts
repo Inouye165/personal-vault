@@ -49,8 +49,8 @@ describe('Stage 6B — Catalog Schema Migration 9, Vector Validation & Semantic 
     rmSync(tempDir, { recursive: true, force: true })
   })
 
-  it('sets CURRENT_SCHEMA_VERSION to 9 and creates semantic index tables', () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(9)
+  it('sets CURRENT_SCHEMA_VERSION to at least 9 and creates semantic index tables', () => {
+    expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(9)
     const tables = catalog
       .getRawDb()
       .prepare("SELECT name FROM sqlite_master WHERE type='table';")

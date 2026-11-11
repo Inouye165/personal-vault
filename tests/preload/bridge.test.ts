@@ -98,7 +98,15 @@ describe('preload bridge', () => {
         'cancelSemanticIndexing',
         'getSemanticIndexProgress',
         'getSemanticIndexJobItems',
-        'onSemanticIndexProgress'
+        'onSemanticIndexProgress',
+        'getPhotoMetadataProgress',
+        'startPhotoMetadataExtraction',
+        'pausePhotoMetadataExtraction',
+        'resumePhotoMetadataExtraction',
+        'cancelPhotoMetadataExtraction',
+        'onPhotoMetadataProgress',
+        'getPhotoMetadataDetail',
+        'getPhotoMetadataFacets'
       ].sort()
     )
   })

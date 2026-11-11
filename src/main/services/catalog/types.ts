@@ -123,6 +123,21 @@ export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly ratingFilter?: 'all' | 'unrated' | '1' | '2' | '3' | '4' | '5'
   readonly flagFilter?: 'all' | 'none' | 'pick' | 'reject'
   readonly collectionId?: number | null
+  // Stage 6C SQL metadata filters
+  readonly parserRecipeVersion?: string
+  readonly captureDateFrom?: string | null
+  readonly captureDateTo?: string | null
+  readonly includeUnknownCaptureDate?: boolean
+  readonly cameraNormalized?: string | null
+  readonly onlyUnknownCamera?: boolean
+  readonly lensNormalized?: string | null
+  readonly onlyUnknownLens?: boolean
+  readonly minWidthPx?: number | null
+  readonly minHeightPx?: number | null
+  readonly includeUnknownDimensions?: boolean
+  readonly fileTypeBasis?: 'detected_format' | 'filename_extension'
+  readonly fileTypeValue?: string | null
+  readonly onlyUnknownDetectedFormat?: boolean
 }
 
 export type ScanJobStatus =
@@ -701,4 +716,190 @@ export interface SemanticIndexJobItem {
 export interface SemanticIndexCoverageResult {
   readonly totalCatalogPhotos: number
   readonly currentIndexedPhotos: number
+}
+
+// ==========================================
+// Stage 6C: Photo Technical Metadata & SQL Filters Types
+// ==========================================
+
+export interface PhotoTechnicalMetadataRecord {
+  readonly id: number
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly parserRecipeVersion: string
+  readonly extractionStatus: 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'stale'
+  readonly contentSha256: string | null
+  readonly contentRevision: string
+  readonly observedByteSize: number | null
+  readonly observedMtimeMs: number | null
+  readonly recordedExtension: string
+  readonly detectedFormat: string | null
+  readonly extensionFormatMismatch: boolean
+
+  readonly encodedWidthPx: number | null
+  readonly encodedHeightPx: number | null
+  readonly exifOrientation: number | null
+  readonly displayWidthPx: number | null
+  readonly displayHeightPx: number | null
+
+  readonly captureDateSourceTag: 'DateTimeOriginal' | 'DateTimeDigitized' | null
+  readonly rawCaptureDateText: string | null
+  readonly captureSubseconds: string | null
+  readonly captureOffsetMinutes: number | null
+  readonly captureOffsetText: string | null
+  readonly captureTimezoneStatus:
+    'offset_present' | 'local_wall_clock_unknown_tz' | 'invalid_offset' | 'unknown'
+  readonly captureCalendarDate: string | null
+  readonly captureLocalIso: string | null
+  readonly captureUtcEpochMs: number | null
+  readonly captureDateParseError: string | null
+  readonly captureDateConflict: string | null
+
+  readonly cameraMakeRaw: string | null
+  readonly cameraModelRaw: string | null
+  readonly cameraDisplay: string | null
+  readonly cameraNormalized: string | null
+  readonly lensMakeRaw: string | null
+  readonly lensModelRaw: string | null
+  readonly lensDisplay: string | null
+  readonly lensNormalized: string | null
+
+  readonly rawMetadataJson: string | null
+  readonly errorCode: string | null
+  readonly errorMessage: string | null
+  readonly createdAtMs: number
+  readonly isCurrent: boolean
+}
+
+export interface SavePhotoTechnicalMetadataInput {
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly parserRecipeVersion: string
+  readonly extractionStatus: 'extracted' | 'no_metadata' | 'unsupported' | 'failed'
+  readonly contentSha256: string | null
+  readonly contentRevision: string
+  readonly observedByteSize: number | null
+  readonly observedMtimeMs: number | null
+  readonly recordedExtension: string
+  readonly detectedFormat: string | null
+  readonly extensionFormatMismatch: boolean
+
+  readonly encodedWidthPx: number | null
+  readonly encodedHeightPx: number | null
+  readonly exifOrientation: number | null
+  readonly displayWidthPx: number | null
+  readonly displayHeightPx: number | null
+
+  readonly captureDateSourceTag: 'DateTimeOriginal' | 'DateTimeDigitized' | null
+  readonly rawCaptureDateText: string | null
+  readonly captureSubseconds: string | null
+  readonly captureOffsetMinutes: number | null
+  readonly captureOffsetText: string | null
+  readonly captureTimezoneStatus:
+    'offset_present' | 'local_wall_clock_unknown_tz' | 'invalid_offset' | 'unknown'
+  readonly captureCalendarDate: string | null
+  readonly captureLocalIso: string | null
+  readonly captureUtcEpochMs: number | null
+  readonly captureDateParseError: string | null
+  readonly captureDateConflict: string | null
+
+  readonly cameraMakeRaw: string | null
+  readonly cameraModelRaw: string | null
+  readonly cameraDisplay: string | null
+  readonly cameraNormalized: string | null
+  readonly lensMakeRaw: string | null
+  readonly lensModelRaw: string | null
+  readonly lensDisplay: string | null
+  readonly lensNormalized: string | null
+
+  readonly rawMetadataJson: string | null
+  readonly errorCode: string | null
+  readonly errorMessage: string | null
+}
+
+export interface PhotoMetadataCoverageResult {
+  readonly parserRecipeVersion: string
+  readonly totalPhotos: number
+  readonly extractedCount: number
+  readonly noMetadataCount: number
+  readonly unsupportedCount: number
+  readonly failedCount: number
+  readonly staleCount: number
+  readonly unprocessedCount: number
+}
+
+export interface PhotoMetadataJobRecord {
+  readonly id: string
+  readonly status:
+    'idle' | 'running' | 'paused' | 'completed' | 'cancelled' | 'interrupted' | 'failed'
+  readonly parserRecipeVersion: string
+  readonly totalPhotos: number
+  readonly processedPhotos: number
+  readonly extractedPhotos: number
+  readonly absentMetadataPhotos: number
+  readonly reusedPhotos: number
+  readonly unsupportedPhotos: number
+  readonly failedPhotos: number
+  readonly pendingPhotos: number
+  readonly startedAtMs: number
+  readonly updatedAtMs: number
+  readonly completedAtMs: number | null
+  readonly lastError: string | null
+}
+
+export interface CreatePhotoMetadataJobInput {
+  readonly jobId?: string
+  readonly parserRecipeVersion: string
+  readonly retryFailed?: boolean
+}
+
+export interface PhotoMetadataJobItemRecord {
+  readonly id: number
+  readonly jobId: string
+  readonly fileLocationId: number
+  readonly originalPath: string
+  readonly recordedExtension: string
+  readonly discoveryObservationId: number
+  readonly expectedByteSize: number
+  readonly expectedMtimeMs: number | null
+  readonly status:
+    'pending' | 'extracted' | 'no_metadata' | 'reused' | 'unsupported' | 'failed' | 'skipped'
+  readonly errorCode: string | null
+  readonly errorMessage: string | null
+  readonly updatedAtMs: number | null
+}
+
+export interface PhotoMetadataFacetItem {
+  readonly normalizedValue: string
+  readonly displayLabel: string
+  readonly count: number
+}
+
+export interface GetPhotoMetadataFacetsOptions {
+  readonly field: 'camera' | 'lens' | 'detected_format' | 'filename_extension'
+  readonly parserRecipeVersion: string
+  readonly search?: string
+  readonly limit?: number
+  readonly offset?: number
+}
+
+export interface PhotoMetadataFacetsResult {
+  readonly field: 'camera' | 'lens' | 'detected_format' | 'filename_extension'
+  readonly items: readonly PhotoMetadataFacetItem[]
+  readonly unknownCount: number
+  readonly unprocessedCount: number
+  readonly offset: number
+  readonly limit: number
+  readonly hasMore: boolean
+}
+
+export interface PhotoTechnicalMetadataDetailResult {
+  readonly fileLocationId: number
+  readonly currentRevision: string
+  readonly effectiveStatus:
+    'unprocessed' | 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'stale'
+  readonly parserRecipeVersion: string
+  readonly recordedExtension: string
+  readonly historicalMetadataCount: number
+  readonly currentMetadata: PhotoTechnicalMetadataRecord | null
 }

@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 9
+export const CURRENT_SCHEMA_VERSION = 10
 
 interface Migration {
   readonly version: number
@@ -644,6 +644,175 @@ const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_semantic_job_items_job_status
           ON semantic_index_job_items(job_id, status, id);
+      `)
+    }
+  },
+  {
+    version: 10,
+    name: 'photo_technical_metadata_and_jobs',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_technical_metadata (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          parser_recipe_version TEXT NOT NULL,
+          extraction_status TEXT NOT NULL CHECK (
+            extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed', 'stale')
+          ),
+          content_sha256 TEXT CHECK (content_sha256 IS NULL OR length(content_sha256) = 64),
+          content_revision TEXT NOT NULL,
+          observed_byte_size INTEGER CHECK (observed_byte_size IS NULL OR observed_byte_size >= 0),
+          observed_mtime_ms REAL,
+          recorded_extension TEXT NOT NULL,
+          detected_format TEXT,
+          extension_format_mismatch INTEGER NOT NULL DEFAULT 0 CHECK (extension_format_mismatch IN (0, 1)),
+
+          encoded_width_px INTEGER CHECK (encoded_width_px IS NULL OR encoded_width_px > 0),
+          encoded_height_px INTEGER CHECK (encoded_height_px IS NULL OR encoded_height_px > 0),
+          exif_orientation INTEGER CHECK (
+            exif_orientation IS NULL OR (exif_orientation >= 1 AND exif_orientation <= 8)
+          ),
+          display_width_px INTEGER CHECK (display_width_px IS NULL OR display_width_px > 0),
+          display_height_px INTEGER CHECK (display_height_px IS NULL OR display_height_px > 0),
+
+          capture_date_source_tag TEXT CHECK (
+            capture_date_source_tag IS NULL OR capture_date_source_tag IN ('DateTimeOriginal', 'DateTimeDigitized')
+          ),
+          raw_capture_date_text TEXT,
+          capture_subseconds TEXT,
+          capture_offset_minutes INTEGER CHECK (
+            capture_offset_minutes IS NULL OR (capture_offset_minutes >= -840 AND capture_offset_minutes <= 840)
+          ),
+          capture_offset_text TEXT,
+          capture_timezone_status TEXT NOT NULL DEFAULT 'unknown' CHECK (
+            capture_timezone_status IN ('offset_present', 'local_wall_clock_unknown_tz', 'invalid_offset', 'unknown')
+          ),
+          capture_calendar_date TEXT,
+          capture_local_iso TEXT,
+          capture_utc_epoch_ms INTEGER,
+          capture_date_parse_error TEXT,
+          capture_date_conflict TEXT,
+
+          camera_make_raw TEXT,
+          camera_model_raw TEXT,
+          camera_display TEXT,
+          camera_normalized TEXT,
+          lens_make_raw TEXT,
+          lens_model_raw TEXT,
+          lens_display TEXT,
+          lens_normalized TEXT,
+
+          raw_metadata_json TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          created_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_tech_meta_unique_current
+          ON photo_technical_metadata(file_location_id, parser_recipe_version)
+          WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_location_history
+          ON photo_technical_metadata(file_location_id, is_current, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_capture_date
+          ON photo_technical_metadata(
+            parser_recipe_version,
+            is_current,
+            extraction_status,
+            capture_calendar_date
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_camera
+          ON photo_technical_metadata(
+            parser_recipe_version,
+            is_current,
+            extraction_status,
+            camera_normalized,
+            camera_display
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_lens
+          ON photo_technical_metadata(
+            parser_recipe_version,
+            is_current,
+            extraction_status,
+            lens_normalized,
+            lens_display
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_dimensions
+          ON photo_technical_metadata(
+            parser_recipe_version,
+            is_current,
+            extraction_status,
+            display_width_px,
+            display_height_px
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_format
+          ON photo_technical_metadata(parser_recipe_version, is_current, detected_format);
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_sha_reuse
+          ON photo_technical_metadata(
+            content_sha256,
+            observed_byte_size,
+            parser_recipe_version,
+            extraction_status,
+            id DESC
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_size_reuse
+          ON photo_technical_metadata(
+            observed_byte_size,
+            parser_recipe_version,
+            extraction_status
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_file_locations_cat_ext
+          ON file_locations(category, extension, id);
+
+        CREATE TABLE IF NOT EXISTS photo_metadata_jobs (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (
+            status IN ('idle', 'running', 'paused', 'completed', 'cancelled', 'interrupted', 'failed')
+          ),
+          parser_recipe_version TEXT NOT NULL,
+          total_photos INTEGER NOT NULL DEFAULT 0 CHECK (total_photos >= 0),
+          processed_photos INTEGER NOT NULL DEFAULT 0 CHECK (processed_photos >= 0),
+          extracted_photos INTEGER NOT NULL DEFAULT 0 CHECK (extracted_photos >= 0),
+          absent_metadata_photos INTEGER NOT NULL DEFAULT 0 CHECK (absent_metadata_photos >= 0),
+          reused_photos INTEGER NOT NULL DEFAULT 0 CHECK (reused_photos >= 0),
+          unsupported_photos INTEGER NOT NULL DEFAULT 0 CHECK (unsupported_photos >= 0),
+          failed_photos INTEGER NOT NULL DEFAULT 0 CHECK (failed_photos >= 0),
+          pending_photos INTEGER NOT NULL DEFAULT 0 CHECK (pending_photos >= 0),
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS photo_metadata_job_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL REFERENCES photo_metadata_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          original_path TEXT NOT NULL,
+          recorded_extension TEXT NOT NULL,
+          discovery_observation_id INTEGER NOT NULL,
+          expected_byte_size INTEGER NOT NULL,
+          expected_mtime_ms REAL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'extracted', 'no_metadata', 'reused', 'unsupported', 'failed', 'skipped')
+          ),
+          error_code TEXT,
+          error_message TEXT,
+          updated_at_ms INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_meta_job_items_job_status
+          ON photo_metadata_job_items(job_id, status, id);
       `)
     }
   }

@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  PhotoFileTypeBasis,
   PhotoFlagFilter,
   PhotoItem,
   PhotoRatingFilter,
@@ -22,6 +23,70 @@ export const PHOTO_BOUNDS = {
   MAX_THUMBNAIL_CACHE: 200,
   MAX_MOUNTED_CELLS: 200
 } as const
+
+export interface PhotoMetadataFilterState {
+  readonly captureDateFrom: string | null
+  readonly captureDateTo: string | null
+  readonly includeUnknownCaptureDate: boolean
+  readonly cameraNormalized: string | null
+  readonly onlyUnknownCamera: boolean
+  readonly lensNormalized: string | null
+  readonly onlyUnknownLens: boolean
+  readonly minWidthPx: number | null
+  readonly minHeightPx: number | null
+  readonly includeUnknownDimensions: boolean
+  readonly fileTypeBasis: PhotoFileTypeBasis
+  readonly fileTypeValue: string | null
+  readonly onlyUnknownDetectedFormat: boolean
+}
+
+export const DEFAULT_PHOTO_METADATA_FILTERS: PhotoMetadataFilterState = {
+  captureDateFrom: null,
+  captureDateTo: null,
+  includeUnknownCaptureDate: false,
+  cameraNormalized: null,
+  onlyUnknownCamera: false,
+  lensNormalized: null,
+  onlyUnknownLens: false,
+  minWidthPx: null,
+  minHeightPx: null,
+  includeUnknownDimensions: false,
+  fileTypeBasis: 'detected_format',
+  fileTypeValue: null,
+  onlyUnknownDetectedFormat: false
+}
+
+export function countActiveMetadataFilters(filters: PhotoMetadataFilterState): number {
+  let count = 0
+  if (
+    filters.captureDateFrom !== null ||
+    filters.captureDateTo !== null ||
+    filters.includeUnknownCaptureDate
+  ) {
+    count++
+  }
+  if (filters.cameraNormalized !== null || filters.onlyUnknownCamera) {
+    count++
+  }
+  if (filters.lensNormalized !== null || filters.onlyUnknownLens) {
+    count++
+  }
+  if (
+    filters.minWidthPx !== null ||
+    filters.minHeightPx !== null ||
+    filters.includeUnknownDimensions
+  ) {
+    count++
+  }
+  if (filters.fileTypeValue !== null || filters.onlyUnknownDetectedFormat) {
+    count++
+  }
+  return count
+}
+
+export function hasActiveMetadataFilters(filters: PhotoMetadataFilterState): boolean {
+  return countActiveMetadataFilters(filters) > 0
+}
 
 interface InFlightThumbRequest {
   readonly requestId: number
@@ -40,10 +105,13 @@ export interface UsePhotosResult {
   readonly ratingFilter: PhotoRatingFilter
   readonly flagFilter: PhotoFlagFilter
   readonly collectionId: number | null
+  readonly metadataFilters: PhotoMetadataFilterState
+  readonly filterGeneration: number
   readonly selectPhoto: (id: number | null) => void
   readonly setRatingFilter: (filter: PhotoRatingFilter) => void
   readonly setFlagFilter: (filter: PhotoFlagFilter) => void
   readonly setCollectionId: (collectionId: number | null) => void
+  readonly updateMetadataFilters: (patch: Partial<PhotoMetadataFilterState>) => void
   readonly resetFilters: () => void
   readonly updatePhotoLocal: (
     photoId: number,
@@ -72,16 +140,22 @@ export function usePhotos(): UsePhotosResult {
   const [ratingFilter, setRatingFilterState] = useState<PhotoRatingFilter>('all')
   const [flagFilter, setFlagFilterState] = useState<PhotoFlagFilter>('all')
   const [collectionId, setCollectionIdState] = useState<number | null>(null)
+  const [metadataFilters, setMetadataFiltersState] = useState<PhotoMetadataFilterState>(
+    DEFAULT_PHOTO_METADATA_FILTERS
+  )
+  const [filterGeneration, setFilterGeneration] = useState<number>(0)
 
   const ratingFilterRef = useRef(ratingFilter)
   const flagFilterRef = useRef(flagFilter)
   const collectionIdRef = useRef(collectionId)
+  const metadataFiltersRef = useRef(metadataFilters)
 
   useEffect(() => {
     ratingFilterRef.current = ratingFilter
     flagFilterRef.current = flagFilter
     collectionIdRef.current = collectionId
-  }, [ratingFilter, flagFilter, collectionId])
+    metadataFiltersRef.current = metadataFilters
+  }, [ratingFilter, flagFilter, collectionId, metadataFilters])
 
   useEffect(() => {
     thumbnailsRef.current = thumbnails
@@ -105,6 +179,7 @@ export function usePhotos(): UsePhotosResult {
         rating: PhotoRatingFilter
         flag: PhotoFlagFilter
         collection: number | null
+        metadata: PhotoMetadataFilterState
       }
     ) => {
       if (inFlightPagesRef.current.get(pageIndex) === currentGeneration) {
@@ -115,7 +190,8 @@ export function usePhotos(): UsePhotosResult {
       const filters = activeFilters ?? {
         rating: ratingFilterRef.current,
         flag: flagFilterRef.current,
-        collection: collectionIdRef.current
+        collection: collectionIdRef.current,
+        metadata: metadataFiltersRef.current
       }
 
       try {
@@ -128,7 +204,20 @@ export function usePhotos(): UsePhotosResult {
           limit: PHOTO_BOUNDS.PAGE_SIZE,
           ratingFilter: filters.rating,
           flagFilter: filters.flag,
-          collectionId: filters.collection
+          collectionId: filters.collection,
+          captureDateFrom: filters.metadata.captureDateFrom,
+          captureDateTo: filters.metadata.captureDateTo,
+          includeUnknownCaptureDate: filters.metadata.includeUnknownCaptureDate,
+          cameraNormalized: filters.metadata.cameraNormalized,
+          onlyUnknownCamera: filters.metadata.onlyUnknownCamera,
+          lensNormalized: filters.metadata.lensNormalized,
+          onlyUnknownLens: filters.metadata.onlyUnknownLens,
+          minWidthPx: filters.metadata.minWidthPx,
+          minHeightPx: filters.metadata.minHeightPx,
+          includeUnknownDimensions: filters.metadata.includeUnknownDimensions,
+          fileTypeBasis: filters.metadata.fileTypeBasis,
+          fileTypeValue: filters.metadata.fileTypeValue,
+          onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat
         })
 
         // Discard response if generation changed
@@ -173,7 +262,12 @@ export function usePhotos(): UsePhotosResult {
   )
 
   const applyFilters = useCallback(
-    (newRating: PhotoRatingFilter, newFlag: PhotoFlagFilter, newCollection: number | null) => {
+    (
+      newRating: PhotoRatingFilter,
+      newFlag: PhotoFlagFilter,
+      newCollection: number | null,
+      newMetadata: PhotoMetadataFilterState
+    ) => {
       const nextGen = ++generationRef.current
       pageLruRef.current = []
       inFlightPagesRef.current.clear()
@@ -182,10 +276,12 @@ export function usePhotos(): UsePhotosResult {
       setThumbnails(new Map())
       setIsLoading(true)
       setError(null)
+      setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
         rating: newRating,
         flag: newFlag,
-        collection: newCollection
+        collection: newCollection,
+        metadata: newMetadata
       })
     },
     [loadPage]
@@ -193,33 +289,74 @@ export function usePhotos(): UsePhotosResult {
 
   const setRatingFilter = useCallback(
     (newRating: PhotoRatingFilter) => {
+      ratingFilterRef.current = newRating
       setRatingFilterState(newRating)
-      applyFilters(newRating, flagFilterRef.current, collectionIdRef.current)
+      applyFilters(
+        newRating,
+        flagFilterRef.current,
+        collectionIdRef.current,
+        metadataFiltersRef.current
+      )
     },
     [applyFilters]
   )
 
   const setFlagFilter = useCallback(
     (newFlag: PhotoFlagFilter) => {
+      flagFilterRef.current = newFlag
       setFlagFilterState(newFlag)
-      applyFilters(ratingFilterRef.current, newFlag, collectionIdRef.current)
+      applyFilters(
+        ratingFilterRef.current,
+        newFlag,
+        collectionIdRef.current,
+        metadataFiltersRef.current
+      )
     },
     [applyFilters]
   )
 
   const setCollectionId = useCallback(
     (newCollection: number | null) => {
+      collectionIdRef.current = newCollection
       setCollectionIdState(newCollection)
-      applyFilters(ratingFilterRef.current, flagFilterRef.current, newCollection)
+      applyFilters(
+        ratingFilterRef.current,
+        flagFilterRef.current,
+        newCollection,
+        metadataFiltersRef.current
+      )
+    },
+    [applyFilters]
+  )
+
+  const updateMetadataFilters = useCallback(
+    (patch: Partial<PhotoMetadataFilterState>) => {
+      const nextMetadata: PhotoMetadataFilterState = {
+        ...metadataFiltersRef.current,
+        ...patch
+      }
+      metadataFiltersRef.current = nextMetadata
+      setMetadataFiltersState(nextMetadata)
+      applyFilters(
+        ratingFilterRef.current,
+        flagFilterRef.current,
+        collectionIdRef.current,
+        nextMetadata
+      )
     },
     [applyFilters]
   )
 
   const resetFilters = useCallback(() => {
+    ratingFilterRef.current = 'all'
+    flagFilterRef.current = 'all'
+    collectionIdRef.current = null
+    metadataFiltersRef.current = DEFAULT_PHOTO_METADATA_FILTERS
     setRatingFilterState('all')
     setFlagFilterState('all')
     setCollectionIdState(null)
-    applyFilters('all', 'all', null)
+    setMetadataFiltersState(DEFAULT_PHOTO_METADATA_FILTERS)
+    applyFilters('all', 'all', null, DEFAULT_PHOTO_METADATA_FILTERS)
   }, [applyFilters])
 
   const ensureRangeLoaded = useCallback(
@@ -441,10 +578,13 @@ export function usePhotos(): UsePhotosResult {
     ratingFilter,
     flagFilter,
     collectionId,
+    metadataFilters,
+    filterGeneration,
     selectPhoto,
     setRatingFilter,
     setFlagFilter,
     setCollectionId,
+    updateMetadataFilters,
     resetFilters,
     updatePhotoLocal,
     removePhotoFromFilterView,

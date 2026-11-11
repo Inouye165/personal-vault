@@ -16,6 +16,7 @@ import {
   SemanticIndexCoordinator,
   APPROVED_DOWNLOAD_HOSTS
 } from './services/semantic'
+import { PhotoMetadataCoordinator } from './services/metadata'
 
 function logStartup(message: string): void {
   try {
@@ -53,6 +54,7 @@ let thumbnailCoordinator: ThumbnailCoordinator | null = null
 let similarityCoordinator: SimilarityCoordinator | null = null
 let semanticModelManager: SemanticModelManager | null = null
 let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
+let photoMetadataCoordinator: PhotoMetadataCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -174,8 +176,7 @@ if (!app.requestSingleInstanceLock()) {
       const cacheDir = join(app.getPath('userData'), 'thumbnails')
       thumbnailCoordinator = new ThumbnailCoordinator({
         cacheDir,
-        approvedRoots: () =>
-          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : [],
+        approvedRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
         vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
       })
       await thumbnailCoordinator.initialize()
@@ -200,8 +201,7 @@ if (!app.requestSingleInstanceLock()) {
 
       semanticModelManager = new SemanticModelManager({
         modelsRootDir,
-        getApprovedRoots: () =>
-          catalog ? catalog.listSources({ limit: 1000 }).items.map((s) => s.rootPath) : [],
+        getApprovedRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
         getVaultRoot: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null),
         baseDownloadUrl: customDownloadBaseUrl,
         allowedHosts,
@@ -220,6 +220,13 @@ if (!app.requestSingleInstanceLock()) {
       semanticIndexCoordinator.initialize()
       logStartup('semanticIndexCoordinator initialized')
 
+      photoMetadataCoordinator = new PhotoMetadataCoordinator({
+        catalog,
+        thumbnailCoordinator
+      })
+      photoMetadataCoordinator.initialize()
+      logStartup('photoMetadataCoordinator initialized')
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -232,6 +239,7 @@ if (!app.requestSingleInstanceLock()) {
         similarityCoordinator,
         semanticModelManager,
         semanticIndexCoordinator,
+        photoMetadataCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -268,20 +276,25 @@ if (!app.requestSingleInstanceLock()) {
             await vaultCoordinator.shutdown()
             logStartup('vault coordinator shutdown done')
           }
-          if (thumbnailCoordinator) {
-            logStartup('shutting down thumbnail coordinator')
-            await thumbnailCoordinator.shutdown()
-            logStartup('thumbnail coordinator shutdown done')
+          if (photoMetadataCoordinator) {
+            logStartup('shutting down photo metadata coordinator')
+            await photoMetadataCoordinator.shutdown()
+            logStartup('photo metadata coordinator shutdown done')
+          }
+          if (semanticIndexCoordinator) {
+            logStartup('shutting down semantic index coordinator')
+            await semanticIndexCoordinator.shutdown()
+            logStartup('semantic index coordinator shutdown done')
           }
           if (similarityCoordinator) {
             logStartup('shutting down similarity coordinator')
             await similarityCoordinator.shutdown()
             logStartup('similarity coordinator shutdown done')
           }
-          if (semanticIndexCoordinator) {
-            logStartup('shutting down semantic index coordinator')
-            await semanticIndexCoordinator.shutdown()
-            logStartup('semantic index coordinator shutdown done')
+          if (thumbnailCoordinator) {
+            logStartup('shutting down thumbnail coordinator')
+            await thumbnailCoordinator.shutdown()
+            logStartup('thumbnail coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

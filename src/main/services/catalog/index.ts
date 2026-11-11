@@ -65,5 +65,15 @@ export type {
   UnhashedFileRecord,
   UnhashedFilesOptions,
   UnhashedCountResult,
-  VaultImportItemDetail
+  VaultImportItemDetail,
+  PhotoTechnicalMetadataRecord,
+  SavePhotoTechnicalMetadataInput,
+  PhotoMetadataCoverageResult,
+  PhotoMetadataJobRecord,
+  CreatePhotoMetadataJobInput,
+  PhotoMetadataJobItemRecord,
+  PhotoMetadataFacetItem,
+  GetPhotoMetadataFacetsOptions,
+  PhotoMetadataFacetsResult,
+  PhotoTechnicalMetadataDetailResult
 } from './types'

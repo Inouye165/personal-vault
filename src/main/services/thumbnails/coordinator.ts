@@ -7,7 +7,7 @@
  * file preservation.
  */
 
-import { realpathSync, statSync, existsSync } from 'node:fs'
+import { mkdirSync, realpathSync, rmSync, statSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks'
@@ -20,10 +20,14 @@ import {
   type FingerprintJobResult,
   type SemanticEmbedRequestParams,
   type SemanticEmbedJobResult,
-  type SourceVerificationJobResult
+  type SourceVerificationJobResult,
+  type MetadataExtractRequestParams,
+  type MetadataExtractJobResult,
+  type MetadataSourceVerifyResult
 } from './types'
 import type { ThumbnailResult } from '../../../shared/validation/ipc-schemas'
 import type { SemanticModelArtifactSpec } from '../semantic/manifest'
+import type { ExtractedPhotoMetadataResult } from '../metadata/types'
 
 export { readWebPDimensions }
 
@@ -94,12 +98,39 @@ interface QueuedVerifyModelItem {
   priorityOrder: number
 }
 
+interface QueuedExtractMetadataItem {
+  id: number
+  action: 'extract_metadata'
+  params: MetadataExtractRequestParams
+  cacheKey: string
+  resolve: (res: MetadataExtractJobResult) => void
+  reject: (err: unknown) => void
+  priorityOrder: number
+}
+
+interface QueuedVerifyMetadataSourceItem {
+  id: number
+  action: 'verify_metadata_source'
+  params: {
+    sourcePath: string
+    expectedByteSize?: number
+    expectedMtimeMs?: number | null
+    expectedSha256?: string | null
+  }
+  cacheKey: string
+  resolve: (res: MetadataSourceVerifyResult) => void
+  reject: (err: unknown) => void
+  priorityOrder: number
+}
+
 type QueuedItem =
   | QueuedThumbnailItem
   | QueuedFingerprintItem
   | QueuedSemanticEmbedItem
   | QueuedVerifySourceItem
   | QueuedVerifyModelItem
+  | QueuedExtractMetadataItem
+  | QueuedVerifyMetadataSourceItem
 
 interface ActiveWorkerEntry {
   worker: Worker
@@ -133,13 +164,17 @@ function resolveWorkerScriptPath(customPath?: string): string {
     return cachedBundledWorkerPath
   }
 
-  // Dynamic bundling for tests/dev to ensure live code execution
-  const tempWorker = join(process.cwd(), 'out', 'main', 'thumbnail_worker.js')
-  if (existsSync(tempWorker)) {
+  // Dynamic bundling for tests/dev to ensure live code execution without reading stale builds
+  const outMainDir = join(process.cwd(), 'out', 'main')
+  const tempWorker = isTest
+    ? join(outMainDir, `thumbnail_worker.vitest.${process.pid}.cjs`)
+    : join(outMainDir, 'thumbnail_worker.js')
+  if (!isTest && existsSync(tempWorker)) {
     cachedBundledWorkerPath = tempWorker
     return tempWorker
   }
   try {
+    mkdirSync(outMainDir, { recursive: true })
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const esbuild = require('esbuild')
     const workerSource = resolve(__dirname, 'worker.ts')
@@ -156,6 +191,15 @@ function resolveWorkerScriptPath(customPath?: string): string {
       external: ['sharp', 'electron', 'onnxruntime-node']
     })
     cachedBundledWorkerPath = tempWorker
+    if (isTest) {
+      process.once('exit', () => {
+        try {
+          rmSync(tempWorker, { force: true })
+        } catch {
+          // ignore
+        }
+      })
+    }
     return tempWorker
   } catch {
     const projectBuilt = resolve(process.cwd(), 'out', 'main', 'thumbnail_worker.js')
@@ -260,6 +304,11 @@ export class ThumbnailCoordinator {
     const activeSemantic = this.workers.filter(
       (w) => w.item?.action === 'semantic_embed' && !w.isTerminating
     ).length
+    const activeMetadata = this.workers.filter(
+      (w) =>
+        (w.item?.action === 'extract_metadata' || w.item?.action === 'verify_metadata_source') &&
+        !w.isTerminating
+    ).length
     const loadedSemantic = this.workers.filter(
       (w) => w.hasLoadedSemanticModel && !w.isTerminating
     ).length
@@ -273,6 +322,7 @@ export class ThumbnailCoordinator {
       terminatingWorkers: terminating,
       liveWorkers: this.workers.length,
       activeSemanticTasks: activeSemantic,
+      activeMetadataTasks: activeMetadata,
       semanticModelLoadedWorkers: loadedSemantic,
       queuedJobs: this.queue.length,
       totalDecodes: this.totalDecodes,
@@ -405,6 +455,70 @@ export class ThumbnailCoordinator {
     }
   }
 
+  public async cancelMetadataRequests(): Promise<void> {
+    const remaining: QueuedItem[] = []
+    for (const item of this.queue) {
+      if (item.action === 'extract_metadata') {
+        item.resolve({
+          status: 'error',
+          locationId: item.params.locationId,
+          code: 'CANCELLED',
+          message: 'Metadata extraction cancelled'
+        })
+      } else if (item.action === 'verify_metadata_source') {
+        item.resolve({
+          ok: false,
+          errorCode: 'CANCELLED',
+          errorMessage: 'Metadata source verification cancelled'
+        })
+      } else {
+        remaining.push(item)
+      }
+    }
+    this.queue = remaining
+
+    const metadataWorkers = this.workers.filter(
+      (w) =>
+        !w.isTerminating &&
+        (w.item?.action === 'extract_metadata' || w.item?.action === 'verify_metadata_source')
+    )
+    await Promise.all(
+      metadataWorkers.map(async (entry) => {
+        entry.isTerminating = true
+        if (entry.timeoutTimer) {
+          clearTimeout(entry.timeoutTimer)
+          entry.timeoutTimer = null
+        }
+        const item = entry.item
+        entry.item = null
+        entry.jobId = null
+        entry.locationId = null
+        if (item?.action === 'extract_metadata') {
+          item.resolve({
+            status: 'error',
+            locationId: item.params.locationId,
+            code: 'CANCELLED',
+            message: 'Metadata extraction cancelled'
+          })
+        } else if (item?.action === 'verify_metadata_source') {
+          item.resolve({
+            ok: false,
+            errorCode: 'CANCELLED',
+            errorMessage: 'Metadata source verification cancelled'
+          })
+        }
+        try {
+          await entry.worker.terminate()
+        } catch {
+          // ignore
+        } finally {
+          this.removeWorker(entry)
+          this.processNext()
+        }
+      })
+    )
+  }
+
   private resolveCancelledItem(item: QueuedItem, locationId: number): void {
     if (item.action === 'decode' || item.action === 'validate_cache') {
       item.resolve({
@@ -438,6 +552,19 @@ export class ThumbnailCoordinator {
       item.resolve({
         ok: false,
         error: 'Model verification cancelled'
+      })
+    } else if (item.action === 'extract_metadata') {
+      item.resolve({
+        status: 'error',
+        locationId,
+        code: 'CANCELLED',
+        message: 'Metadata extraction request was cancelled'
+      })
+    } else if (item.action === 'verify_metadata_source') {
+      item.resolve({
+        ok: false,
+        errorCode: 'CANCELLED',
+        errorMessage: 'Metadata source verification cancelled'
       })
     }
   }
@@ -608,6 +735,79 @@ export class ThumbnailCoordinator {
         resolve,
         reject,
         priorityOrder: 3 // Lowest priority so interactive thumbnails (0, 1) and fingerprints (2) preempt
+      }
+      this.enqueueItem(item)
+    })
+  }
+
+  public async verifySourceForMetadata(params: {
+    sourcePath: string
+    expectedByteSize?: number
+    expectedMtimeMs?: number | null
+    expectedSha256?: string | null
+  }): Promise<MetadataSourceVerifyResult> {
+    if (this.isShuttingDown) {
+      return {
+        ok: false,
+        errorCode: 'SHUTTING_DOWN',
+        errorMessage: 'Worker service is shutting down'
+      }
+    }
+    const maxBackgroundQueueThreshold = Math.max(4, this.maxQueuedJobs - 8)
+    if (this.queue.length >= maxBackgroundQueueThreshold) {
+      return {
+        ok: false,
+        errorCode: 'QUEUE_FULL',
+        errorMessage: 'Interactive queue capacity reserved; metadata verification deferred'
+      }
+    }
+
+    return new Promise<MetadataSourceVerifyResult>((resolve, reject) => {
+      const item: QueuedVerifyMetadataSourceItem = {
+        id: this.nextJobId++,
+        action: 'verify_metadata_source',
+        params,
+        cacheKey: '',
+        resolve,
+        reject,
+        priorityOrder: 2.5
+      }
+      this.enqueueItem(item)
+    })
+  }
+
+  public async requestMetadataExtraction(
+    params: MetadataExtractRequestParams
+  ): Promise<MetadataExtractJobResult> {
+    if (this.isShuttingDown) {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        code: 'SHUTTING_DOWN',
+        message: 'Worker service is shutting down'
+      }
+    }
+
+    // Reserve at least 8 queue slots for interactive browsing requests
+    const maxBackgroundQueueThreshold = Math.max(4, this.maxQueuedJobs - 8)
+    if (this.queue.length >= maxBackgroundQueueThreshold) {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        code: 'QUEUE_FULL',
+        message: 'Interactive queue capacity reserved; metadata task deferred'
+      }
+    }
+
+    return new Promise<MetadataExtractJobResult>((resolve, reject) => {
+      const item: QueuedExtractMetadataItem = {
+        id: this.nextJobId++,
+        action: 'extract_metadata',
+        params,
+        cacheKey: '',
+        resolve,
+        reject,
+        priorityOrder: 2.5 // Behind interactive thumbnails (0, 1) and perceptual fingerprints (2)
       }
       this.enqueueItem(item)
     })
@@ -884,9 +1084,14 @@ export class ThumbnailCoordinator {
       return
     }
 
-    // Check if an active semantic task is already running
+    // Check if an active semantic or metadata task is already running
     const activeSemanticCount = this.workers.filter(
       (w) => !w.isTerminating && w.item?.action === 'semantic_embed'
+    ).length
+    const activeMetadataCount = this.workers.filter(
+      (w) =>
+        !w.isTerminating &&
+        (w.item?.action === 'extract_metadata' || w.item?.action === 'verify_metadata_source')
     ).length
 
     // Find the first eligible item in queue
@@ -900,6 +1105,13 @@ export class ThumbnailCoordinator {
           (w) => !w.isTerminating && w.hasLoadedSemanticModel && w.jobId !== null
         )
         if (busySemanticOwner) return false
+      }
+      if (
+        candidate.action === 'extract_metadata' ||
+        candidate.action === 'verify_metadata_source'
+      ) {
+        // At most 1 active metadata task at any time so the 2nd worker remains free for interactive thumbnails
+        if (activeMetadataCount >= 1) return false
       }
       return true
     })
@@ -948,7 +1160,8 @@ export class ThumbnailCoordinator {
       item.action === 'decode' ||
       item.action === 'validate_cache' ||
       item.action === 'fingerprint' ||
-      item.action === 'semantic_embed'
+      item.action === 'semantic_embed' ||
+      item.action === 'extract_metadata'
         ? item.params.locationId
         : null
     currentEntry.item = item
@@ -1022,6 +1235,34 @@ export class ThumbnailCoordinator {
         directoryPath: item.directoryPath,
         specs: item.specs
       })
+    } else if (item.action === 'verify_metadata_source') {
+      currentEntry.worker.postMessage({
+        id: item.id,
+        action: 'verify_metadata_source',
+        params: {
+          sourcePath: item.params.sourcePath,
+          expectedByteSize: item.params.expectedByteSize,
+          expectedMtimeMs: item.params.expectedMtimeMs,
+          expectedSha256: item.params.expectedSha256 ?? null,
+          maxSourceSizeBytes: this.maxSourceSizeBytes,
+          approvedRoots: this.getApprovedRoots()
+        }
+      })
+    } else if (item.action === 'extract_metadata') {
+      currentEntry.worker.postMessage({
+        id: item.id,
+        action: 'extract_metadata',
+        stuck: process.env.PV_TEST_STUCK_METADATA === '1',
+        params: {
+          sourcePath: item.params.sourcePath,
+          recordedExtension: item.params.recordedExtension,
+          expectedByteSize: item.params.expectedByteSize,
+          expectedMtimeMs: item.params.expectedMtimeMs,
+          expectedSha256: item.params.expectedSha256 ?? null,
+          maxSourceSizeBytes: this.maxSourceSizeBytes,
+          approvedRoots: this.getApprovedRoots()
+        }
+      })
     } else {
       this.totalDecodes++
       currentEntry.worker.postMessage({
@@ -1094,6 +1335,65 @@ export class ThumbnailCoordinator {
         ok: Boolean(msg.ok),
         error: typeof msg.error === 'string' ? msg.error : undefined
       })
+      this.processNext()
+      return
+    }
+
+    if (item.action === 'verify_metadata_source') {
+      entry.item = null
+      entry.jobId = null
+      entry.locationId = null
+      if (msg.status === 'ok') {
+        item.resolve({
+          ok: true,
+          sha256: String(msg.sha256),
+          observedByteSize: Number(msg.observedByteSize),
+          observedMtimeMs: Number(msg.observedMtimeMs)
+        })
+      } else {
+        item.resolve({
+          ok: false,
+          errorCode: typeof msg.code === 'string' ? msg.code : 'VERIFY_FAILED',
+          errorMessage:
+            typeof msg.message === 'string' ? msg.message : 'Metadata source verification failed'
+        })
+      }
+      this.processNext()
+      return
+    }
+
+    if (item.action === 'extract_metadata') {
+      entry.item = null
+      entry.jobId = null
+      entry.locationId = null
+      if (typeof msg.workerHeapUsedBytes === 'number' && msg.workerHeapUsedBytes > 0) {
+        this.workerIsolateLastHeapUsedBytes = msg.workerHeapUsedBytes
+        this.workerIsolatePeakHeapUsedBytes = Math.max(
+          this.workerIsolatePeakHeapUsedBytes,
+          msg.workerHeapUsedBytes
+        )
+      }
+      if (typeof msg.workerExternalBytes === 'number' && msg.workerExternalBytes > 0) {
+        this.workerIsolatePeakExternalBytes = Math.max(
+          this.workerIsolatePeakExternalBytes,
+          msg.workerExternalBytes
+        )
+      }
+      if (msg.status === 'ok' && msg.extracted && typeof msg.extracted === 'object') {
+        item.resolve({
+          status: 'ok',
+          locationId: item.params.locationId,
+          extracted: msg.extracted as ExtractedPhotoMetadataResult
+        })
+      } else {
+        item.resolve({
+          status: 'error',
+          locationId: item.params.locationId,
+          code: typeof msg.code === 'string' ? msg.code : 'METADATA_EXTRACT_FAILED',
+          message:
+            typeof msg.message === 'string' ? msg.message : 'Photo metadata extraction failed'
+        })
+      }
       this.processNext()
       return
     }
@@ -1324,7 +1624,9 @@ export class ThumbnailCoordinator {
         'TIMEOUT',
         item.action === 'validate_cache'
           ? `Thumbnail validation exceeded timeout limit (${this.jobTimeoutMs} ms)`
-          : `Thumbnail decode exceeded timeout limit (${this.jobTimeoutMs} ms)`
+          : item.action === 'extract_metadata' || item.action === 'verify_metadata_source'
+            ? `Metadata parser exceeded timeout limit (${this.jobTimeoutMs} ms)`
+            : `Thumbnail decode exceeded timeout limit (${this.jobTimeoutMs} ms)`
       )
     }
 
@@ -1388,6 +1690,19 @@ export class ThumbnailCoordinator {
       item.resolve({
         ok: false,
         error: message
+      })
+    } else if (item.action === 'extract_metadata') {
+      item.resolve({
+        status: 'error',
+        locationId: item.params.locationId,
+        code,
+        message
+      })
+    } else if (item.action === 'verify_metadata_source') {
+      item.resolve({
+        ok: false,
+        errorCode: code,
+        errorMessage: message
       })
     }
   }

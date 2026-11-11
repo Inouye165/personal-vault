@@ -107,7 +107,16 @@ import {
   SemanticIndexJobItemsResponseSchema,
   type SemanticModelStatusResponse,
   type SemanticIndexProgressResponse,
-  type SemanticIndexJobItemsResponse
+  type SemanticIndexJobItemsResponse,
+  PhotoMetadataProgressResponseSchema,
+  StartPhotoMetadataExtractionRequestSchema,
+  GetPhotoMetadataDetailRequestSchema,
+  GetPhotoMetadataDetailResponseSchema,
+  GetPhotoMetadataFacetsRequestSchema,
+  GetPhotoMetadataFacetsResponseSchema,
+  type PhotoMetadataProgressResponse,
+  type GetPhotoMetadataDetailResponse,
+  type GetPhotoMetadataFacetsResponse
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -119,6 +128,7 @@ import {
 import type { ThumbnailCoordinator } from '../services/thumbnails'
 import type { SimilarityCoordinator } from '../services/similarity'
 import type { SemanticModelManager, SemanticIndexCoordinator } from '../services/semantic'
+import { METADATA_PARSER_RECIPE_VERSION, type PhotoMetadataCoordinator } from '../services/metadata'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 
 export interface IpcHandlerOptions {
@@ -130,6 +140,7 @@ export interface IpcHandlerOptions {
   readonly similarityCoordinator?: SimilarityCoordinator
   readonly semanticModelManager?: SemanticModelManager
   readonly semanticIndexCoordinator?: SemanticIndexCoordinator
+  readonly photoMetadataCoordinator?: PhotoMetadataCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
@@ -145,6 +156,7 @@ export function registerIpcHandlers({
   similarityCoordinator,
   semanticModelManager,
   semanticIndexCoordinator,
+  photoMetadataCoordinator,
   getMainWindow,
   selectDirectories,
   selectVaultDirectory,
@@ -686,13 +698,29 @@ export function registerIpcHandlers({
         hasMore: false
       }
     }
+    const activeRecipe =
+      photoMetadataCoordinator?.getParserRecipeVersion() ?? METADATA_PARSER_RECIPE_VERSION
     const res = catalog.queryFileLocations({
       category: 'photo',
       offset: parsed.data.offset,
       limit: parsed.data.limit,
       ratingFilter: parsed.data.ratingFilter,
       flagFilter: parsed.data.flagFilter,
-      collectionId: parsed.data.collectionId
+      collectionId: parsed.data.collectionId,
+      parserRecipeVersion: activeRecipe,
+      captureDateFrom: parsed.data.captureDateFrom,
+      captureDateTo: parsed.data.captureDateTo,
+      includeUnknownCaptureDate: parsed.data.includeUnknownCaptureDate,
+      cameraNormalized: parsed.data.cameraNormalized,
+      onlyUnknownCamera: parsed.data.onlyUnknownCamera,
+      lensNormalized: parsed.data.lensNormalized,
+      onlyUnknownLens: parsed.data.onlyUnknownLens,
+      minWidthPx: parsed.data.minWidthPx,
+      minHeightPx: parsed.data.minHeightPx,
+      includeUnknownDimensions: parsed.data.includeUnknownDimensions,
+      fileTypeBasis: parsed.data.fileTypeBasis,
+      fileTypeValue: parsed.data.fileTypeValue,
+      onlyUnknownDetectedFormat: parsed.data.onlyUnknownDetectedFormat
     })
     const validated = validatePayload(GetPhotosPageResponseSchema, res)
     if (!validated.success) {
@@ -1224,6 +1252,137 @@ export function registerIpcHandlers({
   handle(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, (): never => {
     throw new Error('Event-only channel cannot be invoked')
   })
+
+  // --- Stage 6C: Photo Metadata Extraction, Provenance & Facet Handlers ---
+
+  const validateMetadataProgressOut = (raw: unknown): PhotoMetadataProgressResponse => {
+    const validated = validatePayload(PhotoMetadataProgressResponseSchema, raw)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing PhotoMetadataProgressResponse: ${validated.error}`)
+    }
+    return validated.data
+  }
+
+  handle(IPC_CHANNELS.METADATA_GET_PROGRESS, (): PhotoMetadataProgressResponse => {
+    if (!photoMetadataCoordinator) {
+      throw new Error('Photo metadata coordinator unavailable')
+    }
+    return validateMetadataProgressOut(photoMetadataCoordinator.getProgress())
+  })
+
+  handle(
+    IPC_CHANNELS.METADATA_START_EXTRACTION,
+    async (raw: unknown = {}): Promise<PhotoMetadataProgressResponse> => {
+      const parsed = validatePayload(StartPhotoMetadataExtractionRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming StartPhotoMetadataExtractionRequest: ${parsed.error}`)
+      }
+      if (!photoMetadataCoordinator) {
+        throw new Error('Photo metadata coordinator unavailable')
+      }
+      const res = await photoMetadataCoordinator.startExtraction(parsed.data)
+      return validateMetadataProgressOut(res)
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.METADATA_PAUSE_EXTRACTION,
+    async (): Promise<PhotoMetadataProgressResponse> => {
+      if (!photoMetadataCoordinator) {
+        throw new Error('Photo metadata coordinator unavailable')
+      }
+      const res = await photoMetadataCoordinator.pauseExtraction()
+      return validateMetadataProgressOut(res)
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.METADATA_RESUME_EXTRACTION,
+    async (): Promise<PhotoMetadataProgressResponse> => {
+      if (!photoMetadataCoordinator) {
+        throw new Error('Photo metadata coordinator unavailable')
+      }
+      const res = await photoMetadataCoordinator.resumeExtraction()
+      return validateMetadataProgressOut(res)
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.METADATA_CANCEL_EXTRACTION,
+    async (): Promise<PhotoMetadataProgressResponse> => {
+      if (!photoMetadataCoordinator) {
+        throw new Error('Photo metadata coordinator unavailable')
+      }
+      const res = await photoMetadataCoordinator.cancelExtraction()
+      return validateMetadataProgressOut(res)
+    }
+  )
+
+  handle(IPC_CHANNELS.METADATA_PROGRESS_EVENT, (): never => {
+    throw new Error('Event-only channel cannot be invoked')
+  })
+
+  handle(IPC_CHANNELS.METADATA_GET_PHOTO_DETAIL, (raw: unknown): GetPhotoMetadataDetailResponse => {
+    const parsed = validatePayload(GetPhotoMetadataDetailRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming GetPhotoMetadataDetailRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      return { detail: null }
+    }
+    const recipe =
+      photoMetadataCoordinator?.getParserRecipeVersion() ?? METADATA_PARSER_RECIPE_VERSION
+    const detail = catalog.getPhotoTechnicalMetadataDetail(parsed.data.fileLocationId, recipe)
+    const validated = validatePayload(GetPhotoMetadataDetailResponseSchema, { detail })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetPhotoMetadataDetailResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.METADATA_GET_FACETS, (raw: unknown): GetPhotoMetadataFacetsResponse => {
+    const parsed = validatePayload(GetPhotoMetadataFacetsRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming GetPhotoMetadataFacetsRequest: ${parsed.error}`)
+    }
+    const recipe =
+      photoMetadataCoordinator?.getParserRecipeVersion() ?? METADATA_PARSER_RECIPE_VERSION
+    if (!catalog || catalog.isClosed()) {
+      return {
+        field: parsed.data.field,
+        items: [],
+        unknownCount: 0,
+        unprocessedCount: 0,
+        offset: parsed.data.offset,
+        limit: parsed.data.limit,
+        hasMore: false
+      }
+    }
+    const facets = catalog.getPhotoMetadataFacets({
+      field: parsed.data.field,
+      parserRecipeVersion: recipe,
+      search: parsed.data.search,
+      limit: parsed.data.limit,
+      offset: parsed.data.offset
+    })
+    const validated = validatePayload(GetPhotoMetadataFacetsResponseSchema, facets)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing GetPhotoMetadataFacetsResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  if (photoMetadataCoordinator && getMainWindow) {
+    photoMetadataCoordinator.onProgress((progress) => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) {
+        const validated = validatePayload(PhotoMetadataProgressResponseSchema, progress)
+        if (validated.success) {
+          win.webContents.send(IPC_CHANNELS.METADATA_PROGRESS_EVENT, validated.data)
+        }
+      }
+    })
+  }
 
   if (semanticModelManager && getMainWindow) {
     semanticModelManager.onStatusChange((status) => {

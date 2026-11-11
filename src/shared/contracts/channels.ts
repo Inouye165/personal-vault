@@ -57,7 +57,15 @@ export const IPC_CHANNELS = {
   SEMANTIC_INDEX_RESUME: 'semantic:index-resume',
   SEMANTIC_INDEX_CANCEL: 'semantic:index-cancel',
   SEMANTIC_INDEX_GET_ITEMS: 'semantic:index-get-items',
-  SEMANTIC_INDEX_PROGRESS_EVENT: 'semantic:index-progress-event'
+  SEMANTIC_INDEX_PROGRESS_EVENT: 'semantic:index-progress-event',
+  METADATA_GET_PROGRESS: 'metadata:get-progress',
+  METADATA_START_EXTRACTION: 'metadata:start-extraction',
+  METADATA_PAUSE_EXTRACTION: 'metadata:pause-extraction',
+  METADATA_RESUME_EXTRACTION: 'metadata:resume-extraction',
+  METADATA_CANCEL_EXTRACTION: 'metadata:cancel-extraction',
+  METADATA_PROGRESS_EVENT: 'metadata:progress-event',
+  METADATA_GET_PHOTO_DETAIL: 'metadata:get-photo-detail',
+  METADATA_GET_FACETS: 'metadata:get-facets'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

@@ -82,3 +82,13 @@ SOFTWARE.
 
 - **License**: Apache License, Version 2.0 (`sharp`), LGPL-3.0-or-later (`libvips`)
 - **Copyright**: Copyright 2013 Lovell Fuller and others.
+
+---
+
+## 5. ExifReader (`exifreader`)
+
+- **Version**: `4.54.0`
+- **License**: Mozilla Public License, Version 2.0 (MPL-2.0)
+- **Copyright**: Copyright (c) Mattias Wallander.
+
+Licensed under the Mozilla Public License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at `https://mozilla.org/MPL/2.0/` and in `node_modules/exifreader/LICENSE`. Unmodified `exifreader` source is bundled into the Personal Vault worker without modification.

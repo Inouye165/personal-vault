@@ -54,8 +54,37 @@ describe('Preload Photos Bridge', () => {
       limit: 50,
       ratingFilter: 'all',
       flagFilter: 'all',
-      collectionId: null
+      collectionId: null,
+      captureDateFrom: null,
+      captureDateTo: null,
+      includeUnknownCaptureDate: false,
+      cameraNormalized: null,
+      onlyUnknownCamera: false,
+      lensNormalized: null,
+      onlyUnknownLens: false,
+      minWidthPx: null,
+      minHeightPx: null,
+      includeUnknownDimensions: false,
+      fileTypeBasis: 'detected_format',
+      fileTypeValue: null,
+      onlyUnknownDetectedFormat: false
     })
+  })
+
+  it('rejects invalid calendar dates or unknown keys in getPhotosPage request at preload boundary', async () => {
+    const mockIpcRenderer = { invoke: vi.fn() }
+    vi.doMock('electron', () => ({
+      ipcRenderer: mockIpcRenderer,
+      contextBridge: { exposeInMainWorld: vi.fn() }
+    }))
+
+    const { createPhotosApi } = await import('../../src/preload/photos-api')
+    const api = createPhotosApi(mockIpcRenderer as unknown as IpcRenderer)
+
+    await expect(
+      api.getPhotosPage({ offset: 0, limit: 50, captureDateFrom: '2025-02-29' })
+    ).rejects.toThrow()
+    expect(mockIpcRenderer.invoke).not.toHaveBeenCalled()
   })
 
   it('rejects invalid getPhotosPage response from main process', async () => {

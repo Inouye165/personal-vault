@@ -1,5 +1,5 @@
 /**
- * Personal Vault — Thumbnail & Semantic Worker Thread (Stages 5A, 5C, 6B)
+ * Personal Vault — Thumbnail, Semantic & Metadata Worker Thread (Stages 5A, 5C, 6B, 6C)
  */
 
 import { parentPort } from 'node:worker_threads'
@@ -15,6 +15,11 @@ import {
 } from './decoder'
 import { validateWebPIntegrity } from './cache'
 import type { SemanticModelArtifactSpec } from '../semantic/manifest'
+import {
+  extractPhotoMetadataFromFile,
+  readAndVerifySourceBytesForMetadata,
+  type ExtractPhotoMetadataInput
+} from '../metadata/extractor'
 
 if (parentPort) {
   parentPort.on(
@@ -27,10 +32,12 @@ if (parentPort) {
         | 'fingerprint'
         | 'semantic_embed'
         | 'verify_source'
+        | 'extract_metadata'
+        | 'verify_metadata_source'
         | 'verify_model'
         | 'release_model'
         | 'worker_memory'
-      params?: DecodeInputParams | SemanticDecodeInputParams
+      params?: DecodeInputParams | SemanticDecodeInputParams | ExtractPhotoMetadataInput
       buffer?: Buffer | Uint8Array
       maxBytes?: number
       stuck?: boolean
@@ -99,6 +106,47 @@ if (parentPort) {
               message: verified.message
             })
           }
+          return
+        }
+
+        if (message.action === 'verify_metadata_source') {
+          const verified = await readAndVerifySourceBytesForMetadata(
+            message.params as ExtractPhotoMetadataInput
+          )
+          if (verified.status === 'success') {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'ok',
+              sha256: verified.computedSha256,
+              observedByteSize: verified.observedByteSize,
+              observedMtimeMs: verified.observedMtimeMs
+            })
+          } else {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'error',
+              code: verified.code,
+              message: verified.message
+            })
+          }
+          return
+        }
+
+        if (message.action === 'extract_metadata') {
+          if (message.stuck || process.env.PV_TEST_STUCK_METADATA === '1') {
+            return
+          }
+          const extracted = await extractPhotoMetadataFromFile(
+            message.params as ExtractPhotoMetadataInput
+          )
+          const mem = process.memoryUsage()
+          parentPort!.postMessage({
+            id: message.id,
+            status: 'ok',
+            extracted,
+            workerHeapUsedBytes: mem.heapUsed,
+            workerExternalBytes: mem.external
+          })
           return
         }
 
