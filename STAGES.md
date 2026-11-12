@@ -173,15 +173,15 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ## Stage 6 - Semantic photo search
 
-**In progress; Substages 6A and 6B Complete (independently accepted at `155d7bd` and `0b0c814`); Substage 6C Awaiting review on `feat/stage-6c-photo-metadata`; Substages 6D-6E Planned.**
+**In progress; Substages 6A, 6B, and 6C Complete (independently accepted at `155d7bd`, `0b0c814`, and `c8a766f`); Substages 6D-6E Planned.**
 
-| Substage | Deliverable                                                                  | Status          | Submission reference                | Acceptance reference |
-| -------- | ---------------------------------------------------------------------------- | --------------- | ----------------------------------- | -------------------- |
-| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete        | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
-| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete        | `feat/stage-6b-semantic-index`      | `0b0c814`            |
-| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Awaiting review | `feat/stage-6c-photo-metadata`      | Pending              |
-| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned         | Pending                             | Pending              |
-| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned         | Pending                             | Pending              |
+| Substage | Deliverable                                                                  | Status   | Submission reference                | Acceptance reference |
+| -------- | ---------------------------------------------------------------------------- | -------- | ----------------------------------- | -------------------- |
+| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
+| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete | `feat/stage-6b-semantic-index`      | `0b0c814`            |
+| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Complete | `feat/stage-6c-photo-metadata`      | `c8a766f`            |
+| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned  | Pending                             | Pending              |
+| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned  | Pending                             | Pending              |
 
 ### Stage 6A - Offline semantic search feasibility evaluation and real-Electron spike
 
@@ -222,7 +222,7 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ### Stage 6C - EXIF technical metadata extraction and fact/inference-separated SQL filters
 
-**Awaiting review on `feat/stage-6c-photo-metadata`.**
+**Complete; independently accepted at `c8a766f`.**
 
 - [x] Modular read-only EXIF & header parser (`src/main/services/metadata/extractor.ts`, `date-policy.ts`, `normalize.ts`, `types.ts`) using `exifreader@4.54.0` (MPL-2.0, zero transitive dependencies, bundled into worker via `electron.vite.config.ts`, documented in `THIRD_PARTY_NOTICES.md`) + `sharp@0.35.5` header inspection without full raster pixel decode, working completely offline and without requiring an installed semantic model.
 - [x] Four-way provenance separation: immutable filesystem observations & verified SHA-256 hashes; revision-bound extracted EXIF metadata (`parser_recipe_version = 'exif_tech_v1'`, bounded `raw_tags_json`); interpreted capture dates (`DateTimeOriginal` preferred with documented `DateTimeDigitized` fallback only when absent; invalid `DateTimeOriginal` conservatively preserves Unknown with parse/conflict details; `DateTime` modification tag, filesystem timestamps, and filenames never used; explicit offsets vs. `local_wall_clock_unknown_tz` without host-TZ/UTC coercion; leap-year Gregorian validation; `capture_calendar_date` `YYYY-MM-DD` range filtering); and user review annotations / semantic embeddings.
@@ -230,14 +230,18 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 - [x] SQLite Migration 10 (`CURRENT_SCHEMA_VERSION = 10` in `src/main/services/catalog/migrations.ts`, `database.ts`): `photo_technical_metadata`, `photo_metadata_jobs`, and `photo_metadata_job_items` with filter/facet indexes, exact snapshotted resume scope (bounded 500-item batches, verified at 50,001 photos without collection-size caps), bounded searchable/paginated camera/lens/file-type facets (`LIMIT <= 100`), explicit `Unknown` vs. `unprocessed`/`stale` separation, and SQL `AND` combination with Stage 5B rating/flag/collection filters before `LIMIT ? OFFSET ?` pagination.
 - [x] Shared worker pool & coordinator (`ThumbnailCoordinator` + `PhotoMetadataCoordinator`): executes outside Electron main enforcing `approvedRoots` containment, symlink/junction rejection, pre/post descriptor `fstat` stability, live off-main SHA-256 reuse verification (`verify_source`), transactional pre-commit `content_revision` revalidation, active cancellation, startup `interrupted` recovery, and aggregate resource bounds (`<= 2` live workers including terminating, `<= 1` active metadata task, `<= 1` active semantic task, `<= 64` queue yielding to interactive thumbnails).
 - [x] Narrow typed `metadata:*` IPC + expanded `photos:get-page` with bidirectional Zod validation and sender checks, compact expandable `PhotoMetadataFilterPanel` and selected-photo provenance section in `PhotosPanel` with stale-response sequence/generation guards (`usePhotos.ts`, `usePhotoMetadata.ts`).
-- [x] Implementation-host verification passed on `feat/stage-6c-photo-metadata` (awaiting independent review): 893 tests passed across 72 test files (`npm test` exit 0, including 50,001-row SQL scale test in `tests/main/catalog-photo-metadata.test.ts`); all 23 quality, build, and real-Electron verification commands exited with code 0 (`verify:metadata` 11/11 in built mode and `verify:metadata:unpacked` 12/12 in unpacked mode over 99 real image files on disk, plus all 15 prior-stage regression and smoke checks; bitwise source preservation verified across 66 immutable photos and 7 model files, noting OS read-only `atime` updates).
+- [x] Verification scope & evidence distinctions:
+  - Independent review accepted at `c8a766f`: reviewer inspected the correction diff and passed 10/10 parser tests (`tests/main/photo-metadata-parser.test.ts` exit 0).
+  - Full test suite (894 tests across 72 test files, `npm test` exit 0, including 50,001-row SQL scale test) and real Electron verification results (`verify:metadata` 11/11 in built mode, `verify:metadata:unpacked` 12/12 in unpacked mode, and all 15 prior-stage regression/smoke checks) were reported by the implementation host.
+  - Concurrency verification utilized 45 ms worker task delays (`PV_TEST_WORKER_METADATA_DELAY_MS=45` and `PV_TEST_WORKER_SEMANTIC_DELAY_MS=45` in `src/main/services/thumbnails/worker.ts`) to reliably observe simultaneous active metadata extraction and semantic embedding tasks during diagnostic polling across the shared image worker pool.
+  - Bitwise source preservation confirmed across 66 immutable photos and 7 model files, noting OS read-only `atime` updates.
 
 ### Stage 6 Checklist
 
 - [x] Evaluate local embedding models and resource/packaging requirements (6A Complete; independently accepted at `155d7bd`).
 - [ ] Implement content-based photo search and a persistent search index (6B Complete; 6D Planned).
-- [ ] Filter by available date, camera, lens, resolution, and file-type metadata (6C Awaiting review; 6D-6E Planned).
-- [ ] Preserve unknown dates/locations and separate inferences from recorded facts (6B Complete; 6C Awaiting review; 6D-6E Planned).
+- [x] Filter by available date, camera, lens, resolution, and file-type metadata (6C Complete; independently accepted at `c8a766f`; 6D-6E Planned).
+- [x] Preserve unknown dates/locations and separate inferences from recorded facts (6B and 6C Complete; 6D-6E Planned).
 
 Exit: users can find photos by content and available metadata using the supported offline workflow.
 

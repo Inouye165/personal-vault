@@ -6,6 +6,7 @@
 - **Branch**: `feat/stage-6c-photo-metadata` (created directly from verified Stage 6B documentation closeout `653c01e`, descending from accepted Stage 6B implementation `0b0c814`, Stage 6A closeout `ad796b4`, accepted Stage 6A implementation `155d7bd`, and Stage 5 closeout `9b8faa7`)
 - **Base Commit**: `653c01e`
 - **Accepted Stage 6B Commit**: `0b0c814` (`0b0c814eca332462d0ac24cfe2c865d9611e632d`)
+- **Accepted Stage 6C Commit**: `c8a766f` (`c8a766f284c7c88b2098651f890c6488d5feae80`)
 - **Stage 1 status**: Complete (independently accepted at `070e3cb`).
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
@@ -14,10 +15,10 @@
 - **Stage 6 status**: **In progress**:
   - **Stage 6A (Offline Semantic Search Feasibility & Technical Spike)**: **Complete** (independently accepted at `155d7bd` on `feat/stage-6a-semantic-evaluation`, closeout at `ad796b4`).
   - **Stage 6B (Model Provisioning, Resumable Semantic Indexing & Persistent SQLite Index)**: **Complete** (independently accepted at `0b0c814` on `feat/stage-6b-semantic-index`, closeout at `653c01e`).
-  - **Stage 6C (Photo Metadata Extraction & Fact/Inference-Separated SQL Filters)**: **Awaiting review** (submitted on `feat/stage-6c-photo-metadata`).
+  - **Stage 6C (Photo Metadata Extraction & Fact/Inference-Separated SQL Filters)**: **Complete** (independently accepted at `c8a766f` on `feat/stage-6c-photo-metadata`).
   - **Substages 6D–6E**: **Planned** (not started); **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)** is the next planned assignment following Stage 6C acceptance.
 - **Installed Electron Version**: `45.2.3` (`node` `v22.18.0`, `npm` `v10.9.3`)
-- **Evidence Source**: Stage 6C verification results below (894 tests across 72 test files, all 23 required quality/build/Electron commands exiting with code 0, real Electron `verify:metadata` built 11/11 and unpacked 12/12, plus all 15 prior-stage regression and smoke checks) were executed directly on this implementation host on `feat/stage-6c-photo-metadata`.
+- **Evidence Source**: Independent review accepted at `c8a766f`: reviewer inspected the correction diff and passed 10/10 parser tests (`tests/main/photo-metadata-parser.test.ts` exit 0). Full test suite (894 tests across 72 test files, all 23 required quality/build/Electron commands exiting with code 0, real Electron `verify:metadata` built 11/11 and unpacked 12/12, plus all 15 prior-stage regression and smoke checks) were executed directly and reported by the implementation host on `feat/stage-6c-photo-metadata`. Concurrency verification utilized 45 ms worker task delays (`PV_TEST_WORKER_METADATA_DELAY_MS=45` and `PV_TEST_WORKER_SEMANTIC_DELAY_MS=45` in `src/main/services/thumbnails/worker.ts`) to reliably observe simultaneous active metadata extraction and semantic embedding tasks during diagnostic polling across the shared image worker pool.
 - **Constraints**: Never implement on `main`; no push, merge, or publication is authorized. Preserve source preservation invariance: source files strictly read-only. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
@@ -96,21 +97,21 @@ Stage 6C delivers explicit local extraction of technical metadata from catalog p
 
 _(Note: Memory figures below are periodic point samples collected every ~100 ms during concurrent metadata extraction + ONNX semantic indexing + virtual-grid scrolling; they represent sampled maxima across the 99-photo workload, distinct from continuous OS kernel high-water marks.)_
 
-| Metric                                              | Built Mode (`npm run verify:metadata`)         | Unpacked Mode (`npm run verify:metadata:unpacked`)  | Enforced Bound / Target           |
-| --------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------- | --------------------------------- |
-| **Verification Checks Passed**                      | **11 / 11** (exit 0)                           | **12 / 12** (exit 0, incl. `app.asar` binary check) | 100% pass                         |
-| **Renderer rAF Frame Intervals Sampled**            | `2,452` (`p95 = 4.30 ms`, `max = 4.30 ms`)     | `2,356` (`p95 = 4.30 ms`, `max = 4.30 ms`)          | `p95 <= 33 ms` (bound >= 50 frames)|
-| **Main Process Event-Loop Delay p95**               | `20.82 ms`                                     | `21.38 ms`                                          | `< 100 ms`                        |
-| **Renderer-to-Main IPC Round-Trip Latency**         | `p95 = 13.35 ms` (`max = 20.74 ms`)            | `p95 = 10.38 ms` (`max = 23.54 ms`)                 | `p95 < 100 ms`                    |
-| **Peak Live Image Workers (incl. terminating)**     | `2` (`active=2`, `terminating=2`)              | `2` (`active=2`, `terminating=0`)                   | `<= 2`                            |
-| **Peak Active Metadata Extraction Tasks**           | `1` (simultaneous active execution verified)   | `1` (simultaneous active execution verified)        | `<= 1`                            |
-| **Peak Active Semantic Tasks / Loaded Sessions**    | `1` / `1`                                      | `1` / `1`                                           | `<= 1` / `<= 1` (asserted bound)  |
-| **Peak Queued Worker Jobs**                         | `9`                                            | `9`                                                 | `<= 64`                           |
-| **Peak Mounted DOM Photo Cells**                    | `20`                                           | `20`                                                | `<= 200`                          |
-| **Sampled Main Process RSS Max (`rss`)**            | `372.13 MiB`                                   | `381.96 MiB`                                        | Point-sampled process-wide RSS    |
-| **Sampled Worker Isolate V8 Heap Max (`heapUsed`)** | `11.12 MiB`                                    | `11.59 MiB`                                         | Point-sampled worker isolate heap |
-| **Sampled Renderer JS Heap Max**                    | `11.35 MiB`                                    | `10.68 MiB`                                         | Point-sampled renderer V8 heap    |
-| **Source Preservation Invariance**                  | **Confirmed** (`0` byte/mtime/birthtime diffs) | **Confirmed** (`0` byte/mtime/birthtime diffs)      | Bitwise & timestamp invariant     |
+| Metric                                              | Built Mode (`npm run verify:metadata`)         | Unpacked Mode (`npm run verify:metadata:unpacked`)  | Enforced Bound / Target             |
+| --------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------- | ----------------------------------- |
+| **Verification Checks Passed**                      | **11 / 11** (exit 0)                           | **12 / 12** (exit 0, incl. `app.asar` binary check) | 100% pass                           |
+| **Renderer rAF Frame Intervals Sampled**            | `2,452` (`p95 = 4.30 ms`, `max = 4.30 ms`)     | `2,356` (`p95 = 4.30 ms`, `max = 4.30 ms`)          | `p95 <= 33 ms` (bound >= 50 frames) |
+| **Main Process Event-Loop Delay p95**               | `20.82 ms`                                     | `21.38 ms`                                          | `< 100 ms`                          |
+| **Renderer-to-Main IPC Round-Trip Latency**         | `p95 = 13.35 ms` (`max = 20.74 ms`)            | `p95 = 10.38 ms` (`max = 23.54 ms`)                 | `p95 < 100 ms`                      |
+| **Peak Live Image Workers (incl. terminating)**     | `2` (`active=2`, `terminating=2`)              | `2` (`active=2`, `terminating=0`)                   | `<= 2`                              |
+| **Peak Active Metadata Extraction Tasks**           | `1` (simultaneous active execution verified)   | `1` (simultaneous active execution verified)        | `<= 1`                              |
+| **Peak Active Semantic Tasks / Loaded Sessions**    | `1` / `1`                                      | `1` / `1`                                           | `<= 1` / `<= 1` (asserted bound)    |
+| **Peak Queued Worker Jobs**                         | `9`                                            | `9`                                                 | `<= 64`                             |
+| **Peak Mounted DOM Photo Cells**                    | `20`                                           | `20`                                                | `<= 200`                            |
+| **Sampled Main Process RSS Max (`rss`)**            | `372.13 MiB`                                   | `381.96 MiB`                                        | Point-sampled process-wide RSS      |
+| **Sampled Worker Isolate V8 Heap Max (`heapUsed`)** | `11.12 MiB`                                    | `11.59 MiB`                                         | Point-sampled worker isolate heap   |
+| **Sampled Renderer JS Heap Max**                    | `11.35 MiB`                                    | `10.68 MiB`                                         | Point-sampled renderer V8 heap      |
+| **Source Preservation Invariance**                  | **Confirmed** (`0` byte/mtime/birthtime diffs) | **Confirmed** (`0` byte/mtime/birthtime diffs)      | Bitwise & timestamp invariant       |
 
 ---
 
@@ -157,8 +158,9 @@ The following unrelated files remain intact, untracked, and untouched:
 
 ---
 
-## 5. Next Assignment (Following Stage 6C Independent Review)
+## 5. Next Assignment (Following Stage 6C Acceptance)
 
-- **Current Substage**: **Stage 6C — Photo Metadata Extraction & Fact/Inference-Separated SQL Filters** (`Awaiting review` on `feat/stage-6c-photo-metadata`).
+- **Current Substage**: **Stage 6C — Photo Metadata Extraction & Fact/Inference-Separated SQL Filters** (**Complete**; independently accepted at `c8a766f` on `feat/stage-6c-photo-metadata`).
+- **Overall Stage 6 Status**: **In progress** (Substages 6A, 6B, and 6C Complete; Substages 6D–6E Planned).
 - **Next Planned Substage**: **Stage 6D — Natural-Language Photo Search IPC, Ranking, and Photos UI Integration** (`Planned`).
   - Scope: Offline text query tokenization & CLIP text embedding generation, bounded cosine similarity search ranking combined with Stage 5B/6C SQL filters, narrow typed search IPC, and Photos search UI controls.
