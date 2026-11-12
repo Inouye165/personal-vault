@@ -33,6 +33,7 @@ import { usePhotoMetadata } from '../hooks/usePhotoMetadata'
 import { SimilarityReviewPanel } from './SimilarityReviewPanel'
 import { SemanticIndexPanel } from './SemanticIndexPanel'
 import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
+import { PhotosSearchBar } from './PhotosSearchBar'
 import type {
   PhotoFlagFilter,
   PhotoItem,
@@ -148,6 +149,7 @@ interface PhotoCardCellProps {
   photo: PhotoItem
   thumb?: ThumbnailResult
   isSelected: boolean
+  similarityScore?: number
   top: number
   left: number
   cellWidth: number
@@ -162,6 +164,7 @@ function PhotoCardCell({
   photo,
   thumb,
   isSelected,
+  similarityScore,
   top,
   left,
   cellWidth,
@@ -226,6 +229,14 @@ function PhotoCardCell({
 
         {/* Compact Review Badges Overlay */}
         <div className="photo-badges-overlay">
+          {similarityScore !== undefined && (
+            <span
+              className="badge-similarity-score"
+              title={`Semantic similarity score: ${similarityScore.toFixed(3)} (machine inference)`}
+            >
+              {(similarityScore * 100).toFixed(0)}% match
+            </span>
+          )}
           {photo.rating !== null && (
             <span className="badge-rating" title={`Rating: ${photo.rating} stars`}>
               ★ {photo.rating}
@@ -262,6 +273,13 @@ export function PhotosPanel() {
     collectionId,
     metadataFilters,
     filterGeneration,
+    searchQuery,
+    isSearching,
+    searchResultMeta,
+    searchScores,
+    modelStatus,
+    setSearchQuery,
+    clearSearch,
     selectPhoto,
     setRatingFilter,
     setFlagFilter,
@@ -482,7 +500,8 @@ export function PhotosPanel() {
     ratingFilter !== 'all' ||
     flagFilter !== 'all' ||
     collectionId !== null ||
-    activeMetadataFilterCount > 0
+    activeMetadataFilterCount > 0 ||
+    Boolean(searchQuery)
 
   return (
     <div className="photos-layout">
@@ -541,6 +560,16 @@ export function PhotosPanel() {
 
           {viewMode === 'grid' && (
             <>
+              {/* Natural-Language Semantic Search Bar */}
+              <PhotosSearchBar
+                query={searchQuery}
+                isSearching={isSearching}
+                modelStatus={modelStatus}
+                searchResult={searchResultMeta}
+                onSearch={setSearchQuery}
+                onClear={clearSearch}
+              />
+
               {/* Filter Bar */}
               <div className="photos-filter-bar" role="search" aria-label="Photo filters">
                 <div className="filter-group">
@@ -691,14 +720,18 @@ export function PhotosPanel() {
                 <ImageIcon size={24} />
                 <div className="notice-content">
                   <strong>
-                    {hasAnyActiveFilter
-                      ? 'No photographs match the current filter criteria'
-                      : 'No photographs discovered yet'}
+                    {searchQuery
+                      ? `No semantic matches found for "${searchQuery}"`
+                      : hasAnyActiveFilter
+                        ? 'No photographs match the current filter criteria'
+                        : 'No photographs discovered yet'}
                   </strong>
                   <p>
-                    {hasAnyActiveFilter
-                      ? 'Try selecting different filters or click Reset filters.'
-                      : 'Connect a source folder and run a scan to discover photographs.'}
+                    {searchQuery
+                      ? 'Try different search terms or click Clear search to restore ordinary browsing.'
+                      : hasAnyActiveFilter
+                        ? 'Try selecting different filters or click Reset filters.'
+                        : 'Connect a source folder and run a scan to discover photographs.'}
                   </p>
                 </div>
               </div>
@@ -763,6 +796,7 @@ export function PhotosPanel() {
                         photo={photo}
                         thumb={thumb}
                         isSelected={isSelected}
+                        similarityScore={searchScores.get(photo.id)}
                         top={top}
                         left={left}
                         cellWidth={cellWidth}

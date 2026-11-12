@@ -78,6 +78,8 @@ npm run verify:semantic-index # real Electron semantic model provisioning and re
 npm run verify:semantic-index:unpacked # real Electron semantic index verification in unpacked desktop binary
 npm run verify:metadata  # real Electron photo EXIF metadata extraction and SQL filters verification
 npm run verify:metadata:unpacked # real Electron photo metadata & SQL filters verification in unpacked desktop binary
+npm run verify:semantic-search # real Electron natural-language photo search & ranking verification
+npm run verify:semantic-search:unpacked # real Electron natural-language photo search verification in unpacked binary
 ```
 
 Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.

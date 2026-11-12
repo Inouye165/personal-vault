@@ -6,22 +6,22 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substage 6B: Model provisioning, resumable semantic indexing, and persistent SQLite index is Complete, independently accepted at `0b0c814`; Substage 6C: EXIF technical metadata extraction and fact/inference-separated SQL filters is Awaiting review on `feat/stage-6c-photo-metadata`; Substages 6D-6E are Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
+Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substage 6B: Model provisioning, resumable semantic indexing, and persistent SQLite index is Complete, independently accepted at `0b0c814`; Substage 6C: EXIF technical metadata extraction and fact/inference-separated SQL filters is Complete, independently accepted at `c8a766f`; Substage 6D: Natural-language photo search IPC, ranking, and Photos UI integration is Awaiting review on `feat/stage-6d-semantic-search`; Substage 6E is Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status      | Acceptance                                                    |
-| ----- | -------------------------------------------------------------- | ----------- | ------------------------------------------------------------- |
-| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                                     |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                                     |
-| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                                     |
-| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                                     |
-| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a`                      |
-| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`, 6B `0b0c814`; 6C Awaiting review; 6D-6E Planned |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                                       |
-| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                                       |
+| Stage | Deliverable                                                    | Status      | Acceptance                                                               |
+| ----- | -------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------ |
+| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                                                |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                                                |
+| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                                                |
+| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                                                |
+| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a`                                 |
+| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`; 6D Awaiting review; 6E Planned |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                                                  |
+| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                                                  |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -175,13 +175,13 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 **In progress; Substages 6A, 6B, and 6C Complete (independently accepted at `155d7bd`, `0b0c814`, and `c8a766f`); Substages 6D-6E Planned.**
 
-| Substage | Deliverable                                                                  | Status   | Submission reference                | Acceptance reference |
-| -------- | ---------------------------------------------------------------------------- | -------- | ----------------------------------- | -------------------- |
-| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
-| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete | `feat/stage-6b-semantic-index`      | `0b0c814`            |
-| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Complete | `feat/stage-6c-photo-metadata`      | `c8a766f`            |
-| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Planned  | Pending                             | Pending              |
-| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned  | Pending                             | Pending              |
+| Substage | Deliverable                                                                  | Status      | Submission reference                | Acceptance reference |
+| -------- | ---------------------------------------------------------------------------- | ----------- | ----------------------------------- | -------------------- |
+| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete    | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
+| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete    | `feat/stage-6b-semantic-index`      | `0b0c814`            |
+| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Complete    | `feat/stage-6c-photo-metadata`      | `c8a766f`            |
+| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | In progress | `feat/stage-6d-semantic-search`     | Pending              |
+| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned     | Pending                             | Pending              |
 
 ### Stage 6A - Offline semantic search feasibility evaluation and real-Electron spike
 
@@ -236,12 +236,44 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
   - Concurrency verification utilized 45 ms worker task delays (`PV_TEST_WORKER_METADATA_DELAY_MS=45` and `PV_TEST_WORKER_SEMANTIC_DELAY_MS=45` in `src/main/services/thumbnails/worker.ts`) to reliably observe simultaneous active metadata extraction and semantic embedding tasks during diagnostic polling across the shared image worker pool.
   - Bitwise source preservation confirmed across 66 immutable photos and 7 model files, noting OS read-only `atime` updates.
 
+### Stage 6D - Natural-language photo search IPC, ranking, and Photos UI integration
+
+**Awaiting independent review.**
+
+- [x] **Offline Query Vector Generation (`TextEmbedder`, `SearchWorker`)**:
+  - Pinned `@huggingface/tokenizers@0.2.0` tokenizer and quantized ONNX text model (`text_model_quantized.onnx`) running on CPU in dedicated worker thread (`search_worker.ts`), keeping tokenization and ONNX inference off Electron main and renderer.
+  - Strict query input bounds ($\le 500$ characters, trimmed, non-empty) with honest 77-token truncation notice (`truncated: true`, `tokenCount: 77`).
+  - Strict validation of vectors: 512 dimensions, finite float32 values, L2 unit normalized.
+  - Zero external query transmission or personal data upload; completely offline.
+- [x] **Bounded Cosine Similarity Ranking & Candidate Pruning (`searchPhotosSemantic`, `ranking.ts`)**:
+  - Filter-before-ranking: Prunes candidates using Stage 5B (rating, flag, collection) and Stage 6C (date range, camera, lens, resolution, file type) SQL filters BEFORE vector decoding and cosine score ranking. Non-matching photos are pruned at the database level and never occupy candidate heap space.
+  - Incremental streaming candidate vector evaluation via SQLite `stmt.iterate()` with a bounded top-$K$ min-heap ($O(K)$ auxiliary memory where $K = \text{offset} + \text{limit}$), avoiding whole-catalog vector index materialization in JavaScript memory. Verified at scale with 50,001 synthetic embeddings.
+  - Single-pass coverage aggregate query counts `eligible_count`, `unindexed_count`, and `stale_count`.
+  - Deterministic tie-breaking: `score DESC, fileLocationId ASC`.
+  - Rejects corrupt or malformed vector blobs safely.
+  - Honest pagination semantics with bounded page batches (`limit <= 100`).
+- [x] **Typed IPC, Sandboxed Preload & Cancellation (`src/shared/`, `src/preload/`, `src/main/ipc/`)**:
+  - Narrow typed IPC contracts: `SEMANTIC_SEARCH_PHOTOS` (`'semantic:search-photos'`), `SEMANTIC_SEARCH_CANCEL` (`'semantic:search-cancel'`).
+  - Bidirectional runtime Zod schema validation and sender validation.
+  - Sandboxed preload bundle verified to require only `electron`.
+  - Monotonic request tokens and active search cancellation promptly aborting in-flight worker searches.
+- [x] **Photos UI Search Bar Integration (`PhotosSearchBar.tsx`, `usePhotos.ts`, `PhotosPanel.tsx`)**:
+  - Compact search bar in Photos toolbar with input, clear button, loading spinner, match count badge, query latency and token count display, and unindexed/stale coverage warnings.
+  - Prominent disclaimer that matches are semantic AI inferences, not factual object labels.
+  - Photo cards display percentage similarity match badges (`xx% match`).
+  - Works seamlessly with all existing Stage 5B and Stage 6C filters.
+  - Clearing search restores ordinary browsing without reload or state corruption.
+- [x] **Real-Electron Built & Unpacked Verification (`scripts/verify-electron-semantic-search.mjs`)**:
+  - `verify:semantic-search` (21/21 checks passed in built mode).
+  - `verify:semantic-search:unpacked` (22/22 checks passed in unpacked mode).
+  - Exercises unprovisioned handling, offline CLIP ViT-B/32 text embedding inference, natural-language query matches against real fixtures, filter-before-ranking candidate pruning, honest 77-token truncation, active search cancellation, Photos UI search bar integration, non-factual disclaimer display, card similarity badges, clearing search restoration of ordinary browsing, sub-15ms query latency, and 100% source bitwise invariance.
+
 ### Stage 6 Checklist
 
 - [x] Evaluate local embedding models and resource/packaging requirements (6A Complete; independently accepted at `155d7bd`).
-- [ ] Implement content-based photo search and a persistent search index (6B Complete; 6D Planned).
+- [x] Implement content-based photo search and a persistent search index (6B Complete; 6D Awaiting review; 6E Planned).
 - [x] Filter by available date, camera, lens, resolution, and file-type metadata (6C Complete; independently accepted at `c8a766f`; 6D-6E Planned).
-- [x] Preserve unknown dates/locations and separate inferences from recorded facts (6B and 6C Complete; 6D-6E Planned).
+- [x] Preserve unknown dates/locations and separate inferences from recorded facts (6B and 6C Complete; 6D Awaiting review; 6E Planned).
 
 Exit: users can find photos by content and available metadata using the supported offline workflow.
 

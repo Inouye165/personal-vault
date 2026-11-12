@@ -903,3 +903,32 @@ export interface PhotoTechnicalMetadataDetailResult {
   readonly historicalMetadataCount: number
   readonly currentMetadata: PhotoTechnicalMetadataRecord | null
 }
+
+// Stage 6D: Semantic Search
+export interface SemanticSearchCatalogInput {
+  readonly queryVector: Float32Array
+  readonly filters?: QueryFileLocationsOptions
+  readonly limit?: number
+  readonly offset?: number
+  readonly minScore?: number
+  readonly modelId?: string
+  readonly preprocessingVersion?: string
+}
+
+export interface SemanticSearchCatalogResultItem {
+  readonly photo: CatalogFileRecord
+  readonly score: number
+  readonly rank: number
+}
+
+export interface SemanticSearchCatalogResult {
+  readonly items: readonly SemanticSearchCatalogResultItem[]
+  readonly totalMatched: number
+  readonly eligibleCount: number
+  readonly unindexedCount: number
+  readonly staleCount: number
+  readonly offset: number
+  readonly limit: number
+  readonly hasMore: boolean
+  readonly queryLatencyMs: number
+}

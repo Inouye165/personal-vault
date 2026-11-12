@@ -108,6 +108,12 @@ import {
   type SemanticModelStatusResponse,
   type SemanticIndexProgressResponse,
   type SemanticIndexJobItemsResponse,
+  SemanticSearchRequestSchema,
+  SemanticSearchResponseSchema,
+  SemanticSearchCancelRequestSchema,
+  SemanticSearchCancelResponseSchema,
+  type SemanticSearchResponse,
+  type SemanticSearchCancelResponse,
   PhotoMetadataProgressResponseSchema,
   StartPhotoMetadataExtractionRequestSchema,
   GetPhotoMetadataDetailRequestSchema,
@@ -127,7 +133,11 @@ import {
 } from '../services/vault'
 import type { ThumbnailCoordinator } from '../services/thumbnails'
 import type { SimilarityCoordinator } from '../services/similarity'
-import type { SemanticModelManager, SemanticIndexCoordinator } from '../services/semantic'
+import type {
+  SemanticModelManager,
+  SemanticIndexCoordinator,
+  SemanticSearchCoordinator
+} from '../services/semantic'
 import { METADATA_PARSER_RECIPE_VERSION, type PhotoMetadataCoordinator } from '../services/metadata'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 
@@ -140,6 +150,7 @@ export interface IpcHandlerOptions {
   readonly similarityCoordinator?: SimilarityCoordinator
   readonly semanticModelManager?: SemanticModelManager
   readonly semanticIndexCoordinator?: SemanticIndexCoordinator
+  readonly semanticSearchCoordinator?: SemanticSearchCoordinator
   readonly photoMetadataCoordinator?: PhotoMetadataCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
@@ -156,6 +167,7 @@ export function registerIpcHandlers({
   similarityCoordinator,
   semanticModelManager,
   semanticIndexCoordinator,
+  semanticSearchCoordinator,
   photoMetadataCoordinator,
   getMainWindow,
   selectDirectories,
@@ -1252,6 +1264,59 @@ export function registerIpcHandlers({
   handle(IPC_CHANNELS.SEMANTIC_INDEX_PROGRESS_EVENT, (): never => {
     throw new Error('Event-only channel cannot be invoked')
   })
+
+  // --- Stage 6D: Natural-Language Photo Search ---
+
+  handle(
+    IPC_CHANNELS.SEMANTIC_SEARCH_PHOTOS,
+    async (raw: unknown): Promise<SemanticSearchResponse> => {
+      const parsed = validatePayload(SemanticSearchRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming SemanticSearchRequest: ${parsed.error}`)
+      }
+      if (!semanticSearchCoordinator) {
+        return {
+          items: [],
+          totalMatched: 0,
+          offset: parsed.data.offset,
+          limit: parsed.data.limit,
+          hasMore: false,
+          eligibleCount: 0,
+          unindexedCount: 0,
+          staleCount: 0,
+          modelStatus: 'unprovisioned',
+          tokenCount: 0,
+          truncated: false,
+          queryLatencyMs: 0
+        }
+      }
+      const result = await semanticSearchCoordinator.search(parsed.data)
+      const validated = validatePayload(SemanticSearchResponseSchema, result)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing SemanticSearchResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.SEMANTIC_SEARCH_CANCEL,
+    async (raw?: unknown): Promise<SemanticSearchCancelResponse> => {
+      const parsed = validatePayload(SemanticSearchCancelRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming SemanticSearchCancelRequest: ${parsed.error}`)
+      }
+      if (semanticSearchCoordinator) {
+        semanticSearchCoordinator.cancelActiveSearch()
+      }
+      const response: SemanticSearchCancelResponse = { cancelled: true }
+      const validated = validatePayload(SemanticSearchCancelResponseSchema, response)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing SemanticSearchCancelResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
 
   // --- Stage 6C: Photo Metadata Extraction, Provenance & Facet Handlers ---
 

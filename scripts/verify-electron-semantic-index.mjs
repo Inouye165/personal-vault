@@ -210,40 +210,33 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
 
 async function openPhotosAndSemanticPanel(cdp) {
   await evaluate(cdp, `window.api.setTab('photos')`)
-  await evaluate(
-    cdp,
-    `(() => {
-      const btn = Array.from(document.querySelectorAll('.nav-item')).find((b) =>
-        b.textContent && b.textContent.includes('Photos')
-      )
-      if (btn) btn.click()
-    })()`
-  )
 
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 60; i++) {
     const hasToggle = await evaluate(
       cdp,
-      `Boolean(document.querySelector('[data-testid="photos-toggle-semantic-index"]'))`
+      `(() => {
+        if (document.querySelector('[data-testid="photos-toggle-semantic-index"]')) return true
+        const btn = Array.from(document.querySelectorAll('.nav-item')).find((b) =>
+          b.textContent && b.textContent.includes('Photos')
+        )
+        if (btn) btn.click()
+        return Boolean(document.querySelector('[data-testid="photos-toggle-semantic-index"]'))
+      })()`
     )
     if (hasToggle) break
     await sleep(150)
   }
 
-  await evaluate(
-    cdp,
-    `(() => {
-      const panel = document.querySelector('[data-testid="semantic-index-panel"]')
-      if (!panel) {
-        const toggle = document.querySelector('[data-testid="photos-toggle-semantic-index"]')
-        if (toggle) toggle.click()
-      }
-    })()`
-  )
-
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 60; i++) {
     const hasPanel = await evaluate(
       cdp,
-      `Boolean(document.querySelector('[data-testid="semantic-index-panel"]'))`
+      `(() => {
+        const panel = document.querySelector('[data-testid="semantic-index-panel"]')
+        if (panel) return true
+        const toggle = document.querySelector('[data-testid="photos-toggle-semantic-index"]')
+        if (toggle) toggle.click()
+        return Boolean(document.querySelector('[data-testid="semantic-index-panel"]'))
+      })()`
     )
     if (hasPanel) return
     await sleep(150)

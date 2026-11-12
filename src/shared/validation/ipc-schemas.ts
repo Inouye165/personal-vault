@@ -1271,6 +1271,65 @@ export const GetPhotoMetadataFacetsResponseSchema = z.object({
 })
 export type GetPhotoMetadataFacetsResponse = z.infer<typeof GetPhotoMetadataFacetsResponseSchema>
 
+// --- Stage 6D: Natural-Language Semantic Photo Search ---
+
+export const SemanticSearchRequestSchema = z
+  .object({
+    queryText: z.string().min(1).max(500),
+    offset: z.number().int().nonnegative().default(0),
+    limit: z.number().int().positive().max(100).default(50),
+    minScore: z.number().min(-1.0).max(1.0).default(0.0),
+    ratingFilter: PhotoRatingFilterSchema.default('all'),
+    flagFilter: PhotoFlagFilterSchema.default('all'),
+    collectionId: z.number().int().positive().nullable().default(null),
+    captureDateFrom: CalendarDateIsoSchema.nullable().default(null),
+    captureDateTo: CalendarDateIsoSchema.nullable().default(null),
+    includeUnknownCaptureDate: z.boolean().default(false),
+    cameraNormalized: z.string().max(256).nullable().default(null),
+    onlyUnknownCamera: z.boolean().default(false),
+    lensNormalized: z.string().max(256).nullable().default(null),
+    onlyUnknownLens: z.boolean().default(false),
+    minWidthPx: z.number().int().min(1).max(100_000).nullable().default(null),
+    minHeightPx: z.number().int().min(1).max(100_000).nullable().default(null),
+    includeUnknownDimensions: z.boolean().default(false),
+    fileTypeBasis: PhotoFileTypeBasisSchema.default('detected_format'),
+    fileTypeValue: z.string().max(32).nullable().default(null),
+    onlyUnknownDetectedFormat: z.boolean().default(false)
+  })
+  .strict()
+export type SemanticSearchRequest = z.input<typeof SemanticSearchRequestSchema>
+
+export const SemanticSearchResultItemSchema = z.object({
+  photo: PhotoItemSchema,
+  score: z.number(),
+  rank: z.number().int().positive()
+})
+export type SemanticSearchResultItem = z.infer<typeof SemanticSearchResultItemSchema>
+
+export const SemanticSearchResponseSchema = z.object({
+  items: z.array(SemanticSearchResultItemSchema),
+  totalMatched: z.number().int().nonnegative(),
+  eligibleCount: z.number().int().nonnegative(),
+  unindexedCount: z.number().int().nonnegative(),
+  staleCount: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  hasMore: z.boolean(),
+  queryLatencyMs: z.number().nonnegative(),
+  truncated: z.boolean(),
+  tokenCount: z.number().int().nonnegative(),
+  modelStatus: z.enum(['ready', 'unprovisioned', 'corrupt', 'error'])
+})
+export type SemanticSearchResponse = z.infer<typeof SemanticSearchResponseSchema>
+
+export const SemanticSearchCancelRequestSchema = z.object({}).strict()
+export type SemanticSearchCancelRequest = z.input<typeof SemanticSearchCancelRequestSchema>
+
+export const SemanticSearchCancelResponseSchema = z.object({
+  cancelled: z.boolean()
+})
+export type SemanticSearchCancelResponse = z.infer<typeof SemanticSearchCancelResponseSchema>
+
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,
   data: unknown

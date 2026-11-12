@@ -499,3 +499,32 @@ src/
       - Executes inside `ThumbnailCoordinator` (`<= 2` live workers including terminating, `<= 1` active `extract_photo_metadata` task, `<= 1` active `semantic_embed` task, `<= 64` queue reserving `>= 8` interactive slots and yielding whenever high-priority thumbnail decodes are queued or active, `15,000 ms` timeout, `<= 8 MiB` EXIF buffer cap, `<= 32 KiB` raw tag JSON cap).
       - `PhotoMetadataCoordinator` snapshots exact authorized catalog scope in `photo_metadata_job_items` in bounded 500-item batches (no permanent collection-size cap); resume processes only originally snapshotted `pending` items; unchanged content reuse requires live off-main source SHA-256 verification (`verify_source`); commits revalidate catalog `content_revision` transactionally (`REVISION_MISMATCH`).
       - Narrow typed IPC (`metadata:start-extraction`, `metadata:pause-extraction`, `metadata:resume-extraction`, `metadata:cancel-extraction`, `metadata:get-progress`, `metadata:progress-event`, `metadata:get-photo-detail`, `metadata:get-facets`, plus expanded `photos:get-page`) with bidirectional Zod schemas, top-level sender validation, and renderer monotonic sequence/generation guards (`usePhotos.ts`, `usePhotoMetadata.ts`, `PhotoMetadataFilterPanel.tsx`, `PhotosPanel.tsx`).
+
+17. **Natural-Language Photo Search, Ranking & Photos UI Integration (Stage 6D)**:
+    - **Inviolable Principles & Machine Inference Separation**:
+      - Semantic match scores are cosine similarities in $[-1.0, 1.0]$ derived from multimodal CLIP embeddings, rendered in UI as percentage match badges. They are machine inferences, not factual object labels, ground-truth classification, or probabilistic confidence.
+      - Source preservation: source files are strictly read-only and 100% untouched.
+      - Privacy & offline-first: text tokenization, text ONNX embedding inference, and cosine vector ranking run 100% locally on CPU without external network transmission.
+    - **Offline Text Tokenization & ONNX Embedding (`TextEmbedder`, `SearchWorker`)**:
+      - Uses pinned `@huggingface/tokenizers@0.2.0` with `tokenizer.json` and quantized ONNX text model (`text_model_quantized.onnx`) from the verified `<userData>/models/` directory.
+      - Text input bound: $\le 500$ characters, trimmed, non-empty. Honestly truncates queries exceeding CLIP's 77-token context window with `truncated: true` and reported `tokenCount`.
+      - Text ONNX CPU session run in a dedicated worker thread (`src/main/services/semantic/search-worker.ts`) and managed by `SemanticSearchCoordinator`, keeping heavy inference and ranking off Electron main and renderer.
+    - **Filter-Before-Ranking & Bounded Cosine Ranking (`searchPhotosSemantic`, `ranking.ts`)**:
+      - Stage 5B (rating, flag, collection) and Stage 6C (date range, camera, lens, dimensions, file-type) filters are applied in SQLite BEFORE top-$K$ selection and cosine ranking. Non-matching photos are pruned at the database level and never occupy candidate heap space.
+      - Streaming candidate vector traversal via SQLite `stmt.iterate()` using a bounded min-heap ($O(K)$ auxiliary memory where $K = \text{offset} + \text{limit}$), avoiding whole-catalog vector index materialization in JavaScript memory. Tested and verified over >50,000 synthetic embeddings.
+      - Rejects non-finite (`NaN`/`Infinity`), wrong-dimension ($\ne 512$), non-unit-norm, or malformed-size vector blobs.
+      - Single aggregate query computes coverage counters: `eligible_count`, `unindexed_count`, and `stale_count`.
+      - Stable deterministic ordering: `score DESC, fileLocationId ASC`.
+      - Bounded pagination: `limit <= 100`.
+    - **Lifecycle, Cancellation & Rapid Replacement (`SemanticSearchCoordinator`)**:
+      - Earlier search requests are cancelled or superseded upon receiving a newer request; monotonic search request tokens ensure earlier delayed responses never overwrite newer queries.
+      - Explicit cancellation (`semantic:search-cancel`) aborts active worker search/inference promptly.
+    - **Typed IPC & Sandboxed Preload**:
+      - Narrow IPC channels: `SEMANTIC_SEARCH_PHOTOS` (`'semantic:search-photos'`), `SEMANTIC_SEARCH_CANCEL` (`'semantic:search-cancel'`).
+      - Bidirectional Zod schema validation (`SemanticSearchRequestSchema`, `SemanticSearchResponseSchema`, `SemanticSearchCancelRequestSchema`, `SemanticSearchCancelResponseSchema`). Sender validation enforced.
+      - Sandboxed preload bundle verified to require only `electron`.
+    - **Photos View UI Integration (`PhotosSearchBar.tsx`, `usePhotos.ts`, `PhotosPanel.tsx`)**:
+      - Compact natural-language search bar in the Photos toolbar with query input, clear button, loading spinner, match count badge, latency/token badge, unindexed/stale coverage warnings, and prominent non-factual AI inference disclaimer.
+      - Seamlessly combines with rating, flag, collection, and Stage 6C technical metadata filters.
+      - Clearing search restores ordinary browsing without reload or state corruption.
+      - Photo cards display similarity percentage badges for machine inference matches.

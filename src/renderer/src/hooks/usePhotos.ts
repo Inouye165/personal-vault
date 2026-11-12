@@ -15,6 +15,10 @@ import type {
   PhotoRatingFilter,
   ThumbnailResult
 } from '../../../shared/validation/ipc-schemas'
+import type {
+  PhotosSearchBarResultMeta,
+  PhotosSearchModelStatus
+} from '../components/PhotosSearchBar'
 
 export const PHOTO_BOUNDS = {
   PAGE_SIZE: 50,
@@ -107,6 +111,13 @@ export interface UsePhotosResult {
   readonly collectionId: number | null
   readonly metadataFilters: PhotoMetadataFilterState
   readonly filterGeneration: number
+  readonly searchQuery: string
+  readonly isSearching: boolean
+  readonly searchResultMeta: PhotosSearchBarResultMeta | null
+  readonly searchScores: ReadonlyMap<number, number>
+  readonly modelStatus: PhotosSearchModelStatus
+  readonly setSearchQuery: (query: string) => void
+  readonly clearSearch: () => void
   readonly selectPhoto: (id: number | null) => void
   readonly setRatingFilter: (filter: PhotoRatingFilter) => void
   readonly setFlagFilter: (filter: PhotoFlagFilter) => void
@@ -145,6 +156,14 @@ export function usePhotos(): UsePhotosResult {
   )
   const [filterGeneration, setFilterGeneration] = useState<number>(0)
 
+  // Stage 6D: Semantic Search state
+  const [searchQuery, setSearchQueryState] = useState<string>('')
+  const searchQueryRef = useRef<string>('')
+  const [isSearching, setIsSearching] = useState<boolean>(false)
+  const [searchResultMeta, setSearchResultMeta] = useState<PhotosSearchBarResultMeta | null>(null)
+  const [searchScores, setSearchScores] = useState<Map<number, number>>(new Map())
+  const [modelStatus, setModelStatus] = useState<PhotosSearchModelStatus>('ready')
+
   const ratingFilterRef = useRef(ratingFilter)
   const flagFilterRef = useRef(flagFilter)
   const collectionIdRef = useRef(collectionId)
@@ -156,6 +175,24 @@ export function usePhotos(): UsePhotosResult {
     collectionIdRef.current = collectionId
     metadataFiltersRef.current = metadataFilters
   }, [ratingFilter, flagFilter, collectionId, metadataFilters])
+
+  useEffect(() => {
+    let unmounted = false
+    void window.api?.getSemanticModelStatus?.().then((status) => {
+      if (!unmounted && status) {
+        setModelStatus(status.state)
+      }
+    })
+    const unsub = window.api?.onSemanticModelStatus?.((status) => {
+      if (!unmounted && status) {
+        setModelStatus(status.state)
+      }
+    })
+    return () => {
+      unmounted = true
+      unsub?.()
+    }
+  }, [])
 
   useEffect(() => {
     thumbnailsRef.current = thumbnails
@@ -180,6 +217,7 @@ export function usePhotos(): UsePhotosResult {
         flag: PhotoFlagFilter
         collection: number | null
         metadata: PhotoMetadataFilterState
+        searchQuery?: string
       }
     ) => {
       if (inFlightPagesRef.current.get(pageIndex) === currentGeneration) {
@@ -193,60 +231,142 @@ export function usePhotos(): UsePhotosResult {
         collection: collectionIdRef.current,
         metadata: metadataFiltersRef.current
       }
+      const query =
+        activeFilters?.searchQuery !== undefined
+          ? activeFilters.searchQuery
+          : searchQueryRef.current
 
       try {
-        if (!window.api?.getPhotosPage) {
-          throw new Error('Photos API unavailable')
-        }
-
-        const res = await window.api.getPhotosPage({
-          offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
-          limit: PHOTO_BOUNDS.PAGE_SIZE,
-          ratingFilter: filters.rating,
-          flagFilter: filters.flag,
-          collectionId: filters.collection,
-          captureDateFrom: filters.metadata.captureDateFrom,
-          captureDateTo: filters.metadata.captureDateTo,
-          includeUnknownCaptureDate: filters.metadata.includeUnknownCaptureDate,
-          cameraNormalized: filters.metadata.cameraNormalized,
-          onlyUnknownCamera: filters.metadata.onlyUnknownCamera,
-          lensNormalized: filters.metadata.lensNormalized,
-          onlyUnknownLens: filters.metadata.onlyUnknownLens,
-          minWidthPx: filters.metadata.minWidthPx,
-          minHeightPx: filters.metadata.minHeightPx,
-          includeUnknownDimensions: filters.metadata.includeUnknownDimensions,
-          fileTypeBasis: filters.metadata.fileTypeBasis,
-          fileTypeValue: filters.metadata.fileTypeValue,
-          onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat
-        })
-
-        // Discard response if generation changed
-        if (generationRef.current !== currentGeneration) {
-          return
-        }
-
-        inFlightPagesRef.current.delete(pageIndex)
-        setTotalCount(res.totalCount)
-
-        setPages((prev) => {
-          const next = new Map(prev)
-          next.set(pageIndex, res.items)
-
-          // Update LRU tracking
-          const lru = pageLruRef.current.filter((p) => p !== pageIndex)
-          lru.push(pageIndex)
-
-          // Evict oldest pages if exceeding MAX_PAGES
-          while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
-            const evictedPage = lru.shift()
-            if (evictedPage !== undefined) {
-              next.delete(evictedPage)
-            }
+        if (query) {
+          if (!window.api?.searchPhotosSemantic) {
+            throw new Error('Semantic search API unavailable')
           }
-          pageLruRef.current = lru
+          const res = await window.api.searchPhotosSemantic({
+            queryText: query,
+            offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
+            limit: PHOTO_BOUNDS.PAGE_SIZE,
+            ratingFilter: filters.rating,
+            flagFilter: filters.flag,
+            collectionId: filters.collection,
+            captureDateFrom: filters.metadata.captureDateFrom,
+            captureDateTo: filters.metadata.captureDateTo,
+            includeUnknownCaptureDate: filters.metadata.includeUnknownCaptureDate,
+            cameraNormalized: filters.metadata.cameraNormalized,
+            onlyUnknownCamera: filters.metadata.onlyUnknownCamera,
+            lensNormalized: filters.metadata.lensNormalized,
+            onlyUnknownLens: filters.metadata.onlyUnknownLens,
+            minWidthPx: filters.metadata.minWidthPx,
+            minHeightPx: filters.metadata.minHeightPx,
+            includeUnknownDimensions: filters.metadata.includeUnknownDimensions,
+            fileTypeBasis: filters.metadata.fileTypeBasis,
+            fileTypeValue: filters.metadata.fileTypeValue,
+            onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat
+          })
 
-          return next
-        })
+          // Discard response if generation changed
+          if (generationRef.current !== currentGeneration) {
+            return
+          }
+
+          inFlightPagesRef.current.delete(pageIndex)
+          setTotalCount(res.totalMatched)
+          setModelStatus(res.modelStatus)
+          setSearchResultMeta({
+            totalMatched: res.totalMatched,
+            eligibleCount: res.eligibleCount,
+            unindexedCount: res.unindexedCount,
+            staleCount: res.staleCount,
+            truncated: res.truncated,
+            tokenCount: res.tokenCount,
+            queryLatencyMs: res.queryLatencyMs
+          })
+
+          setSearchScores((prev) => {
+            const next = new Map(pageIndex === 0 ? [] : prev)
+            for (const item of res.items) {
+              next.set(item.photo.id, item.score)
+            }
+            return next
+          })
+
+          const pageItems = res.items.map((i) => i.photo)
+          setPages((prev) => {
+            const next = new Map(prev)
+            next.set(pageIndex, pageItems)
+
+            // Update LRU tracking
+            const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+            lru.push(pageIndex)
+
+            // Evict oldest pages if exceeding MAX_PAGES
+            while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+              const evictedPage = lru.shift()
+              if (evictedPage !== undefined) {
+                next.delete(evictedPage)
+              }
+            }
+            pageLruRef.current = lru
+
+            return next
+          })
+        } else {
+          if (!window.api?.getPhotosPage) {
+            throw new Error('Photos API unavailable')
+          }
+          if (pageIndex === 0) {
+            setSearchResultMeta(null)
+            setSearchScores(new Map())
+          }
+
+          const res = await window.api.getPhotosPage({
+            offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
+            limit: PHOTO_BOUNDS.PAGE_SIZE,
+            ratingFilter: filters.rating,
+            flagFilter: filters.flag,
+            collectionId: filters.collection,
+            captureDateFrom: filters.metadata.captureDateFrom,
+            captureDateTo: filters.metadata.captureDateTo,
+            includeUnknownCaptureDate: filters.metadata.includeUnknownCaptureDate,
+            cameraNormalized: filters.metadata.cameraNormalized,
+            onlyUnknownCamera: filters.metadata.onlyUnknownCamera,
+            lensNormalized: filters.metadata.lensNormalized,
+            onlyUnknownLens: filters.metadata.onlyUnknownLens,
+            minWidthPx: filters.metadata.minWidthPx,
+            minHeightPx: filters.metadata.minHeightPx,
+            includeUnknownDimensions: filters.metadata.includeUnknownDimensions,
+            fileTypeBasis: filters.metadata.fileTypeBasis,
+            fileTypeValue: filters.metadata.fileTypeValue,
+            onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat
+          })
+
+          // Discard response if generation changed
+          if (generationRef.current !== currentGeneration) {
+            return
+          }
+
+          inFlightPagesRef.current.delete(pageIndex)
+          setTotalCount(res.totalCount)
+
+          setPages((prev) => {
+            const next = new Map(prev)
+            next.set(pageIndex, res.items)
+
+            // Update LRU tracking
+            const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+            lru.push(pageIndex)
+
+            // Evict oldest pages if exceeding MAX_PAGES
+            while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+              const evictedPage = lru.shift()
+              if (evictedPage !== undefined) {
+                next.delete(evictedPage)
+              }
+            }
+            pageLruRef.current = lru
+
+            return next
+          })
+        }
       } catch (err: unknown) {
         if (generationRef.current === currentGeneration) {
           inFlightPagesRef.current.delete(pageIndex)
@@ -255,6 +375,7 @@ export function usePhotos(): UsePhotosResult {
       } finally {
         if (generationRef.current === currentGeneration && pageIndex === 0) {
           setIsLoading(false)
+          setIsSearching(false)
         }
       }
     },
@@ -275,17 +396,70 @@ export function usePhotos(): UsePhotosResult {
       setPages(new Map())
       setThumbnails(new Map())
       setIsLoading(true)
+      setIsSearching(Boolean(searchQueryRef.current))
       setError(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
         rating: newRating,
         flag: newFlag,
         collection: newCollection,
-        metadata: newMetadata
+        metadata: newMetadata,
+        searchQuery: searchQueryRef.current
       })
     },
     [loadPage]
   )
+
+  const setSearchQuery = useCallback(
+    (newQuery: string) => {
+      const trimmed = newQuery.trim()
+      searchQueryRef.current = trimmed
+      setSearchQueryState(trimmed)
+      const nextGen = ++generationRef.current
+      pageLruRef.current = []
+      inFlightPagesRef.current.clear()
+      inFlightThumbsRef.current.clear()
+      setPages(new Map())
+      setThumbnails(new Map())
+      setIsLoading(true)
+      setIsSearching(Boolean(trimmed))
+      setError(null)
+      setFilterGeneration((prev) => prev + 1)
+      void loadPage(0, nextGen, {
+        rating: ratingFilterRef.current,
+        flag: flagFilterRef.current,
+        collection: collectionIdRef.current,
+        metadata: metadataFiltersRef.current,
+        searchQuery: trimmed
+      })
+    },
+    [loadPage]
+  )
+
+  const clearSearch = useCallback(() => {
+    searchQueryRef.current = ''
+    setSearchQueryState('')
+    setSearchResultMeta(null)
+    setSearchScores(new Map())
+    void window.api?.cancelPhotosSemanticSearch?.()
+    const nextGen = ++generationRef.current
+    pageLruRef.current = []
+    inFlightPagesRef.current.clear()
+    inFlightThumbsRef.current.clear()
+    setPages(new Map())
+    setThumbnails(new Map())
+    setIsLoading(true)
+    setIsSearching(false)
+    setError(null)
+    setFilterGeneration((prev) => prev + 1)
+    void loadPage(0, nextGen, {
+      rating: ratingFilterRef.current,
+      flag: flagFilterRef.current,
+      collection: collectionIdRef.current,
+      metadata: metadataFiltersRef.current,
+      searchQuery: ''
+    })
+  }, [loadPage])
 
   const setRatingFilter = useCallback(
     (newRating: PhotoRatingFilter) => {
@@ -352,6 +526,11 @@ export function usePhotos(): UsePhotosResult {
     flagFilterRef.current = 'all'
     collectionIdRef.current = null
     metadataFiltersRef.current = DEFAULT_PHOTO_METADATA_FILTERS
+    searchQueryRef.current = ''
+    setSearchQueryState('')
+    setSearchResultMeta(null)
+    setSearchScores(new Map())
+    void window.api?.cancelPhotosSemanticSearch?.()
     setRatingFilterState('all')
     setFlagFilterState('all')
     setCollectionIdState(null)
@@ -580,6 +759,13 @@ export function usePhotos(): UsePhotosResult {
     collectionId,
     metadataFilters,
     filterGeneration,
+    searchQuery,
+    isSearching,
+    searchResultMeta,
+    searchScores,
+    modelStatus,
+    setSearchQuery,
+    clearSearch,
     selectPhoto,
     setRatingFilter,
     setFlagFilter,

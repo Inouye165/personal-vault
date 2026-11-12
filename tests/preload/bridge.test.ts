@@ -106,7 +106,9 @@ describe('preload bridge', () => {
         'cancelPhotoMetadataExtraction',
         'onPhotoMetadataProgress',
         'getPhotoMetadataDetail',
-        'getPhotoMetadataFacets'
+        'getPhotoMetadataFacets',
+        'searchPhotosSemantic',
+        'cancelPhotosSemanticSearch'
       ].sort()
     )
   })
@@ -174,5 +176,50 @@ describe('preload bridge', () => {
       cancelled: false,
       rootPaths: ['D:/photos']
     })
+  })
+
+  it('validates searchPhotosSemantic requests and responses', async () => {
+    const validResponse = {
+      items: [],
+      totalMatched: 0,
+      eligibleCount: 0,
+      unindexedCount: 0,
+      staleCount: 0,
+      offset: 0,
+      limit: 50,
+      hasMore: false,
+      queryLatencyMs: 12.5,
+      truncated: false,
+      tokenCount: 4,
+      modelStatus: 'ready'
+    }
+    electron.invoke.mockResolvedValueOnce(validResponse)
+    const api = await loadApi()
+
+    // Invalid request: empty queryText
+    await expect(api.searchPhotosSemantic!({ queryText: '' })).rejects.toThrow(/invalid/i)
+    expect(electron.invoke).not.toHaveBeenCalled()
+
+    // Valid request
+    await expect(
+      api.searchPhotosSemantic!({ queryText: 'sunset over lake' })
+    ).resolves.toMatchObject({
+      totalMatched: 0,
+      modelStatus: 'ready'
+    })
+    expect(electron.invoke).toHaveBeenCalledWith(
+      'semantic:search-photos',
+      expect.objectContaining({
+        queryText: 'sunset over lake'
+      })
+    )
+  })
+
+  it('validates cancelPhotosSemanticSearch requests and responses', async () => {
+    electron.invoke.mockResolvedValueOnce({ cancelled: true })
+    const api = await loadApi()
+
+    await expect(api.cancelPhotosSemanticSearch!()).resolves.toEqual({ cancelled: true })
+    expect(electron.invoke).toHaveBeenCalledWith('semantic:search-cancel', {})
   })
 })

@@ -94,9 +94,14 @@ import type {
   PhotoMetadataJobItemRecord,
   GetPhotoMetadataFacetsOptions,
   PhotoMetadataFacetsResult,
-  PhotoTechnicalMetadataDetailResult
+  PhotoTechnicalMetadataDetailResult,
+  SemanticSearchCatalogInput,
+  SemanticSearchCatalogResult,
+  SemanticSearchCatalogResultItem
 } from './types'
 import { validateAndSerializeEmbeddingVector, deserializeEmbeddingVector } from '../semantic/vector'
+import { SEMANTIC_MODEL_ID, SEMANTIC_PREPROCESSING_VERSION } from '../semantic/manifest'
+import { rankCandidates } from '../semantic/ranking'
 import { METADATA_LIMITS, METADATA_PARSER_RECIPE_VERSION } from '../metadata/types'
 import type { AnnotationJournal } from '../annotations/journal'
 import type {
@@ -973,10 +978,15 @@ export class CatalogDatabase {
         d.byte_size, d.filesystem_birthtime_ms, d.filesystem_mtime_ms, d.inferred_capture_time_ms,
         d.observed_at_ms as first_discovered_at_ms, d.last_seen_at_ms,
         h.sha256 as active_hash,
-        h.hashed_at_ms as active_hash_verified_at_ms
+        h.hashed_at_ms as active_hash_verified_at_ms,
+        a.rating as annotation_rating,
+        a.flag as annotation_flag,
+        a.version as annotation_version
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
+        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       WHERE f.id = ?;
     `)
     const row = stmt.get(id) as unknown as RawFileRow | undefined
@@ -1054,14 +1064,15 @@ export class CatalogDatabase {
   }
 
   /**
-   * Executes bounded, paginated catalog file queries with optional filters.
+   * Helper constructing shared SQL WHERE filter conditions and joins
+   * for Stage 5B ratings/flags/collections and Stage 6C technical metadata.
    */
-  public queryFileLocations(
-    options: QueryFileLocationsOptions = {}
-  ): PaginatedResult<CatalogFileRecord> {
-    this.assertOpen()
-    const { offset, limit } = validatePagination(options)
-
+  private buildPhotoFilterClauses(options: QueryFileLocationsOptions): {
+    conditions: string[]
+    params: SQLInputValue[]
+    techMetaJoinClause: string
+    joinParams: SQLInputValue[]
+  } {
     const conditions: string[] = []
     const params: SQLInputValue[] = []
 
@@ -1275,6 +1286,21 @@ export class CatalogDatabase {
       }
     }
 
+    return { conditions, params, techMetaJoinClause, joinParams }
+  }
+
+  /**
+   * Executes bounded, paginated catalog file queries with optional filters.
+   */
+  public queryFileLocations(
+    options: QueryFileLocationsOptions = {}
+  ): PaginatedResult<CatalogFileRecord> {
+    this.assertOpen()
+    const { offset, limit } = validatePagination(options)
+
+    const { conditions, params, techMetaJoinClause, joinParams } =
+      this.buildPhotoFilterClauses(options)
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const allFilterParams = [...joinParams, ...params]
 
@@ -1327,6 +1353,157 @@ export class CatalogDatabase {
       offset,
       limit,
       hasMore: offset + items.length < totalCount
+    }
+  }
+
+  /**
+   * Searches photos by natural-language semantic similarity, applying Stage 5B
+   * and Stage 6C SQL filters BEFORE candidate ranking and pagination.
+   * Streams candidate vectors using bounded O(K) ranking heap.
+   */
+  public async searchPhotosSemantic(
+    input: SemanticSearchCatalogInput
+  ): Promise<SemanticSearchCatalogResult> {
+    this.assertOpen()
+    const t0 = performance.now()
+    const limit = Math.min(Math.max(1, input.limit ?? 50), 100)
+    const offset = Math.max(0, input.offset ?? 0)
+    const minScore = input.minScore ?? 0.0
+    const modelId = input.modelId ?? SEMANTIC_MODEL_ID
+    const preprocessingVersion = input.preprocessingVersion ?? SEMANTIC_PREPROCESSING_VERSION
+
+    const filterOptions: QueryFileLocationsOptions = {
+      ...input.filters,
+      category: 'photo'
+    }
+    const { conditions, params, techMetaJoinClause, joinParams } =
+      this.buildPhotoFilterClauses(filterOptions)
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const allFilterParams = [...joinParams, ...params]
+
+    // 1. Single aggregate count query for coverage and candidates under current filters
+    const countSql = `
+      SELECT
+        COUNT(*) AS total_filtered_photos,
+        COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS eligible_count,
+        COALESCE(SUM(CASE
+          WHEN se.id IS NULL AND EXISTS (
+            SELECT 1 FROM photo_semantic_embeddings h
+            WHERE h.file_location_id = f.id
+          ) THEN 1 ELSE 0 END
+        ), 0) AS stale_count,
+        COALESCE(SUM(CASE
+          WHEN se.id IS NULL AND NOT EXISTS (
+            SELECT 1 FROM photo_semantic_embeddings h
+            WHERE h.file_location_id = f.id
+          ) THEN 1 ELSE 0 END
+        ), 0) AS unindexed_count
+      FROM file_locations f
+      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+      LEFT JOIN photo_semantic_embeddings se
+        ON se.file_location_id = f.id
+       AND se.discovery_observation_id = d.id
+       AND se.is_current = 1
+       AND se.model_id = ?
+       AND se.preprocessing_version = ?
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
+        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
+      ${techMetaJoinClause}
+      ${whereClause};
+    `
+    const countRow = this.db
+      .prepare(countSql)
+      .get(modelId, preprocessingVersion, ...allFilterParams) as Record<string, unknown> | undefined
+
+    const eligibleCount = Number(countRow?.eligible_count ?? 0)
+    const staleCount = Number(countRow?.stale_count ?? 0)
+    const unindexedCount = Number(countRow?.unindexed_count ?? 0)
+
+    if (eligibleCount === 0) {
+      return {
+        items: [],
+        totalMatched: 0,
+        eligibleCount: 0,
+        unindexedCount,
+        staleCount,
+        offset,
+        limit,
+        hasMore: false,
+        queryLatencyMs: performance.now() - t0
+      }
+    }
+
+    // 2. Stream candidate embedding vectors with O(1) memory
+    const candidatesSql = `
+      SELECT
+        f.id AS file_location_id,
+        se.embedding_blob
+      FROM file_locations f
+      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+      JOIN photo_semantic_embeddings se
+        ON se.file_location_id = f.id
+       AND se.discovery_observation_id = d.id
+       AND se.is_current = 1
+       AND se.model_id = ?
+       AND se.preprocessing_version = ?
+      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
+        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
+      ${techMetaJoinClause}
+      ${whereClause}
+      ORDER BY f.id ASC;
+    `
+
+    const stmt = this.db.prepare(candidatesSql)
+    const cursor = stmt.iterate(modelId, preprocessingVersion, ...allFilterParams) as Iterable<{
+      file_location_id: number
+      embedding_blob: Buffer | Uint8Array
+    }>
+
+    function* streamCandidates() {
+      for (const row of cursor) {
+        const vector = deserializeEmbeddingVector(row.embedding_blob)
+        yield {
+          fileLocationId: row.file_location_id,
+          vector
+        }
+      }
+    }
+
+    const rankResult = rankCandidates(input.queryVector, streamCandidates(), {
+      limit,
+      offset,
+      minScore
+    })
+
+    // 3. Hydrate top-K photos
+    const items: SemanticSearchCatalogResultItem[] = []
+    for (let i = 0; i < rankResult.items.length; i++) {
+      const match = rankResult.items[i]
+      if (match) {
+        const photo = this.getFileLocationById(match.fileLocationId)
+        if (photo) {
+          items.push({
+            photo,
+            score: match.score,
+            rank: offset + i + 1
+          })
+        }
+      }
+    }
+
+    return {
+      items,
+      totalMatched: rankResult.totalMatched,
+      eligibleCount,
+      unindexedCount,
+      staleCount,
+      offset,
+      limit,
+      hasMore: rankResult.hasMore,
+      queryLatencyMs: performance.now() - t0
     }
   }
 

@@ -77,6 +77,10 @@ import {
   GetPhotoMetadataDetailResponseSchema,
   GetPhotoMetadataFacetsRequestSchema,
   GetPhotoMetadataFacetsResponseSchema,
+  SemanticSearchRequestSchema,
+  SemanticSearchResponseSchema,
+  SemanticSearchCancelRequestSchema,
+  SemanticSearchCancelResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -150,7 +154,11 @@ import {
   type GetPhotoMetadataDetailRequest,
   type GetPhotoMetadataDetailResponse,
   type GetPhotoMetadataFacetsRequest,
-  type GetPhotoMetadataFacetsResponse
+  type GetPhotoMetadataFacetsResponse,
+  type SemanticSearchRequest,
+  type SemanticSearchResponse,
+  type SemanticSearchCancelRequest,
+  type SemanticSearchCancelResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -950,6 +958,34 @@ const api: VaultApi = {
     const result = validatePayload(GetPhotoMetadataFacetsResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getPhotoMetadataFacets response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async searchPhotosSemantic(request: SemanticSearchRequest): Promise<SemanticSearchResponse> {
+    const parsed = validatePayload(SemanticSearchRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid searchPhotosSemantic request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_SEARCH_PHOTOS, parsed.data)
+    const result = validatePayload(SemanticSearchResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid searchPhotosSemantic response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelPhotosSemanticSearch(
+    request?: SemanticSearchCancelRequest
+  ): Promise<SemanticSearchCancelResponse> {
+    const parsed = validatePayload(SemanticSearchCancelRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelPhotosSemanticSearch request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SEMANTIC_SEARCH_CANCEL, parsed.data)
+    const result = validatePayload(SemanticSearchCancelResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelPhotosSemanticSearch response from main: ${result.error}`)
     }
     return result.data
   }

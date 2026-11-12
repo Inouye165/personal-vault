@@ -14,6 +14,7 @@ import { AnnotationJournal } from './services/annotations'
 import {
   SemanticModelManager,
   SemanticIndexCoordinator,
+  SemanticSearchCoordinator,
   APPROVED_DOWNLOAD_HOSTS
 } from './services/semantic'
 import { PhotoMetadataCoordinator } from './services/metadata'
@@ -54,6 +55,7 @@ let thumbnailCoordinator: ThumbnailCoordinator | null = null
 let similarityCoordinator: SimilarityCoordinator | null = null
 let semanticModelManager: SemanticModelManager | null = null
 let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
+let semanticSearchCoordinator: SemanticSearchCoordinator | null = null
 let photoMetadataCoordinator: PhotoMetadataCoordinator | null = null
 
 function createWindow(): BrowserWindow {
@@ -227,6 +229,12 @@ if (!app.requestSingleInstanceLock()) {
       photoMetadataCoordinator.initialize()
       logStartup('photoMetadataCoordinator initialized')
 
+      semanticSearchCoordinator = new SemanticSearchCoordinator({
+        catalog,
+        modelManager: semanticModelManager
+      })
+      logStartup('semanticSearchCoordinator initialized')
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -239,6 +247,7 @@ if (!app.requestSingleInstanceLock()) {
         similarityCoordinator,
         semanticModelManager,
         semanticIndexCoordinator,
+        semanticSearchCoordinator,
         photoMetadataCoordinator,
         getMainWindow: () => mainWindow
       })
@@ -285,6 +294,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down semantic index coordinator')
             await semanticIndexCoordinator.shutdown()
             logStartup('semantic index coordinator shutdown done')
+          }
+          if (semanticSearchCoordinator) {
+            logStartup('shutting down semantic search coordinator')
+            await semanticSearchCoordinator.shutdown()
+            logStartup('semantic search coordinator shutdown done')
           }
           if (similarityCoordinator) {
             logStartup('shutting down similarity coordinator')

@@ -2680,3 +2680,146 @@ input:focus-visible {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* Stage 6D: Photos Natural-Language Search */
+
+.photos-search-bar-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.photos-search-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.photos-search-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  max-width: 560px;
+}
+
+.photos-search-input-wrapper .search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.photos-search-input {
+  width: 100%;
+  background-color: var(--bg-input);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 6px 85px 6px 32px;
+  font-size: 13px;
+  outline: none;
+}
+
+.photos-search-input:focus {
+  border-color: var(--accent-primary);
+}
+
+.photos-search-input-wrapper .search-loading-icon {
+  position: absolute;
+  right: 10px;
+  color: var(--accent-primary);
+}
+
+.photos-search-clear-btn {
+  position: absolute;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.photos-search-clear-btn:hover {
+  color: var(--text-main);
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.photos-search-submit-btn {
+  flex-shrink: 0;
+}
+
+.search-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+  font-size: 12px;
+}
+
+.photos-search-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.search-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.search-match-badge {
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+
+.search-latency-badge {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.search-coverage-warning {
+  color: #f59e0b;
+  font-size: 11px;
+}
+
+.search-truncation-notice {
+  color: #ef4444;
+  font-size: 11px;
+}
+
+.search-disclaimer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.badge-similarity-score {
+  display: inline-block;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #60a5fa;
+  background-color: rgba(96, 165, 250, 0.15);
+  border-radius: 3px;
+  white-space: nowrap;
+}

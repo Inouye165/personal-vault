@@ -28,6 +28,8 @@
     "verify:similarity:unpacked": "node scripts/verify-electron-similarity.mjs --mode=unpacked",
     "verify:semantic-index": "node scripts/verify-electron-semantic-index.mjs",
     "verify:semantic-index:unpacked": "node scripts/verify-electron-semantic-index.mjs --mode=unpacked",
+    "verify:semantic-search": "node scripts/verify-electron-semantic-search.mjs",
+    "verify:semantic-search:unpacked": "node scripts/verify-electron-semantic-search.mjs --mode=unpacked",
     "verify:metadata": "node scripts/verify-electron-metadata.mjs",
     "verify:metadata:unpacked": "node scripts/verify-electron-metadata.mjs --mode=unpacked",
     "start": "electron .",
