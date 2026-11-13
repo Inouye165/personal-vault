@@ -96,28 +96,17 @@ import type {
   PhotoMetadataFacetsResult,
   PhotoTechnicalMetadataDetailResult,
   SemanticSearchCatalogInput,
-  SemanticSearchCatalogResult,
-  SemanticSearchCatalogResultItem
+  SemanticSearchCatalogResult
 } from './types'
 import {
   validateAndSerializeEmbeddingVector,
   deserializeEmbeddingVector,
-  tryDeserializeEmbeddingVector,
-  isObservationTimestampMatching,
-  isSemanticEmbeddingRecordCompatible
+  isObservationTimestampMatching
 } from '../semantic/vector'
 export { isObservationTimestampMatching }
-import {
-  SEMANTIC_MODEL_ID,
-  SEMANTIC_MODEL_COMMIT,
-  SEMANTIC_PREPROCESSING_VERSION,
-  REQUIRED_MODEL_ARTIFACTS,
-  computeManifestSha256
-} from '../semantic/manifest'
-
-const DEFAULT_SEMANTIC_MANIFEST_SHA256 = computeManifestSha256(REQUIRED_MODEL_ARTIFACTS)
-import { rankCandidatesWithBoundedPaging } from '../semantic/ranking'
 import { METADATA_LIMITS, METADATA_PARSER_RECIPE_VERSION } from '../metadata/types'
+import { buildPhotoFilterClauses } from './photo-filter-sql'
+import { SemanticSearchRepository } from './semantic-search-repository'
 import type { AnnotationJournal } from '../annotations/journal'
 import type {
   AnnotationJournalEntry,
@@ -393,6 +382,7 @@ export class CatalogDatabase {
   private journal?: AnnotationJournal
   public readonly catalogPath: string
   private closed = false
+  private readonly semanticSearchRepository: SemanticSearchRepository
 
   private constructor(
     db: DatabaseSync,
@@ -402,6 +392,10 @@ export class CatalogDatabase {
     this.db = db
     this.journal = journal
     this.catalogPath = catalogPath
+    this.semanticSearchRepository = new SemanticSearchRepository({
+      getDb: () => this.getRawDb(),
+      getFileLocationById: (id) => this.getFileLocationById(id)
+    })
   }
 
   public getCatalogPath(): string {
@@ -1068,232 +1062,6 @@ export class CatalogDatabase {
   }
 
   /**
-   * Helper constructing shared SQL WHERE filter conditions and joins
-   * for Stage 5B ratings/flags/collections and Stage 6C technical metadata.
-   */
-  private buildPhotoFilterClauses(options: QueryFileLocationsOptions): {
-    conditions: string[]
-    params: SQLInputValue[]
-    techMetaJoinClause: string
-    joinParams: SQLInputValue[]
-  } {
-    const conditions: string[] = []
-    const params: SQLInputValue[] = []
-
-    if (typeof options.sourceId === 'number') {
-      conditions.push('f.source_id = ?')
-      params.push(options.sourceId)
-    }
-
-    if (options.category) {
-      conditions.push('f.category = ?')
-      params.push(options.category)
-    }
-
-    if (typeof options.hasActiveHash === 'boolean') {
-      if (options.hasActiveHash) {
-        conditions.push('h.sha256 IS NOT NULL')
-      } else {
-        conditions.push('h.sha256 IS NULL')
-      }
-    }
-
-    if (options.sha256) {
-      conditions.push('h.sha256 = ?')
-      params.push(options.sha256.toLowerCase())
-    }
-
-    if (options.ratingFilter && options.ratingFilter !== 'all') {
-      if (options.ratingFilter === 'unrated') {
-        conditions.push('(a.rating IS NULL OR a.id IS NULL)')
-      } else if (options.ratingFilter === '1') {
-        conditions.push('a.rating >= 1')
-      } else if (options.ratingFilter === '2') {
-        conditions.push('a.rating >= 2')
-      } else if (options.ratingFilter === '3') {
-        conditions.push('a.rating >= 3')
-      } else if (options.ratingFilter === '4') {
-        conditions.push('a.rating >= 4')
-      } else if (options.ratingFilter === '5') {
-        conditions.push('a.rating = 5')
-      }
-    }
-
-    if (options.flagFilter && options.flagFilter !== 'all') {
-      if (options.flagFilter === 'none') {
-        conditions.push("(a.flag = 'none' OR a.flag IS NULL OR a.id IS NULL)")
-      } else if (options.flagFilter === 'pick') {
-        conditions.push("a.flag = 'pick'")
-      } else if (options.flagFilter === 'reject') {
-        conditions.push("a.flag = 'reject'")
-      }
-    }
-
-    if (typeof options.collectionId === 'number') {
-      conditions.push(`
-        EXISTS (
-          SELECT 1 FROM collection_memberships cm
-          WHERE cm.file_location_id = f.id AND cm.collection_id = ? AND cm.is_current = 1
-            AND (cm.discovery_observation_id = d.id OR (cm.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND cm.content_sha256 = h.sha256))
-        )
-      `)
-      params.push(options.collectionId)
-    }
-
-    // Stage 6C: SQL-backed technical metadata & file-type filters (combined with AND before pagination)
-    const hasDateRange = Boolean(options.captureDateFrom || options.captureDateTo)
-    const hasDateFilter = Boolean(hasDateRange || options.includeUnknownCaptureDate)
-    const hasCameraFilter = Boolean(options.cameraNormalized || options.onlyUnknownCamera)
-    const hasLensFilter = Boolean(options.lensNormalized || options.onlyUnknownLens)
-    const hasMinDimensions =
-      typeof options.minWidthPx === 'number' || typeof options.minHeightPx === 'number'
-    const hasDimensionFilter = Boolean(hasMinDimensions || options.includeUnknownDimensions)
-    const fileTypeBasis = options.fileTypeBasis ?? 'detected_format'
-    const hasDetectedFormatFilter =
-      fileTypeBasis === 'detected_format' &&
-      Boolean(options.fileTypeValue || options.onlyUnknownDetectedFormat)
-    const hasExtensionFilter =
-      fileTypeBasis === 'filename_extension' && Boolean(options.fileTypeValue)
-
-    const needsTechMetaJoin =
-      hasDateFilter ||
-      hasCameraFilter ||
-      hasLensFilter ||
-      hasDimensionFilter ||
-      hasDetectedFormatFilter
-
-    const joinParams: SQLInputValue[] = []
-    let techMetaJoinClause = ''
-    if (needsTechMetaJoin) {
-      const recipeVersion = options.parserRecipeVersion ?? METADATA_PARSER_RECIPE_VERSION
-      techMetaJoinClause = `
-        LEFT JOIN photo_technical_metadata tm
-          ON tm.file_location_id = f.id
-         AND tm.is_current = 1
-         AND tm.parser_recipe_version = ?
-         AND tm.discovery_observation_id = d.id
-      `
-      joinParams.push(recipeVersion)
-    }
-
-    if (hasDateFilter) {
-      if (hasDateRange && options.includeUnknownCaptureDate) {
-        const rangeSub: string[] = [
-          "tm.extraction_status IN ('extracted', 'no_metadata')",
-          'tm.capture_calendar_date IS NOT NULL'
-        ]
-        if (options.captureDateFrom) {
-          rangeSub.push('tm.capture_calendar_date >= ?')
-          params.push(options.captureDateFrom)
-        }
-        if (options.captureDateTo) {
-          rangeSub.push('tm.capture_calendar_date <= ?')
-          params.push(options.captureDateTo)
-        }
-        conditions.push(
-          `((${rangeSub.join(' AND ')}) OR (tm.extraction_status IN ('extracted', 'no_metadata') AND tm.capture_calendar_date IS NULL))`
-        )
-      } else if (hasDateRange) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.capture_calendar_date IS NOT NULL')
-        if (options.captureDateFrom) {
-          conditions.push('tm.capture_calendar_date >= ?')
-          params.push(options.captureDateFrom)
-        }
-        if (options.captureDateTo) {
-          conditions.push('tm.capture_calendar_date <= ?')
-          params.push(options.captureDateTo)
-        }
-      } else if (options.includeUnknownCaptureDate) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.capture_calendar_date IS NULL')
-      }
-    }
-
-    if (hasCameraFilter) {
-      if (options.onlyUnknownCamera) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.camera_normalized IS NULL')
-      } else if (options.cameraNormalized) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.camera_normalized = ?')
-        params.push(options.cameraNormalized.trim().toLowerCase())
-      }
-    }
-
-    if (hasLensFilter) {
-      if (options.onlyUnknownLens) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.lens_normalized IS NULL')
-      } else if (options.lensNormalized) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.lens_normalized = ?')
-        params.push(options.lensNormalized.trim().toLowerCase())
-      }
-    }
-
-    if (hasDimensionFilter) {
-      if (hasMinDimensions && options.includeUnknownDimensions) {
-        const knownSub: string[] = [
-          "tm.extraction_status IN ('extracted', 'no_metadata')",
-          'tm.display_width_px IS NOT NULL',
-          'tm.display_height_px IS NOT NULL'
-        ]
-        if (typeof options.minWidthPx === 'number') {
-          knownSub.push('tm.display_width_px >= ?')
-          params.push(options.minWidthPx)
-        }
-        if (typeof options.minHeightPx === 'number') {
-          knownSub.push('tm.display_height_px >= ?')
-          params.push(options.minHeightPx)
-        }
-        conditions.push(
-          `((${knownSub.join(' AND ')}) OR (tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed') AND (tm.display_width_px IS NULL OR tm.display_height_px IS NULL)))`
-        )
-      } else if (hasMinDimensions) {
-        conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-        conditions.push('tm.display_width_px IS NOT NULL')
-        conditions.push('tm.display_height_px IS NOT NULL')
-        if (typeof options.minWidthPx === 'number') {
-          conditions.push('tm.display_width_px >= ?')
-          params.push(options.minWidthPx)
-        }
-        if (typeof options.minHeightPx === 'number') {
-          conditions.push('tm.display_height_px >= ?')
-          params.push(options.minHeightPx)
-        }
-      } else if (options.includeUnknownDimensions) {
-        conditions.push(
-          "tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
-        )
-        conditions.push('(tm.display_width_px IS NULL OR tm.display_height_px IS NULL)')
-      }
-    }
-
-    if (hasExtensionFilter && options.fileTypeValue) {
-      const trimmedExt = options.fileTypeValue.trim().toLowerCase()
-      const normExt = trimmedExt.startsWith('.') ? trimmedExt : `.${trimmedExt}`
-      conditions.push('LOWER(f.extension) = ?')
-      params.push(normExt)
-    } else if (hasDetectedFormatFilter) {
-      if (options.onlyUnknownDetectedFormat) {
-        conditions.push(
-          "tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
-        )
-        conditions.push('tm.detected_format IS NULL')
-      } else if (options.fileTypeValue) {
-        conditions.push(
-          "tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
-        )
-        conditions.push('tm.detected_format = ?')
-        params.push(options.fileTypeValue.trim().toLowerCase())
-      }
-    }
-
-    return { conditions, params, techMetaJoinClause, joinParams }
-  }
-
-  /**
    * Executes bounded, paginated catalog file queries with optional filters.
    */
   public queryFileLocations(
@@ -1302,8 +1070,7 @@ export class CatalogDatabase {
     this.assertOpen()
     const { offset, limit } = validatePagination(options)
 
-    const { conditions, params, techMetaJoinClause, joinParams } =
-      this.buildPhotoFilterClauses(options)
+    const { conditions, params, techMetaJoinClause, joinParams } = buildPhotoFilterClauses(options)
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const allFilterParams = [...joinParams, ...params]
@@ -1363,211 +1130,13 @@ export class CatalogDatabase {
   /**
    * Searches photos by natural-language semantic similarity, applying Stage 5B
    * and Stage 6C SQL filters BEFORE candidate ranking and pagination.
-   * Streams candidate vectors using bounded O(K) ranking heap.
+   * Delegates to SemanticSearchRepository while retaining connection and
+   * transaction ownership in CatalogDatabase.
    */
   public async searchPhotosSemantic(
     input: SemanticSearchCatalogInput
   ): Promise<SemanticSearchCatalogResult> {
-    this.assertOpen()
-    const t0 = performance.now()
-    const limit = Math.min(Math.max(1, input.limit ?? 50), 100)
-    const offset = Math.max(0, input.offset ?? 0)
-    const minScore = input.minScore ?? 0.0
-    const modelId = input.modelId ?? SEMANTIC_MODEL_ID
-    const modelCommit = input.modelCommit ?? SEMANTIC_MODEL_COMMIT
-    const modelManifestSha256 = (
-      input.modelManifestSha256 ?? DEFAULT_SEMANTIC_MANIFEST_SHA256
-    ).toLowerCase()
-    const preprocessingVersion = input.preprocessingVersion ?? SEMANTIC_PREPROCESSING_VERSION
-
-    const filterOptions: QueryFileLocationsOptions = {
-      ...input.filters,
-      category: 'photo'
-    }
-    const { conditions, params, techMetaJoinClause, joinParams } =
-      this.buildPhotoFilterClauses(filterOptions)
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-    const allFilterParams = [...joinParams, ...params]
-
-    const semanticEmbeddingOnClause = `
-      se.file_location_id = f.id
-       AND se.discovery_observation_id = d.id
-       AND se.is_current = 1
-       AND se.model_id = ?
-       AND se.model_commit = ?
-       AND se.model_manifest_sha256 = ?
-       AND se.preprocessing_version = ?
-       AND se.embedding_dimensions = 512
-       AND se.observed_byte_size = d.byte_size
-       AND (h.sha256 IS NULL OR h.sha256 = se.content_sha256)
-    `
-    const semanticModelQueryParams: SQLInputValue[] = [
-      modelId,
-      modelCommit,
-      modelManifestSha256,
-      preprocessingVersion
-    ]
-
-    // 1. Single aggregate count query for coverage and candidates under current filters
-    const countSql = `
-      SELECT
-        COUNT(*) AS total_filtered_photos,
-        COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS candidate_count,
-        COALESCE(SUM(CASE
-          WHEN se.id IS NULL AND EXISTS (
-            SELECT 1 FROM photo_semantic_embeddings h_se
-            WHERE h_se.file_location_id = f.id
-          ) THEN 1 ELSE 0 END
-        ), 0) AS stale_count,
-        COALESCE(SUM(CASE
-          WHEN se.id IS NULL AND NOT EXISTS (
-            SELECT 1 FROM photo_semantic_embeddings h_se
-            WHERE h_se.file_location_id = f.id
-          ) THEN 1 ELSE 0 END
-        ), 0) AS unindexed_count
-      FROM file_locations f
-      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
-      LEFT JOIN photo_semantic_embeddings se
-        ON ${semanticEmbeddingOnClause}
-      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
-        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
-      ${techMetaJoinClause}
-      ${whereClause};
-    `
-    const countRow = this.db
-      .prepare(countSql)
-      .get(...semanticModelQueryParams, ...allFilterParams) as Record<string, unknown> | undefined
-
-    const sqlCandidateCount = Number(countRow?.candidate_count ?? 0)
-    const sqlStaleCount = Number(countRow?.stale_count ?? 0)
-    const unindexedCount = Number(countRow?.unindexed_count ?? 0)
-
-    if (sqlCandidateCount === 0) {
-      return {
-        items: [],
-        totalMatched: 0,
-        eligibleCount: 0,
-        unindexedCount,
-        staleCount: sqlStaleCount,
-        corruptCount: 0,
-        offset,
-        limit,
-        hasMore: false,
-        queryLatencyMs: performance.now() - t0
-      }
-    }
-
-    // 2. Stream candidate embedding vectors with exact canonical revision & timestamp checks
-    const candidatesSql = `
-      SELECT
-        f.id AS file_location_id,
-        d.id AS discovery_observation_id,
-        d.byte_size AS discovery_byte_size,
-        d.filesystem_mtime_ms,
-        h.sha256 AS active_hash,
-        se.content_sha256,
-        se.content_revision,
-        se.observed_byte_size,
-        se.observed_mtime_ms,
-        se.embedding_blob
-      FROM file_locations f
-      JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-      LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
-      JOIN photo_semantic_embeddings se
-        ON ${semanticEmbeddingOnClause}
-      LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
-        AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
-      ${techMetaJoinClause}
-      ${whereClause}
-      ORDER BY f.id ASC;
-    `
-
-    const stmt = this.db.prepare(candidatesSql)
-    const cursor = stmt.iterate(...semanticModelQueryParams, ...allFilterParams) as Iterable<{
-      file_location_id: number
-      discovery_observation_id: number
-      discovery_byte_size: number
-      filesystem_mtime_ms: number | null
-      active_hash: string | null
-      content_sha256: string
-      content_revision: string
-      observed_byte_size: number
-      observed_mtime_ms: number | null
-      embedding_blob: Buffer | Uint8Array
-    }>
-
-    let validEligibleCount = 0
-    let extraStaleCount = 0
-    let corruptCount = 0
-
-    function* streamCandidates() {
-      for (const row of cursor) {
-        if (
-          !isSemanticEmbeddingRecordCompatible({
-            discoveryObservationId: row.discovery_observation_id,
-            discoveryByteSize: row.discovery_byte_size,
-            filesystemMtimeMs: row.filesystem_mtime_ms,
-            activeHash: row.active_hash,
-            contentSha256: row.content_sha256,
-            contentRevision: row.content_revision,
-            observedByteSize: row.observed_byte_size,
-            observedMtimeMs: row.observed_mtime_ms
-          })
-        ) {
-          extraStaleCount++
-          continue
-        }
-
-        const vector = tryDeserializeEmbeddingVector(row.embedding_blob)
-        if (!vector) {
-          corruptCount++
-          continue
-        }
-
-        validEligibleCount++
-        yield {
-          fileLocationId: row.file_location_id,
-          vector
-        }
-      }
-    }
-
-    const rankResult = rankCandidatesWithBoundedPaging(input.queryVector, streamCandidates(), {
-      limit,
-      offset,
-      minScore
-    })
-
-    // 3. Hydrate top-K photos
-    const items: SemanticSearchCatalogResultItem[] = []
-    for (let i = 0; i < rankResult.items.length; i++) {
-      const match = rankResult.items[i]
-      if (match) {
-        const photo = this.getFileLocationById(match.fileLocationId)
-        if (photo && photo.category === 'photo' && photo.discoveryObservationId > 0) {
-          items.push({
-            photo,
-            score: match.score,
-            rank: offset + i + 1
-          })
-        }
-      }
-    }
-
-    return {
-      items,
-      totalMatched: rankResult.totalMatched,
-      eligibleCount: validEligibleCount,
-      unindexedCount,
-      staleCount: sqlStaleCount + extraStaleCount,
-      corruptCount,
-      offset,
-      limit,
-      hasMore: rankResult.hasMore,
-      queryLatencyMs: performance.now() - t0
-    }
+    return this.semanticSearchRepository.searchPhotosSemantic(input)
   }
 
   /**

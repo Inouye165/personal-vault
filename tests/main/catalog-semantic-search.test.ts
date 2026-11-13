@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { CatalogDatabase } from '../../src/main/services/catalog/database'
+import { DatabaseClosedError } from '../../src/main/services/catalog/errors'
 import {
   SEMANTIC_EMBEDDING_DIMENSIONS,
   SEMANTIC_MODEL_ID,
@@ -615,6 +616,20 @@ describe('Stage 6D: Catalog Semantic Search - Filter-Before-Ranking & Invalidati
       })
       expect(firstPage.items.length).toBe(25)
       expect(firstPage.items[0]?.photo.id).toBe(rows[0]!.id)
+    })
+
+    it('rejects searchPhotosSemantic with DatabaseClosedError after CatalogDatabase.close()', async () => {
+      const queryVector = makeVector(1)
+      catalog.close()
+
+      await expect(
+        catalog.searchPhotosSemantic({
+          queryVector,
+          filters: {},
+          offset: 0,
+          limit: 10
+        })
+      ).rejects.toThrow(DatabaseClosedError)
     })
   })
 })

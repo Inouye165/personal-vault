@@ -71,8 +71,10 @@ src/
 │       │   ├── hasher.ts     # Streaming SHA-256 hasher with pre/post fstat verification
 │       │   ├── types.ts      # Discriminated union outcomes and configuration contracts
 │       │   └── index.ts      # Public hashing exports
-│       └── catalog/       # Stage 2C: SQLite catalog schema and inventory persistence
-│           ├── database.ts   # CatalogDatabase repository (parameterized, transactions, bounded queries)
+│       └── catalog/       # Stage 2C + Pre-Stage-7 Maintenance: SQLite catalog schema, connection ownership, and repositories
+│           ├── database.ts   # CatalogDatabase connection/transaction owner & facade (delegates semantic search to SemanticSearchRepository)
+│           ├── photo-filter-sql.ts # Shared parameterized SQL WHERE & metadata-JOIN builder for Stage 5B/6C photo filters
+│           ├── semantic-search-repository.ts # SemanticSearchRepository (coverage counts, candidate vector streaming, compatibility checks, ranking delegation, hydration)
 │           ├── errors.ts     # Domain errors (UnsupportedSchemaVersionError, DatabaseClosedError, etc.)
 │           ├── migrations.ts # Versioned transactional migrations and schema definition
 │           ├── path-normalization.ts # Documented platform-aware lookup key normalization

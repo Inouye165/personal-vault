@@ -3,8 +3,8 @@
 ## Current state
 
 - **Workspace**: `D:\organizer`
-- **Branch**: `feat/stage-6e-final-verification` (created directly from verified Stage 6D documentation closeout `1b552d3ec20395818d9dbb472fc93dd675b60b79`, descending from accepted Stage 6D implementation `1f07012ff8785344a1bc990b86d70889b9c5c943`, Stage 6C closeout `4318fd2`, accepted Stage 6C implementation `c8a766f`, Stage 6B closeout `653c01e`, accepted Stage 6B implementation `0b0c814`, Stage 6A closeout `ad796b4`, accepted Stage 6A implementation `155d7bd`, and Stage 5 closeout `9b8faa7`)
-- **Base Commit**: `1b552d3` (`1b552d3ec20395818d9dbb472fc93dd675b60b79`)
+- **Branch**: `refactor/pre-stage-7-catalog-search` (branched from verified Stage 6E documentation closeout `8a297e18a8546f89f8932133d4818158467a2462` on `feat/stage-6e-final-verification`, descending from accepted Stage 6E implementation `e565835a662dd97f884454fbb2a9a76d1ed3a247`, Stage 6D closeout `1b552d3ec20395818d9dbb472fc93dd675b60b79`, accepted Stage 6D implementation `1f07012ff8785344a1bc990b86d70889b9c5c943`, Stage 6C closeout `4318fd2`, accepted Stage 6C implementation `c8a766f`, Stage 6B closeout `653c01e`, accepted Stage 6B implementation `0b0c814`, Stage 6A closeout `ad796b4`, accepted Stage 6A implementation `155d7bd`, and Stage 5 closeout `9b8faa7`)
+- **Base Commit**: `8a297e1` (`8a297e18a8546f89f8932133d4818158467a2462`)
 - **Accepted Stage 6C Commit**: `c8a766f` (`c8a766f284c7c88b2098651f890c6488d5feae80`)
 - **Accepted Stage 6D Commit**: `1f07012` (`1f07012ff8785344a1bc990b86d70889b9c5c943`, documentation closeout committed at `afd07c6` / `1b552d3` on `feat/stage-6d-semantic-search`)
 - **Accepted Stage 6E Commit**: `e565835` (`e565835a662dd97f884454fbb2a9a76d1ed3a247` on `feat/stage-6e-final-verification`)
@@ -19,7 +19,7 @@
   - **Stage 6C (Photo Metadata Extraction & Fact/Inference-Separated SQL Filters)**: **Complete** (independently accepted at `c8a766f` on `feat/stage-6c-photo-metadata`, closeout at `4318fd2`).
   - **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)**: **Complete** (independently accepted at `1f07012` on `feat/stage-6d-semantic-search`, closeout at `1b552d3`).
   - **Substage 6E (End-to-End Packaged Electron Verification & Stage 6 Closeout)**: **Complete** (independently accepted at `e565835` on `feat/stage-6e-final-verification`).
-- **Pre-Stage-7 modularity maintenance**: **Planned**.
+- **Pre-Stage-7 modularity maintenance**: **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Awaiting independent review**; remaining slices **Planned**).
 - **Stages 7–8**: **Planned**.
 - **Installed Electron Version**: `45.2.3` (`node` `v22.18.0`, `npm` `v10.9.3`)
 - **Evidence Source**:
@@ -190,13 +190,28 @@ The following unrelated files remain intact, untracked, and untouched:
 
 ---
 
-## 7. Pre-Stage-7 Modularity Maintenance Task (Planned)
+## 7. Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Awaiting independent review)
 
-Prior to entering Stage 7 (document extraction, classification, OCR, and unified multi-modal search), a dedicated architecture refactoring pass remains **Planned**:
+Prior to entering Stage 7 (document extraction, classification, OCR, and unified multi-modal search), modularity maintenance is planned as a bounded sequence of behavior-preserving slices:
 
-1. **Catalog Database Decomposition**: Split `database.ts` into domain-specific repositories (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`, `SearchRepository`) with shared connection management.
-2. **IPC Handler Decomposition**: Modularize `src/main/index.ts` and IPC dispatch into domain-specific routers with isolated sender validation.
-3. **Preload & Schema Contracts**: Split `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain-scoped contract modules.
-4. **Photos UI Decomposition**: Split `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks.
-
-_Note: This remains Planned; no broad modularity refactoring was performed during Stage 6D or Stage 6E._
+1. **Catalog Repositories — Slice 1: Semantic Photo Search (`refactor/pre-stage-7-catalog-search`, Awaiting independent review)**:
+   - **What moved and why**: Extracted semantic photo-search query/mapping responsibilities from `src/main/services/catalog/database.ts` into `src/main/services/catalog/semantic-search-repository.ts` (`SemanticSearchRepository`) and extracted the shared Stage 5B/6C SQL filter clause builder into `src/main/services/catalog/photo-filter-sql.ts` (`buildPhotoFilterClauses`), eliminating filter-SQL duplication between `CatalogDatabase.queryFileLocations` and `SemanticSearchRepository.searchPhotosSemantic` and reducing `database.ts` by ~430 lines.
+   - **Remaining responsibilities of `CatalogDatabase`**: Owns the authoritative `DatabaseSync` connection, schema compatibility checks, migrations, transaction boundaries, `assertOpen()`/`close()`, `getFileLocationById` mapping, and all other domain persistence methods (sources, discovery/hash observations, scan jobs, duplicate reviews, vault imports, photo annotations/collections, perceptual similarity, technical metadata, semantic indexing) until their respective slices are executed.
+   - **Connection and transaction ownership**: `CatalogDatabase` retains sole ownership of opening, migrating, and closing the `DatabaseSync` connection and managing transactions. `SemanticSearchRepository` does not open connections or manage transactions; it receives `getDb: () => this.getRawDb()` (which enforces `this.assertOpen()` and throws `DatabaseClosedError` when closed) and `getFileLocationById: (id) => this.getFileLocationById(id)`.
+   - **Public API compatibility**: `CatalogDatabase.searchPhotosSemantic(input)` preserves its exact signature and behavior by delegating to `this.semanticSearchRepository.searchPhotosSemantic(input)`. Added a `DatabaseClosedError` regression test in `tests/main/catalog-semantic-search.test.ts` verifying closed-connection handling across the delegation boundary.
+   - **Verification results (all exited 0 after final code edits)**:
+     - `npm test`: **80 passed (80 files), 981 passed (981 tests)** (exit 0)
+     - `npm run typecheck`: clean pass (exit 0)
+     - `npm run lint`: clean pass (exit 0)
+     - `npm run format:check`: clean pass (exit 0)
+     - `npm run build` & `npm run build:unpack`: clean pass (exit 0)
+     - `npm run verify:semantic-search`: **35/35 passed** (exit 0)
+     - `npm run verify:semantic-search:unpacked`: **36/36 passed** (exit 0)
+     - `npm run verify:sqlite`: **8/8 passed** (exit 0); `npm run verify:sqlite:unpacked`: **8/8 passed** (exit 0)
+     - `npm run verify:metadata`: **11/11 passed** (exit 0); `npm run verify:metadata:unpacked`: **12/12 passed** (exit 0)
+     - `npm run verify:semantic-index`: **10/10 passed** (exit 0); `npm run verify:semantic-index:unpacked`: **11/11 passed** (exit 0)
+     - `npm run smoke:built`: passed (exit 0); `npm run smoke:unpacked`: passed (exit 0)
+   - **Remaining catalog repository slices (Planned)**: `SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`.
+2. **IPC Handler Decomposition (Planned)**: Modularize `src/main/index.ts` and IPC dispatch into domain-specific routers with isolated sender validation.
+3. **Preload & Schema Contracts (Planned)**: Split `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain-scoped contract modules.
+4. **Photos UI Decomposition (Planned)**: Split `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks.

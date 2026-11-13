@@ -6,7 +6,7 @@ This tracker covers all development through public release. Detailed tasks belon
 
 ## Current position
 
-Stages 1-6 are complete (Stages 1-5 independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`; Stage 6 via substages 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`, 6D `1f07012`, and 6E `e565835` on `feat/stage-6e-final-verification`). Pre-Stage-7 modularity maintenance and Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
+Stages 1-6 are complete (Stages 1-5 independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`; Stage 6 via substages 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`, 6D `1f07012`, and 6E `e565835` on `feat/stage-6e-final-verification`, closeout `8a297e1`). Pre-Stage-7 modularity maintenance is **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Awaiting review**; remaining slices **Planned**). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
@@ -309,16 +309,14 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 - [x] **Supported Offline Photo-Search User Workflow & Known Limitations Documented**:
   - Documented across `HANDOFF.md`, `ARCHITECTURE.md`, and `README.md`.
 
-### Pre-Stage-7 Modularity Maintenance (Planned)
+### Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Awaiting review)
 
-Before implementing Stage 7 document extraction and unified search, execute a dedicated architecture maintenance pass to decompose oversized domain coordination surfaces into focused, single-responsibility modules:
+Before implementing Stage 7 document extraction and unified search, execute a bounded sequence of behavior-preserving modularity maintenance slices:
 
-- **Catalog Repository**: Split `database.ts` into cohesive repositories (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`, `SearchRepository`).
-- **IPC Handlers**: Split monolithic IPC registration in `src/main/index.ts` and handler files into domain-scoped routers with isolated sender validation and channel subscriptions.
-- **Preload Bridge & Schemas**: Modularize `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain contracts (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
-- **Photos UI**: Decompose `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks (toolbar, filter bar, search controls, virtual grid, provenance sidebar).
-
-Planning only; no broad modularity refactoring was performed during Stage 6D or Stage 6E.
+1. **Catalog Repositories — Slice 1: Semantic Photo Search (`refactor/pre-stage-7-catalog-search`, Awaiting review)**: Extracted `searchPhotosSemantic` into `src/main/services/catalog/semantic-search-repository.ts` (`SemanticSearchRepository`) and shared SQL filter construction into `src/main/services/catalog/photo-filter-sql.ts` (`buildPhotoFilterClauses`), while preserving `CatalogDatabase`'s public API, connection lifecycle, and transaction ownership via delegation. Remaining catalog repository extractions (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`) remain **Planned**.
+2. **Domain IPC Registration (Planned)**: Split monolithic IPC registration in `src/main/index.ts` and handler files into domain-scoped routers with isolated sender validation and channel subscriptions.
+3. **Shared Contracts, Schemas & Preload Organization (Planned)**: Modularize `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain contracts (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
+4. **Photos UI & Hooks Decomposition (Planned)**: Decompose `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks (toolbar, filter bar, search controls, virtual grid, provenance sidebar).
 
 ### Stage 6 Checklist
 
