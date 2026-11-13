@@ -276,6 +276,7 @@ export function usePhotos(): UsePhotosResult {
             eligibleCount: res.eligibleCount,
             unindexedCount: res.unindexedCount,
             staleCount: res.staleCount,
+            corruptCount: res.corruptCount ?? 0,
             truncated: res.truncated,
             tokenCount: res.tokenCount,
             queryLatencyMs: res.queryLatencyMs

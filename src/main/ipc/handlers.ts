@@ -1284,6 +1284,7 @@ export function registerIpcHandlers({
           eligibleCount: 0,
           unindexedCount: 0,
           staleCount: 0,
+          corruptCount: 0,
           modelStatus: 'unprovisioned',
           tokenCount: 0,
           truncated: false,

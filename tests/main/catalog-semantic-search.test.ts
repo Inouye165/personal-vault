@@ -415,10 +415,206 @@ describe('Stage 6D: Catalog Semantic Search - Filter-Before-Ranking & Invalidati
         filters: {}
       })
 
-      // Search succeeds, valid photo is returned, corrupt candidate is skipped
+      // Search succeeds, valid photo is returned, corrupt candidate is skipped and honestly counted
       expect(res.items.length).toBe(1)
       expect(res.items[0]?.photo.id).toBe(validPhotoId)
       expect(res.items[0]?.score).toBeCloseTo(1.0, 5)
+      expect(res.eligibleCount).toBe(1)
+      expect(res.corruptCount).toBe(1)
+    })
+
+    it('rejects content_revision with altered timestamp (e.g. 999999) (Finding 2)', async () => {
+      const queryVector = makeVector(25)
+      const photoId = createTestPhotoWithEmbedding({
+        fileName: 'altered_rev_ts.jpg',
+        vector: queryVector,
+        isCurrentEmbedding: true
+      })
+
+      const row = catalog
+        .getRawDb()
+        .prepare(
+          'SELECT content_revision FROM photo_semantic_embeddings WHERE file_location_id = ?;'
+        )
+        .get(photoId) as { content_revision: string }
+      const parts = row.content_revision.split(':')
+      parts[3] = '999999'
+      catalog
+        .getRawDb()
+        .prepare(
+          'UPDATE photo_semantic_embeddings SET content_revision = ? WHERE file_location_id = ?;'
+        )
+        .run(parts.join(':'), photoId)
+
+      const res = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {}
+      })
+
+      expect(res.eligibleCount).toBe(0)
+      expect(res.staleCount).toBe(1)
+      expect(res.items).toEqual([])
+    })
+
+    it('rejects observed_mtime_ms differing by 0.5 ms from fractional filesystem_mtime_ms (Finding 2)', async () => {
+      const queryVector = makeVector(26)
+      const originalPath = join(tempDir, 'fractional_mtime.jpg')
+      const fractionalMtime = 1700000000123.25
+      catalog.persistDiscoveryBatch(tempDir, [
+        {
+          originalPath,
+          fileName: 'fractional_mtime.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: 2048,
+          birthtimeMs: fractionalMtime,
+          mtimeMs: fractionalMtime,
+          discoveredAtMs: 1700000000000
+        }
+      ])
+      const sha256 = 'b'.repeat(64)
+      catalog.recordHashObservation({
+        originalPath,
+        sha256,
+        observedByteSize: 2048,
+        observedMtimeMs: fractionalMtime,
+        hashedAtMs: 1700000000000
+      })
+      const loc = catalog.getFileLocationByPath(originalPath)!
+      const driftedMtime = fractionalMtime + 0.5
+      catalog.savePhotoSemanticEmbedding({
+        fileId: loc.id,
+        fileLocationId: loc.id,
+        discoveryObservationId: loc.discoveryObservationId,
+        contentSha256: sha256,
+        contentRevision: `semrev:${loc.discoveryObservationId}:2048:${fractionalMtime}:${sha256}`,
+        sourcePath: originalPath,
+        observedByteSize: 2048,
+        observedMtimeMs: fractionalMtime,
+        modelId: SEMANTIC_MODEL_ID,
+        modelCommit: SEMANTIC_MODEL_COMMIT,
+        modelManifestSha256: manifestSha256,
+        preprocessingVersion: SEMANTIC_PREPROCESSING_VERSION,
+        embeddingDimensions: SEMANTIC_EMBEDDING_DIMENSIONS,
+        vector: queryVector
+      })
+
+      // Update observed_mtime_ms and content_revision by 0.5ms to test fractional precision policy
+      catalog
+        .getRawDb()
+        .prepare(
+          'UPDATE photo_semantic_embeddings SET observed_mtime_ms = ?, content_revision = ? WHERE file_location_id = ?;'
+        )
+        .run(
+          driftedMtime,
+          `semrev:${loc.discoveryObservationId}:2048:${driftedMtime}:${sha256}`,
+          loc.id
+        )
+
+      const res = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {}
+      })
+
+      expect(res.eligibleCount).toBe(0)
+      expect(res.staleCount).toBe(1)
+      expect(res.items).toEqual([])
+    })
+
+    it('supports bounded pagination beyond offset 10,000 with deterministic ties and backward navigation (Finding 3)', async () => {
+      const queryVector = makeVector(27)
+      const total = 10_150
+      const batch: Array<{
+        originalPath: string
+        fileName: string
+        extension: string
+        category: 'photo'
+        byteSize: number
+        birthtimeMs: number
+        mtimeMs: number
+        discoveredAtMs: number
+      }> = []
+      for (let i = 0; i < total; i++) {
+        batch.push({
+          originalPath: join(tempDir, `deep_${i}.jpg`),
+          fileName: `deep_${i}.jpg`,
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: 1024,
+          birthtimeMs: 1700000000000,
+          mtimeMs: 1700000000000,
+          discoveredAtMs: 1700000000000
+        })
+      }
+      for (let start = 0; start < total; start += 1000) {
+        catalog.persistDiscoveryBatch(tempDir, batch.slice(start, start + 1000))
+      }
+
+      const rawDb = catalog.getRawDb()
+      const rows = rawDb
+        .prepare(
+          'SELECT f.id AS id, d.id AS obs_id, f.original_path AS p FROM file_locations f JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1 ORDER BY f.id ASC;'
+        )
+        .all() as Array<{ id: number; obs_id: number; p: string }>
+
+      const blob = Buffer.from(queryVector.buffer, queryVector.byteOffset, queryVector.byteLength)
+      const sha = 'c'.repeat(64)
+      rawDb.exec('BEGIN TRANSACTION;')
+      const insertStmt = rawDb.prepare(`
+        INSERT INTO photo_semantic_embeddings (
+          file_id, file_location_id, discovery_observation_id,
+          content_sha256, content_revision, source_path, observed_byte_size, observed_mtime_ms,
+          model_id, model_commit, model_manifest_sha256, preprocessing_version,
+          embedding_dimensions, embedding_blob, is_current, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?);
+      `)
+      for (const r of rows) {
+        insertStmt.run(
+          r.id,
+          r.id,
+          r.obs_id,
+          sha,
+          `semrev:${r.obs_id}:1024:1700000000000:${sha}`,
+          r.p,
+          1024,
+          1700000000000,
+          SEMANTIC_MODEL_ID,
+          SEMANTIC_MODEL_COMMIT,
+          manifestSha256,
+          SEMANTIC_PREPROCESSING_VERSION,
+          SEMANTIC_EMBEDDING_DIMENSIONS,
+          blob,
+          1700000000000
+        )
+      }
+      rawDb.exec('COMMIT;')
+
+      // Jump past offset 10,000
+      const deepPage = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {},
+        offset: 10_050,
+        limit: 25,
+        minScore: 0.5
+      })
+
+      expect(deepPage.totalMatched).toBe(total)
+      expect(deepPage.items.length).toBe(25)
+      expect(deepPage.hasMore).toBe(true)
+      // Since all scores are tied (1.0), deterministic tie-break is file_location_id ASC
+      expect(deepPage.items[0]?.photo.id).toBe(rows[10_050]!.id)
+      expect(deepPage.items[24]?.photo.id).toBe(rows[10_074]!.id)
+
+      // Navigate backward to page 0
+      const firstPage = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {},
+        offset: 0,
+        limit: 25,
+        minScore: 0.5
+      })
+      expect(firstPage.items.length).toBe(25)
+      expect(firstPage.items[0]?.photo.id).toBe(rows[0]!.id)
     })
   })
 })

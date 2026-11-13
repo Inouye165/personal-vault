@@ -929,6 +929,7 @@ export interface SemanticSearchCatalogResult {
   readonly eligibleCount: number
   readonly unindexedCount: number
   readonly staleCount: number
+  readonly corruptCount: number
   readonly offset: number
   readonly limit: number
   readonly hasMore: boolean

@@ -113,6 +113,7 @@ describe('Stage 6D: Semantic Search IPC Validation & Contracts', () => {
         totalMatched: 1,
         eligibleCount: 1,
         unindexedCount: 0,
+        corruptCount: 0,
         staleCount: 0,
         offset: 0,
         limit: 50,

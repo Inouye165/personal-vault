@@ -11,12 +11,12 @@
 import { parentPort } from 'node:worker_threads'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { embedQueryText, releaseTextSession } from './text-embedder'
-import { rankCandidates, type RankCandidate } from './ranking'
-import { tryDeserializeEmbeddingVector } from './vector'
+import { rankCandidatesWithBoundedPaging, type RankCandidate } from './ranking'
+import { tryDeserializeEmbeddingVector, isSemanticEmbeddingRecordCompatible } from './vector'
 import {
   SEMANTIC_MODEL_ID,
   SEMANTIC_MODEL_COMMIT,
@@ -29,39 +29,60 @@ import { METADATA_PARSER_RECIPE_VERSION } from '../metadata/types'
 
 const DEFAULT_SEMANTIC_MANIFEST_SHA256 = computeManifestSha256(REQUIRED_MODEL_ARTIFACTS)
 
-let lastVerifiedDir: string | null = null
-let lastVerifiedMtime: number = 0
+let lastVerifiedSnapshot: string | null = null
 
-async function verifyModelDirIntegrity(modelDir: string): Promise<{ ok: boolean; error?: string }> {
+export async function verifyModelDirIntegrity(
+  modelDir: string
+): Promise<{ ok: boolean; error?: string; snapshotKey?: string }> {
   try {
     if (!existsSync(modelDir)) {
+      lastVerifiedSnapshot = null
+      await releaseTextSession()
       return { ok: false, error: 'Model directory does not exist' }
     }
     const stat = lstatSync(modelDir)
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      lastVerifiedSnapshot = null
+      await releaseTextSession()
       return { ok: false, error: 'Model directory is not a canonical directory' }
     }
 
-    if (lastVerifiedDir === modelDir && stat.mtimeMs === lastVerifiedMtime) {
-      return { ok: true }
-    }
+    const canonicalModelDir = realpathSync(modelDir)
+    const dirPrefix = canonicalModelDir.endsWith(sep) ? canonicalModelDir : canonicalModelDir + sep
+
+    const verifiedDigests: string[] = []
 
     for (const spec of REQUIRED_MODEL_ARTIFACTS) {
-      const filePath = join(modelDir, spec.relativePath)
+      const filePath = join(canonicalModelDir, spec.relativePath)
       if (!existsSync(filePath)) {
+        lastVerifiedSnapshot = null
+        await releaseTextSession()
         return { ok: false, error: `Missing required model artifact: ${spec.relativePath}` }
       }
       const fileStat = lstatSync(filePath)
       if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        lastVerifiedSnapshot = null
+        await releaseTextSession()
         return { ok: false, error: `Artifact is not a regular file: ${spec.relativePath}` }
       }
+      const canonicalFile = realpathSync(filePath)
+      if (!canonicalFile.startsWith(dirPrefix)) {
+        lastVerifiedSnapshot = null
+        await releaseTextSession()
+        return {
+          ok: false,
+          error: `Artifact path escapes model directory: ${spec.relativePath}`
+        }
+      }
       if (fileStat.size !== spec.byteSize) {
+        lastVerifiedSnapshot = null
+        await releaseTextSession()
         return {
           ok: false,
           error: `Artifact byte size mismatch for ${spec.relativePath}: expected ${spec.byteSize}, got ${fileStat.size}`
         }
       }
-      const handle = await open(filePath, 'r')
+      const handle = await open(canonicalFile, 'r')
       try {
         const hash = createHash('sha256')
         const buf = Buffer.allocUnsafe(64 * 1024)
@@ -73,20 +94,31 @@ async function verifyModelDirIntegrity(modelDir: string): Promise<{ ok: boolean;
           totalRead += bytesRead
         }
         if (totalRead !== spec.byteSize) {
+          lastVerifiedSnapshot = null
+          await releaseTextSession()
           return { ok: false, error: `Artifact read size mismatch for ${spec.relativePath}` }
         }
-        if (hash.digest('hex').toLowerCase() !== spec.sha256.toLowerCase()) {
+        const digestHex = hash.digest('hex').toLowerCase()
+        if (digestHex !== spec.sha256.toLowerCase()) {
+          lastVerifiedSnapshot = null
+          await releaseTextSession()
           return { ok: false, error: `Artifact digest mismatch for ${spec.relativePath}` }
         }
+        verifiedDigests.push(`${spec.relativePath}:${digestHex}:${fileStat.mtimeMs}`)
       } finally {
         await handle.close()
       }
     }
 
-    lastVerifiedDir = modelDir
-    lastVerifiedMtime = stat.mtimeMs
-    return { ok: true }
+    const snapshotKey = `${canonicalModelDir}|${verifiedDigests.join('|')}`
+    if (lastVerifiedSnapshot !== null && lastVerifiedSnapshot !== snapshotKey) {
+      await releaseTextSession()
+    }
+    lastVerifiedSnapshot = snapshotKey
+    return { ok: true, snapshotKey }
   } catch (err: unknown) {
+    lastVerifiedSnapshot = null
+    await releaseTextSession().catch(() => {})
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
@@ -463,9 +495,6 @@ if (parentPort) {
                AND se.preprocessing_version = ?
                AND se.embedding_dimensions = 512
                AND se.observed_byte_size = d.byte_size
-               AND (d.filesystem_mtime_ms IS NULL OR ABS(se.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)
-               AND (se.content_revision LIKE ('%:' || d.id || ':' || se.observed_byte_size || ':%:' || se.content_sha256))
-               AND (se.content_revision LIKE 'semrev:%' OR se.content_revision LIKE 'rev:%')
                AND (h.sha256 IS NULL OR h.sha256 = se.content_sha256)
             `
             const semanticModelQueryParams: SQLInputValue[] = [
@@ -479,7 +508,7 @@ if (parentPort) {
             const countSql = `
               SELECT
                 COUNT(*) AS total_filtered_photos,
-                COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS eligible_count,
+                COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS candidate_count,
                 COALESCE(SUM(CASE
                   WHEN se.id IS NULL AND EXISTS (
                     SELECT 1 FROM photo_semantic_embeddings h_se
@@ -507,11 +536,11 @@ if (parentPort) {
               .get(...semanticModelQueryParams, ...allFilterParams) as
               Record<string, unknown> | undefined
 
-            const eligibleCount = Number(countRow?.eligible_count ?? 0)
-            const staleCount = Number(countRow?.stale_count ?? 0)
+            const sqlCandidateCount = Number(countRow?.candidate_count ?? 0)
+            const sqlStaleCount = Number(countRow?.stale_count ?? 0)
             const unindexedCount = Number(countRow?.unindexed_count ?? 0)
 
-            if (eligibleCount === 0) {
+            if (sqlCandidateCount === 0) {
               parentPort!.postMessage({
                 id: message.id,
                 status: 'ready',
@@ -519,7 +548,8 @@ if (parentPort) {
                 totalMatched: 0,
                 eligibleCount: 0,
                 unindexedCount,
-                staleCount,
+                staleCount: sqlStaleCount,
+                corruptCount: 0,
                 offset,
                 limit,
                 hasMore: false,
@@ -531,10 +561,18 @@ if (parentPort) {
               return
             }
 
-            // 2. Stream candidates
+            // 2. Stream candidates with exact canonical revision & timestamp verification
             const candidatesSql = `
               SELECT
                 f.id AS file_location_id,
+                d.id AS discovery_observation_id,
+                d.byte_size AS discovery_byte_size,
+                d.filesystem_mtime_ms,
+                h.sha256 AS active_hash,
+                se.content_sha256,
+                se.content_revision,
+                se.observed_byte_size,
+                se.observed_mtime_ms,
                 se.embedding_blob
               FROM file_locations f
               JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
@@ -553,15 +591,46 @@ if (parentPort) {
               ...allFilterParams
             ) as Iterable<{
               file_location_id: number
+              discovery_observation_id: number
+              discovery_byte_size: number
+              filesystem_mtime_ms: number | null
+              active_hash: string | null
+              content_sha256: string
+              content_revision: string
+              observed_byte_size: number
+              observed_mtime_ms: number | null
               embedding_blob: Buffer | Uint8Array
             }>
 
+            let validEligibleCount = 0
+            let extraStaleCount = 0
+            let corruptCount = 0
+
             function* streamCandidates(): Generator<RankCandidate> {
               for (const row of cursor) {
-                const vector = tryDeserializeEmbeddingVector(row.embedding_blob)
-                if (!vector) {
+                if (
+                  !isSemanticEmbeddingRecordCompatible({
+                    discoveryObservationId: row.discovery_observation_id,
+                    discoveryByteSize: row.discovery_byte_size,
+                    filesystemMtimeMs: row.filesystem_mtime_ms,
+                    activeHash: row.active_hash,
+                    contentSha256: row.content_sha256,
+                    contentRevision: row.content_revision,
+                    observedByteSize: row.observed_byte_size,
+                    observedMtimeMs: row.observed_mtime_ms
+                  })
+                ) {
+                  extraStaleCount++
                   continue
                 }
+
+                const vector = tryDeserializeEmbeddingVector(row.embedding_blob)
+                if (!vector) {
+                  corruptCount++
+                  continue
+                }
+
+                validEligibleCount++
                 yield {
                   fileLocationId: row.file_location_id,
                   vector
@@ -569,20 +638,63 @@ if (parentPort) {
               }
             }
 
-            const rankResult = rankCandidates(activeVector, streamCandidates(), {
+            const rankResult = rankCandidatesWithBoundedPaging(activeVector, streamCandidates(), {
               limit,
               offset,
               minScore
             })
 
+            const identityStmt = db.prepare(`
+              SELECT
+                d.id AS discovery_observation_id,
+                se.content_sha256,
+                se.content_revision,
+                se.observed_byte_size,
+                se.observed_mtime_ms
+              FROM file_locations f
+              JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+              JOIN photo_semantic_embeddings se
+                ON se.file_location_id = f.id
+               AND se.discovery_observation_id = d.id
+               AND se.is_current = 1
+               AND se.model_id = ?
+               AND se.model_commit = ?
+               AND se.model_manifest_sha256 = ?
+               AND se.preprocessing_version = ?
+              WHERE f.id = ?
+              LIMIT 1;
+            `)
+
+            const rankedItems = rankResult.items.map((item) => {
+              const idRow = identityStmt.get(...semanticModelQueryParams, item.fileLocationId) as
+                | {
+                    discovery_observation_id: number
+                    content_sha256: string
+                    content_revision: string
+                    observed_byte_size: number
+                    observed_mtime_ms: number | null
+                  }
+                | undefined
+              return {
+                fileLocationId: item.fileLocationId,
+                score: item.score,
+                discoveryObservationId: idRow?.discovery_observation_id ?? 0,
+                contentSha256: idRow?.content_sha256 ?? '',
+                contentRevision: idRow?.content_revision ?? '',
+                observedByteSize: idRow?.observed_byte_size ?? 0,
+                observedMtimeMs: idRow?.observed_mtime_ms ?? null
+              }
+            })
+
             parentPort!.postMessage({
               id: message.id,
               status: 'ready',
-              rankedItems: rankResult.items,
+              rankedItems,
               totalMatched: rankResult.totalMatched,
-              eligibleCount,
+              eligibleCount: validEligibleCount,
               unindexedCount,
-              staleCount,
+              staleCount: sqlStaleCount + extraStaleCount,
+              corruptCount,
               offset,
               limit,
               hasMore: rankResult.hasMore,

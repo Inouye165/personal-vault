@@ -149,3 +149,93 @@ export function deserializeEmbeddingVector(
   }
   return result
 }
+
+export function isObservationTimestampMatching(
+  observedMtimeMs: number | null,
+  recordedMtimeMs: number | null
+): boolean {
+  if (observedMtimeMs === null && recordedMtimeMs === null) {
+    return true
+  }
+  if (observedMtimeMs === null || recordedMtimeMs === null) {
+    // Conservative null matching: one null and one non-null is an unambiguous mismatch
+    return false
+  }
+  // Stage 2B precision contract:
+  // If discovery expectation was recorded as an integer (e.g. truncated precision),
+  // tolerate differences strictly within 1.0 ms (|observed - recorded| < 1.0 ms).
+  // If recorded has fractional milliseconds, exact comparison is enforced.
+  if (Number.isInteger(recordedMtimeMs)) {
+    return Math.abs(observedMtimeMs - recordedMtimeMs) < 1.0
+  }
+  return observedMtimeMs === recordedMtimeMs
+}
+
+const CANONICAL_REVISION_REGEX = /^(semrev|rev):(\d+):(\d+):([^:]+):([0-9a-f]{64})$/i
+
+export interface SemanticEmbeddingCompatibilityRecord {
+  readonly discoveryObservationId: number
+  readonly discoveryByteSize: number
+  readonly filesystemMtimeMs: number | null
+  readonly activeHash: string | null
+  readonly contentSha256: string
+  readonly contentRevision: string
+  readonly observedByteSize: number
+  readonly observedMtimeMs: number | null
+}
+
+/**
+ * Canonically validates a semantic embedding record's provenance, byte size,
+ * Stage 2B timestamp precision policy, content_revision structure, and active hash.
+ */
+export function isSemanticEmbeddingRecordCompatible(
+  record: SemanticEmbeddingCompatibilityRecord
+): boolean {
+  if (record.observedByteSize !== record.discoveryByteSize) {
+    return false
+  }
+  if (!isObservationTimestampMatching(record.observedMtimeMs, record.filesystemMtimeMs)) {
+    return false
+  }
+  if (
+    record.activeHash !== null &&
+    record.activeHash.toLowerCase() !== record.contentSha256.toLowerCase()
+  ) {
+    return false
+  }
+
+  const match = CANONICAL_REVISION_REGEX.exec(record.contentRevision)
+  if (!match) {
+    return false
+  }
+
+  const [, , obsIdStr, byteSizeStr, mtimeStr, sha256Str] = match
+  if (obsIdStr !== String(record.discoveryObservationId)) {
+    return false
+  }
+  if (byteSizeStr !== String(record.observedByteSize)) {
+    return false
+  }
+  if (sha256Str?.toLowerCase() !== record.contentSha256.toLowerCase()) {
+    return false
+  }
+
+  if (record.observedMtimeMs === null) {
+    if (mtimeStr !== 'null') {
+      return false
+    }
+  } else {
+    if (!mtimeStr || mtimeStr === 'null') {
+      return false
+    }
+    const parsedMtime = Number(mtimeStr)
+    if (!Number.isFinite(parsedMtime) || parsedMtime !== record.observedMtimeMs) {
+      return false
+    }
+    if (!isObservationTimestampMatching(parsedMtime, record.filesystemMtimeMs)) {
+      return false
+    }
+  }
+
+  return true
+}

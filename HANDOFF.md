@@ -18,7 +18,7 @@
   - **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)**: **Awaiting independent review** on `feat/stage-6d-semantic-search`.
   - **Substage 6E**: **Planned** (End-to-end packaged Electron verification for semantic search + metadata filters, plus Stage 6 closeout).
 - **Installed Electron Version**: `45.2.3` (`node` `v22.18.0`, `npm` `v10.9.3`)
-- **Evidence Source**: Full test suite (**958 passed across 79 test files**, `npm test` exit 0, including 50,001-candidate scale ranking test in `tests/main/semantic-search-ranking.test.ts`), strict typecheck (`npm run typecheck` exit 0), ESLint (`npm run lint` exit 0), Prettier formatting check (`npm run format:check` exit 0), production bundle build (`npm run build` exit 0), unpacked desktop binary build (`npm run build:unpack` exit 0), real Electron natural-language photo search verification in built and unpacked modes (`npm run verify:semantic-search` 24/24 passed; `npm run verify:semantic-search:unpacked` 25/25 passed), and all 16 prior-stage regression and smoke checks (all 24 required commands exiting with code 0).
+- **Evidence Source**: Full test suite (**967 passed across 79 test files**, `npm test` exit 0, including 50,001-candidate scale ranking test in `tests/main/semantic-search-ranking.test.ts`), strict typecheck (`npm run typecheck` exit 0), ESLint (`npm run lint` exit 0), Prettier formatting check (`npm run format:check` exit 0), production bundle build (`npm run build` exit 0), unpacked desktop binary build (`npm run build:unpack` exit 0), real Electron natural-language photo search verification in built and unpacked modes (`npm run verify:semantic-search` 25/25 passed; `npm run verify:semantic-search:unpacked` 26/26 passed, including 10,200+ synthetic deep-pagination beyond offset 10,000, `corruptCount === 1`, and concurrent main heartbeat < 200 ms), plus re-run prior-stage regression and smoke checks (`verify:metadata` 11/11, `verify:metadata:unpacked` 12/12, `verify:semantic-index` 10/10, `verify:semantic-index:unpacked` 11/11, `verify:photo-review` 12/12, `verify:photos` 19/19, `smoke:built`, `smoke:unpacked` — all exiting with code 0).
 - **Constraints**: Never implement on `main`; no push, merge, or publication is authorized. Preserve source preservation invariance: source files strictly read-only. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
@@ -27,18 +27,19 @@
 
 Stage 6D delivers offline natural-language photo search in Personal Vault: text query embedding generation via the pinned CLIP ViT-B/32 text encoder, bounded cosine similarity ranking combined with Stage 5B and Stage 6C SQL filters before candidate scoring, narrow typed IPC with sender validation and cancellation, and compact Photos UI integration with truthful coverage, honest token truncation disclosures, and explicit non-factual machine inference messaging.
 
-Following independent review of submission `1bbbb0f`, all six review findings were resolved and verified:
+Following independent reviews of submissions `1bbbb0f` and `5a811e2`, all review findings were resolved and verified:
 
 ### 1.1 Dedicated Search Worker Lifecycle & Bounds (`search_worker.ts`, `search-coordinator.ts`)
 
 - **Off-Main Processing**: All tokenization (`@huggingface/tokenizers@0.2.0`), ONNX model loading (`text_model_quantized.onnx`), candidate database traversal, vector blob decoding, and cosine ranking execute completely outside Electron main and renderer in a dedicated background worker (`out/main/search_worker.js`).
 - **Resource & Lifecycle Governance**:
-  - Live search workers: **$\le 1$ active search worker**.
+  - Live search workers: **$\le 1$ live search worker** (`ensureWorker` loops while awaiting `terminatingWorkers` and `spawningWorkerPromise`, ensuring `activeWorkers + terminatingWorkers <= 1`).
   - Total live workers across application: **$\le 3$ total live workers** ($\le 1$ search worker + $\le 2$ image workers), counting terminating workers until process `'exit'`.
-  - Active search timeout: **30,000 ms** (`SEARCH_TIMEOUT_MS`); timeouts terminate the worker immediately and release capacity.
-  - Active cancellation: `cancelSearch()` terminates running searches, rejects in-flight promises with `SearchCancelledError`, and destroys/recreates worker state if uncooperative.
-  - Model integrity revalidation: Off-main verification (`verifyModelDirIntegrity`) confirms all required model files, byte counts, and SHA-256 digests before model loading, preserving existing installations on corruption.
-  - Concurrent session deduplication: `getOrEmbedQuery` caches the in-flight query embedding promise, guaranteeing that concurrent page requests for the same query generation do not trigger redundant model loads or embeddings.
+  - Bounded pending work: `maxPendingRequests` defaults to `16`; requests exceeding capacity fail explicitly with `SearchOverloadError`.
+  - Active search timeout: **15,000 ms** (`requestTimeoutMs` default `15_000`); timeouts terminate the worker immediately, clear in-flight embedding promises so retries are not poisoned, and release capacity.
+  - Active cancellation & supersession: `cancelActiveSearch()` and query supersession check `hadOlderActiveWork` before clearing `activeRequests`, terminating busy workers, rejecting in-flight promises with `SearchCancelledError`, and awaiting exit before replacement.
+  - Model integrity revalidation: Off-main verification (`verifyModelDirIntegrity`) validates `realpathSync` containment, non-symlink `lstatSync`, and SHA-256 digests of all 7 required artifacts on every load/search without a directory `mtimeMs` shortcut, releasing the cached ONNX text session/tokenizer (`releaseTextSession()`) on failure or installation change.
+  - Concurrent session deduplication: `getOrEmbedQuery` caches the in-flight query embedding promise (cleared in `finally` on failure/timeout), guaranteeing that concurrent page requests for the same query generation do not trigger redundant model loads or embeddings.
 
 ### 1.2 Query Identity vs. Page-Request Generation (`search-coordinator.ts`, `usePhotos.ts`)
 
@@ -46,43 +47,41 @@ Following independent review of submission `1bbbb0f`, all six review findings we
 - **Honest Cancellation**: Older queries are superseded and rejected with `SearchCancelledError` (never masked as an empty `{ items: [] }` result).
 - **Renderer Sequence Safety**: Renderer distinguishes query generation from page-level request tokens; cancelled requests are silently ignored without displaying erroneous error banners. Verified with deterministic integration tests for out-of-order pages, query replacement, clearing, and filter switches.
 
-### 1.3 Complete Embedding Compatibility & Corrupt Candidate Isolation (`database.ts`, `search-worker.ts`, `vector.ts`)
+### 1.3 Complete Embedding Compatibility, Hydration Revalidation & Corrupt Candidate Isolation (`database.ts`, `search-worker.ts`, `search-coordinator.ts`, `vector.ts`)
 
-- **Complete Compatibility Contract**: Coverage queries and candidate retrieval enforce all compatibility criteria:
-  - `se.model_id = :modelId`
-  - `se.model_commit = :modelCommit`
-  - `se.model_manifest_sha256 = :modelManifestSha256`
-  - `se.preprocessing_version = :preprocessingVersion`
-  - `se.embedding_dimensions = 512`
-  - `se.observed_byte_size = d.byte_size`
-  - `(d.filesystem_mtime_ms IS NULL OR ABS(se.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)`
-  - `(se.content_revision LIKE ('%:' || d.id || ':' || se.observed_byte_size || ':%:' || se.content_sha256)) AND (se.content_revision LIKE 'semrev:%' OR se.content_revision LIKE 'rev:%')`
-  - `(h.sha256 IS NULL OR h.sha256 = se.content_sha256)`
+- **Complete Compatibility Contract**: Coverage queries and candidate evaluation enforce all compatibility criteria via `isSemanticEmbeddingRecordCompatible` without `LIKE` wildcards or `<= 1` ms tolerance:
+  - `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`
+  - `embedding_dimensions = 512`
+  - `observed_byte_size = d.byte_size`
+  - Stage 2B timestamp precision (`isObservationTimestampMatching`: exact equality for fractional `filesystem_mtime_ms`, `< 1.0 ms` for integer `filesystem_mtime_ms`, conservative null check)
+  - Exact canonical 5-part `content_revision` parsing (`^(semrev|rev):(\d+):(\d+):([^:]+):([0-9a-f]{64})$`) matching `discovery_observation_id`, `observed_byte_size`, timestamp, and `content_sha256`
+  - Active `hash_observations` `sha256` match (`h.sha256 IS NULL OR h.sha256 = se.content_sha256`)
 - Tested each incompatible field independently to ensure truthful exclusion from search results and coverage counts.
-- **Hydration Revalidation**: Photo identity and file location currency are revalidated on Electron main when hydrating worker candidate records.
-- **Corrupt Candidate Isolation**: `tryDeserializeEmbeddingVector` inspects candidate blobs for malformed length ($\ne 2048$ bytes), `NaN`/`Infinity` values, zero norm, or non-unit norm ($|\lVert v \rVert_2 - 1.0| > 10^{-3}$). Corrupt candidate rows are skipped individually without failing the overall search. Query vectors are validated at the ranking boundary via `validateQueryVector`.
+- **Hydration Revalidation**: Main-process hydration compares scored identity (`discoveryObservationId`, `observedByteSize`, `observedMtimeMs`, `contentSha256`) against current catalog state, reconciling counts and performing a single retry if the catalog mutated between scoring and hydration.
+- **Corrupt Candidate Isolation**: `tryDeserializeEmbeddingVector` inspects candidate blobs for malformed length ($\ne 2048$ bytes), `NaN`/`Infinity` values, zero norm, or non-unit norm ($|\lVert v \rVert_2 - 1.0| > 10^{-2}$). Corrupt candidate rows are skipped individually without failing the overall search, excluded from `eligibleCount`, reported via `corruptCount`, and surfaced in the UI (`data-testid="search-corrupt-warning"`). Query vectors are validated at the ranking boundary via `validateQueryVector`.
 
 ### 1.4 Bounded Cosine Ranking & Resource Bounds (`ranking.ts`, `database.ts`, `ipc-schemas.ts`)
 
 - **Filter-Before-Ranking**: Applies all Stage 5B (rating, flag, collection) and Stage 6C technical metadata filters (date range, camera, lens, display resolution, file type) in SQLite before vector decoding and cosine scoring.
-- **`TopKMinHeap` Ranking**: Replaced unbounded array sorting with an explicit min-heap of size $K = \min(\text{offset} + \text{limit}, 10_100)$ with $O(\log K)$ sift operations and $O(1)$ rejection of non-competitive candidates.
-- **Deep-Pagination Bounds**: IPC schema bounds `offset: z.number().int().nonnegative().max(10_000)` and `limit: z.number().int().positive().max(100)`. Memory is strictly bounded to $O(K)$ auxiliary memory without a permanent catalog collection-size cap (verified at scale over 50,001 synthetic catalog embeddings).
-- **Renderer Cache Eviction**: `usePhotos` evicts `searchScores` entries alongside LRU page cache records (bounded to 40 pages / 2,000 photos).
+- **Bounded Hybrid Paging (`rankCandidatesWithBoundedPaging`)**: Uses `TopKMinHeap` in JS memory for `offset + limit <= 1,000` ($O(\log K)$ sift, $O(1)$ rejection) and a private disk-backed temporary SQLite database (`new DatabaseSync('')` with `PRAGMA temp_store = FILE; PRAGMA cache_size = -2000;` — 2 MiB cache cap) for `offset + limit > 1,000`. All offsets remain reachable with bounded memory and deterministic `score DESC, fileLocationId ASC` tie-breaking without an unapproved collection-size or offset cap (verified at scale over 50,001 synthetic embeddings and beyond offset 10,000).
+- **IPC Bounds & Renderer Cache Eviction**: IPC schema enforces `offset: z.number().int().nonnegative()` and `limit: z.number().int().positive().max(100)`. `usePhotos` evicts `searchScores` entries alongside LRU page cache records (bounded to 40 pages / 2,000 photos).
 
 ### 1.5 Numerical Resource Bounds
 
 | Resource / Parameter         | Boundary Limit            | Enforcement Mechanism                                                           |
 | :--------------------------- | :------------------------ | :------------------------------------------------------------------------------ |
-| **Active Search Workers**    | $\le 1$                   | `SemanticSearchCoordinator` singleton worker instance                           |
+| **Active Search Workers**    | $\le 1$                   | `SemanticSearchCoordinator` singleton worker instance awaiting terminating exit |
 | **Active Image Workers**     | $\le 2$                   | `ThumbnailCoordinator` image decode / metadata / semantic embed pool            |
 | **Total Live Workers**       | $\le 3$                   | Aggregate worker counter tracking live + terminating workers until `'exit'`     |
-| **Search Request Timeout**   | $30,000\text{ ms}$        | Per-request timeout with active worker termination                              |
+| **Pending Search Capacity**  | $\le 16$ requests         | `maxPendingRequests` overload guard throwing `SearchOverloadError`              |
+| **Search Request Timeout**   | $15,000\text{ ms}$        | Per-request timeout with active worker termination                              |
 | **Query Text Length**        | $\le 500\text{ chars}$    | IPC schema trimming and length validation                                       |
 | **CLIP Token Window**        | $\le 77\text{ tokens}$    | Honest truncation disclosure (`truncated: true`, `tokenCount: 77`)              |
 | **Vector Dimensions**        | $512\text{ floats}$       | Exact $2,048$-byte buffer validation                                            |
-| **Vector L2 Norm Tolerance** | $                         | \lVert v \rVert_2 - 1.0                                                         | \le 10^{-3}$ | Unit-norm validation in `tryDeserializeEmbeddingVector` and `validateQueryVector` |
-| **Max Retained Heap ($K$)**  | $\le 10,100\text{ items}$ | `TopKMinHeap` capacity cap (`MAX_RETAINED_K`)                                   |
-| **IPC Offset Bound**         | $\le 10,000$              | `SemanticSearchRequestSchema` offset validation                                 |
+| **Vector L2 Norm Tolerance** | $                         | \lVert v \rVert_2 - 1.0                                                         | \le 10^{-2}$ | Unit-norm validation in `tryDeserializeEmbeddingVector` and `validateQueryVector` |
+| **In-Memory Heap Paging**    | $\le 1,000\text{ items}$  | `TopKMinHeap` for `offset + limit <= 1,000` (`IN_MEMORY_HEAP_PAGING_THRESHOLD`) |
+| **Deep Paging SQLite Cache** | $\le 2\text{ MiB}$        | Disk-backed `DatabaseSync('')` (`PRAGMA cache_size = -2000`) for `> 1,000`      |
+| **IPC Offset Bound**         | $\ge 0$ (unbounded)       | `SemanticSearchRequestSchema` non-negative integer offset                       |
 | **IPC Limit Bound**          | $\le 100$                 | `SemanticSearchRequestSchema` limit validation                                  |
 | **Renderer Page Cache**      | $\le 2,000\text{ photos}$ | LRU page cache (40 pages of 50 photos) with coordinated `searchScores` eviction |
 | **Renderer Mounted Cells**   | $\le 200\text{ cells}$    | Virtualized photo grid DOM mount bounds                                         |
@@ -90,52 +89,28 @@ Following independent review of submission `1bbbb0f`, all six review findings we
 
 ---
 
-## 2. Verification Quality Gates Matrix (All 24 Gates Executed)
+## 2. Verification Quality Gates Matrix
 
-All 24 required verification commands executed sequentially from `D:\organizer` on `feat/stage-6d-semantic-search`:
+Verification commands executed from `D:\organizer` on `feat/stage-6d-semantic-search` after the final code edits:
 
-| #   | Verification Gate / Suite                    | Command                                   | Result                         | Exit Code | Evidence Notes                                                                                                        |
-| --- | -------------------------------------------- | ----------------------------------------- | ------------------------------ | --------- | --------------------------------------------------------------------------------------------------------------------- |
-| 1   | **Unit & Behavioral Tests**                  | `npm test`                                | **958 passed across 79 files** | 0         | Includes worker lifecycle, query vs page identity, corrupt isolation, compatibility, min-heap, 50k scale, coordinator |
-| 2   | **Strict Typecheck**                         | `npm run typecheck`                       | **Clean pass**                 | 0         | Strict TypeScript checking across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)                             |
-| 3   | **ESLint**                                   | `npm run lint`                            | **Clean pass**                 | 0         | 0 errors, 0 warnings                                                                                                  |
-| 4   | **Formatting Compliance**                    | `npm run format:check`                    | **Clean pass**                 | 0         | 100% Prettier compliant                                                                                               |
-| 5   | **Production Bundle Build**                  | `npm run build`                           | **Clean pass**                 | 0         | Main, preload (`requires` only `electron`), search worker, and renderer bundles built cleanly                         |
-| 6   | **Desktop Unpacked Build**                   | `npm run build:unpack`                    | **Clean pass**                 | 0         | `dist/win-unpacked/Personal Vault.exe` packaged with `sharp`, `onnxruntime-node`, and `THIRD_PARTY_NOTICES.md`        |
-| 7   | **Real Electron Semantic Search (Built)**    | `npm run verify:semantic-search`          | **24/24 passed**               | 0         | Real Electron built verification: worker lifecycle, query cancellation, concurrent pages, heartbeat, real relevance   |
-| 8   | **Real Electron Semantic Search (Unpacked)** | `npm run verify:semantic-search:unpacked` | **25/25 passed**               | 0         | Packaged `Personal Vault.exe` verification: unpacked ONNX binary verified, all 25 checks passed                       |
-| 9   | **Real Electron Metadata & SQL (Built)**     | `npm run verify:metadata`                 | **11/11 passed**               | 0         | Stage 6C regression check                                                                                             |
-| 10  | **Real Electron Metadata & SQL (Unpacked)**  | `npm run verify:metadata:unpacked`        | **12/12 passed**               | 0         | Stage 6C unpacked regression check                                                                                    |
-| 11  | **Real Electron Semantic Index (Built)**     | `npm run verify:semantic-index`           | **10/10 passed**               | 0         | Stage 6B regression check                                                                                             |
-| 12  | **Real Electron Semantic Index (Unpacked)**  | `npm run verify:semantic-index:unpacked`  | **11/11 passed**               | 0         | Stage 6B unpacked regression check                                                                                    |
-| 13  | **Real Electron Similarity (Built)**         | `npm run verify:similarity`               | **8/8 passed**                 | 0         | Stage 5C regression check                                                                                             |
-| 14  | **Real Electron Similarity (Unpacked)**      | `npm run verify:similarity:unpacked`      | **8/8 passed**                 | 0         | Stage 5C unpacked regression check                                                                                    |
-| 15  | **Real Electron Photo Review (Built)**       | `npm run verify:photo-review`             | **12/12 passed**               | 0         | Stage 5B regression check                                                                                             |
-| 16  | **Real Electron Photo Review (Unpacked)**    | `npm run verify:photo-review:unpacked`    | **12/12 passed**               | 0         | Stage 5B unpacked regression check                                                                                    |
-| 17  | **Real Electron Photos (Built)**             | `npm run verify:photos`                   | **19/19 passed**               | 0         | Stage 5A 10,000-photo regression check                                                                                |
-| 18  | **Real Electron Photos (Unpacked)**          | `npm run verify:photos:unpacked`          | **19/19 passed**               | 0         | Stage 5A unpacked 10,000-photo regression check                                                                       |
-| 19  | **Real Electron Duplicate Review**           | `npm run verify:duplicates`               | **18/18 passed**               | 0         | Stage 3 regression check                                                                                              |
-| 20  | **Real Electron Scan & Recovery**            | `npm run verify:scan`                     | **14/14 passed**               | 0         | Stage 2 regression check                                                                                              |
-| 21  | **Real Electron SQLite Repository**          | `npm run verify:sqlite`                   | **8/8 passed**                 | 0         | Electron `node:sqlite` driver verification                                                                            |
-| 22  | **Real Electron Vault Import (Built)**       | `npm run verify:vault`                    | **11/11 passed**               | 0         | Stage 4 regression check                                                                                              |
-| 23  | **Real Electron Smoke (Built)**              | `npm run smoke:built`                     | **Passed**                     | 0         | Preload bridge surface (including `searchPhotosSemantic`, `cancelPhotosSemanticSearch`), navigation guards, CSP       |
-| 24  | **Real Electron Smoke (Unpacked)**           | `npm run smoke:unpacked`                  | **Passed**                     | 0         | Packaged binary smoke check                                                                                           |
-| 9   | **Real Electron Metadata & SQL (Built)**     | `npm run verify:metadata`                 | **11/11 passed**               | 0         | Stage 6C regression check                                                                                             |
-| 10  | **Real Electron Metadata & SQL (Unpacked)**  | `npm run verify:metadata:unpacked`        | **12/12 passed**               | 0         | Stage 6C unpacked regression check                                                                                    |
-| 11  | **Real Electron Semantic Index (Built)**     | `npm run verify:semantic-index`           | **10/10 passed**               | 0         | Stage 6B regression check                                                                                             |
-| 12  | **Real Electron Semantic Index (Unpacked)**  | `npm run verify:semantic-index:unpacked`  | **11/11 passed**               | 0         | Stage 6B unpacked regression check                                                                                    |
-| 13  | **Real Electron Similarity (Built)**         | `npm run verify:similarity`               | **8/8 passed**                 | 0         | Stage 5C regression check                                                                                             |
-| 14  | **Real Electron Similarity (Unpacked)**      | `npm run verify:similarity:unpacked`      | **8/8 passed**                 | 0         | Stage 5C unpacked regression check                                                                                    |
-| 15  | **Real Electron Photo Review (Built)**       | `npm run verify:photo-review`             | **12/12 passed**               | 0         | Stage 5B regression check                                                                                             |
-| 16  | **Real Electron Photo Review (Unpacked)**    | `npm run verify:photo-review:unpacked`    | **12/12 passed**               | 0         | Stage 5B unpacked regression check                                                                                    |
-| 17  | **Real Electron Photos (Built)**             | `npm run verify:photos`                   | **19/19 passed**               | 0         | Stage 5A 10,000-photo regression check                                                                                |
-| 18  | **Real Electron Photos (Unpacked)**          | `npm run verify:photos:unpacked`          | **19/19 passed**               | 0         | Stage 5A unpacked 10,000-photo regression check                                                                       |
-| 19  | **Real Electron Duplicate Review**           | `npm run verify:duplicates`               | **18/18 passed**               | 0         | Stage 3 regression check                                                                                              |
-| 20  | **Real Electron Scan & Recovery**            | `npm run verify:scan`                     | **14/14 passed**               | 0         | Stage 2 regression check                                                                                              |
-| 21  | **Real Electron SQLite Repository**          | `npm run verify:sqlite`                   | **8/8 passed**                 | 0         | Electron `node:sqlite` driver verification                                                                            |
-| 22  | **Real Electron Vault Import (Built)**       | `npm run verify:vault`                    | **11/11 passed**               | 0         | Stage 4 regression check                                                                                              |
-| 23  | **Real Electron Smoke (Built)**              | `npm run smoke:built`                     | **Passed**                     | 0         | Preload bridge surface (including `searchPhotosSemantic`, `cancelPhotosSemanticSearch`), navigation guards, CSP       |
-| 24  | **Real Electron Smoke (Unpacked)**           | `npm run smoke:unpacked`                  | **Passed**                     | 0         | Packaged binary smoke check                                                                                           |
+| #   | Verification Gate / Suite                    | Command                                   | Result                         | Exit Code | Evidence Notes                                                                                                       |
+| --- | -------------------------------------------- | ----------------------------------------- | ------------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Unit & Behavioral Tests**                  | `npm test`                                | **967 passed across 79 files** | 0         | Includes worker lifecycle/capacity, canonical compatibility, hydration revalidation, corrupt isolation, deep paging  |
+| 2   | **Strict Typecheck**                         | `npm run typecheck`                       | **Clean pass**                 | 0         | Strict TypeScript checking across `tsconfig.node.json` and `tsconfig.web.json` (0 errors)                            |
+| 3   | **ESLint**                                   | `npm run lint`                            | **Clean pass**                 | 0         | 0 errors, 0 warnings                                                                                                 |
+| 4   | **Formatting Compliance**                    | `npm run format:check`                    | **Clean pass**                 | 0         | 100% Prettier compliant                                                                                              |
+| 5   | **Production Bundle Build**                  | `npm run build`                           | **Clean pass**                 | 0         | Main, preload (`requires` only `electron`), search worker, and renderer bundles built cleanly                        |
+| 6   | **Desktop Unpacked Build**                   | `npm run build:unpack`                    | **Clean pass**                 | 0         | `dist/win-unpacked/Personal Vault.exe` packaged with `sharp`, `onnxruntime-node`, and `THIRD_PARTY_NOTICES.md`       |
+| 7   | **Real Electron Semantic Search (Built)**    | `npm run verify:semantic-search`          | **25/25 passed**               | 0         | Built verification: worker lifecycle, cancellation, concurrent pages, 10,200+ deep paging, corruptCount, heartbeat   |
+| 8   | **Real Electron Semantic Search (Unpacked)** | `npm run verify:semantic-search:unpacked` | **26/26 passed**               | 0         | Packaged `Personal Vault.exe` verification: unpacked ONNX binary verified, 10,200+ deep paging, all 26 checks passed |
+| 9   | **Real Electron Metadata & SQL (Built)**     | `npm run verify:metadata`                 | **11/11 passed**               | 0         | Stage 6C regression check                                                                                            |
+| 10  | **Real Electron Metadata & SQL (Unpacked)**  | `npm run verify:metadata:unpacked`        | **12/12 passed**               | 0         | Stage 6C unpacked regression check                                                                                   |
+| 11  | **Real Electron Semantic Index (Built)**     | `npm run verify:semantic-index`           | **10/10 passed**               | 0         | Stage 6B regression check                                                                                            |
+| 12  | **Real Electron Semantic Index (Unpacked)**  | `npm run verify:semantic-index:unpacked`  | **11/11 passed**               | 0         | Stage 6B unpacked regression check                                                                                   |
+| 13  | **Real Electron Photo Review (Built)**       | `npm run verify:photo-review`             | **12/12 passed**               | 0         | Stage 5B regression check                                                                                            |
+| 14  | **Real Electron Photos (Built)**             | `npm run verify:photos`                   | **19/19 passed**               | 0         | Stage 5A 10,000-photo regression check                                                                               |
+| 15  | **Real Electron Smoke (Built)**              | `npm run smoke:built`                     | **Passed**                     | 0         | Preload bridge surface (including `searchPhotosSemantic`, `cancelPhotosSemanticSearch`), navigation guards, CSP      |
+| 16  | **Real Electron Smoke (Unpacked)**           | `npm run smoke:unpacked`                  | **Passed**                     | 0         | Packaged binary smoke check                                                                                          |
 
 ---
 

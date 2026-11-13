@@ -11,6 +11,7 @@ import { resolve, join } from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
 import type { CatalogDatabase } from '../catalog/database'
 import type { SemanticModelManager } from './model-manager'
+import { isObservationTimestampMatching } from './vector'
 import type {
   SemanticSearchRequest,
   SemanticSearchResponse,
@@ -30,6 +31,14 @@ export class SearchTimeoutError extends Error {
   constructor(message = 'Semantic search timed out') {
     super(message)
     this.name = 'SearchTimeoutError'
+  }
+}
+
+export class SearchOverloadError extends Error {
+  public readonly code = 'SEARCH_OVERLOADED'
+  constructor(message = 'Too many concurrent semantic search requests') {
+    super(message)
+    this.name = 'SearchOverloadError'
   }
 }
 
@@ -92,6 +101,17 @@ export interface SemanticSearchCoordinatorOptions {
   readonly modelManager: SemanticModelManager
   readonly workerScriptPath?: string
   readonly requestTimeoutMs?: number
+  readonly maxPendingRequests?: number
+}
+
+interface WorkerRankedItem {
+  readonly fileLocationId: number
+  readonly score: number
+  readonly discoveryObservationId?: number
+  readonly contentSha256?: string
+  readonly contentRevision?: string
+  readonly observedByteSize?: number
+  readonly observedMtimeMs?: number | null
 }
 
 interface WorkerResponseMessage {
@@ -101,11 +121,12 @@ interface WorkerResponseMessage {
   readonly truncated?: boolean
   readonly tokenCount?: number
   readonly message?: string
-  readonly rankedItems?: readonly { fileLocationId: number; score: number }[]
+  readonly rankedItems?: readonly WorkerRankedItem[]
   readonly totalMatched?: number
   readonly eligibleCount?: number
   readonly unindexedCount?: number
   readonly staleCount?: number
+  readonly corruptCount?: number
   readonly offset?: number
   readonly limit?: number
   readonly hasMore?: boolean
@@ -154,15 +175,19 @@ export class SemanticSearchCoordinator {
   private readonly modelManager: SemanticModelManager
   private readonly workerScriptPath?: string
   private readonly requestTimeoutMs: number
+  private readonly maxPendingRequests: number
 
   private worker: Worker | null = null
   private readonly terminatingWorkers = new Set<Worker>()
+  private spawningWorkerPromise: Promise<Worker> | null = null
   private isShuttingDown = false
   private nextMessageId = 1
 
   private readonly activeRequests = new Map<number, PendingWorkerRequest>()
+  private activeSearchCalls = 0
   private currentQueryGeneration = 0
   private activeQueryKey: string | null = null
+  private lastActiveModelDir: string | null = null
   private cachedEmbeddingResult: CachedEmbeddingResult | null = null
   private embeddingInFlightPromise: Promise<CachedEmbeddingResult> | null = null
 
@@ -171,6 +196,7 @@ export class SemanticSearchCoordinator {
     this.modelManager = options.modelManager
     this.workerScriptPath = options.workerScriptPath
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000
+    this.maxPendingRequests = Math.max(1, options.maxPendingRequests ?? 16)
   }
 
   public getDiagnostics() {
@@ -179,53 +205,95 @@ export class SemanticSearchCoordinator {
       terminatingWorkers: this.terminatingWorkers.size,
       liveWorkers: (this.worker ? 1 : 0) + this.terminatingWorkers.size,
       pendingRequests: this.activeRequests.size,
+      activeSearchCalls: this.activeSearchCalls,
+      maxPendingRequests: this.maxPendingRequests,
       currentQueryGeneration: this.currentQueryGeneration
     }
   }
 
-  private ensureWorker(): Worker {
-    if (this.worker) {
-      return this.worker
-    }
-
-    const scriptPath = resolveSearchWorkerScriptPath(this.workerScriptPath)
-    const worker = new Worker(scriptPath)
-    this.worker = worker
-
-    worker.on('message', (msg: { id: number; status: string; [key: string]: unknown }) => {
-      const pending = this.activeRequests.get(msg.id)
-      if (!pending) return
-      this.activeRequests.delete(msg.id)
-      clearTimeout(pending.timer)
-
-      if (pending.generation !== this.currentQueryGeneration) {
-        pending.reject(new SearchCancelledError('Search superseded by a newer query'))
-        return
+  private async ensureWorker(generation: number): Promise<Worker> {
+    while (true) {
+      if (this.isShuttingDown || generation !== this.currentQueryGeneration) {
+        throw new SearchCancelledError('Search superseded before worker spawn')
       }
 
-      if (msg.status === 'ready' || msg.status === 'pong' || msg.status === 'released') {
-        pending.resolve(msg)
-      } else {
-        const errorMsg = typeof msg.message === 'string' ? msg.message : 'Search worker error'
-        pending.reject(new Error(errorMsg))
+      if (this.worker) {
+        return this.worker
       }
-    })
 
-    worker.on('error', (err) => {
-      this.handleWorkerFailure(worker, err.message)
-    })
+      if (this.spawningWorkerPromise) {
+        await this.spawningWorkerPromise.catch(() => {})
+        continue
+      }
 
-    worker.on('exit', (code) => {
-      this.terminatingWorkers.delete(worker)
-      if (this.worker === worker) {
-        this.worker = null
-        if (code !== 0 && !this.isShuttingDown) {
-          this.handleWorkerFailure(worker, `Search worker exited with code ${code}`)
+      const spawnPromise = (async (): Promise<Worker> => {
+        while (this.terminatingWorkers.size > 0) {
+          const exits = Array.from(this.terminatingWorkers).map(
+            (w) =>
+              new Promise<void>((res) => {
+                w.once('exit', () => res())
+              })
+          )
+          await Promise.all(exits)
+        }
+
+        if (this.isShuttingDown || generation !== this.currentQueryGeneration) {
+          throw new SearchCancelledError('Search superseded before worker spawn')
+        }
+
+        if (this.worker) {
+          return this.worker
+        }
+
+        const scriptPath = resolveSearchWorkerScriptPath(this.workerScriptPath)
+        const worker = new Worker(scriptPath)
+        this.worker = worker
+
+        worker.on('message', (msg: { id: number; status: string; [key: string]: unknown }) => {
+          const pending = this.activeRequests.get(msg.id)
+          if (!pending) return
+          this.activeRequests.delete(msg.id)
+          clearTimeout(pending.timer)
+
+          if (pending.generation !== this.currentQueryGeneration) {
+            pending.reject(new SearchCancelledError('Search superseded by a newer query'))
+            return
+          }
+
+          if (msg.status === 'ready' || msg.status === 'pong' || msg.status === 'released') {
+            pending.resolve(msg)
+          } else {
+            const errorMsg = typeof msg.message === 'string' ? msg.message : 'Search worker error'
+            pending.reject(new Error(errorMsg))
+          }
+        })
+
+        worker.on('error', (err) => {
+          this.handleWorkerFailure(worker, err.message)
+        })
+
+        worker.on('exit', (code) => {
+          this.terminatingWorkers.delete(worker)
+          if (this.worker === worker) {
+            this.worker = null
+            if (code !== 0 && !this.isShuttingDown) {
+              this.handleWorkerFailure(worker, `Search worker exited with code ${code}`)
+            }
+          }
+        })
+
+        return worker
+      })()
+
+      this.spawningWorkerPromise = spawnPromise
+      try {
+        await spawnPromise
+      } finally {
+        if (this.spawningWorkerPromise === spawnPromise) {
+          this.spawningWorkerPromise = null
         }
       }
-    })
-
-    return worker
+    }
   }
 
   private terminateWorker(worker: Worker): void {
@@ -315,52 +383,64 @@ export class SemanticSearchCoordinator {
       return this.embeddingInFlightPromise
     }
 
-    const worker = this.ensureWorker()
-    const messageId = this.nextMessageId++
+    const promise = (async (): Promise<CachedEmbeddingResult> => {
+      const worker = await this.ensureWorker(generation)
+      if (generation !== this.currentQueryGeneration || this.isShuttingDown) {
+        throw new SearchCancelledError('Search superseded before text embedding')
+      }
 
-    const promise = new Promise<CachedEmbeddingResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.activeRequests.delete(messageId)
-        if (this.worker === worker) {
-          this.terminateWorker(worker)
-        }
-        reject(new SearchTimeoutError('Query text embedding timed out'))
-      }, this.requestTimeoutMs)
+      const messageId = this.nextMessageId++
 
-      this.activeRequests.set(messageId, {
-        id: messageId,
-        generation,
-        resolve: (msg: WorkerResponseMessage) => {
-          if (!msg.vector) {
-            reject(new Error(msg.message ?? 'Worker failed to return embedding vector'))
-            return
+      return await new Promise<CachedEmbeddingResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.activeRequests.delete(messageId)
+          if (this.worker === worker) {
+            this.terminateWorker(worker)
           }
-          const result: CachedEmbeddingResult = {
-            vector: msg.vector,
-            truncated: Boolean(msg.truncated),
-            tokenCount: Number(msg.tokenCount ?? 0)
-          }
-          this.cachedEmbeddingResult = result
-          this.embeddingInFlightPromise = null
-          resolve(result)
-        },
-        reject: (err) => {
-          this.embeddingInFlightPromise = null
-          reject(err)
-        },
-        timer
-      })
+          reject(new SearchTimeoutError('Query text embedding timed out'))
+        }, this.requestTimeoutMs)
 
-      worker.postMessage({
-        id: messageId,
-        action: 'embed_text',
-        modelDir,
-        queryText
+        this.activeRequests.set(messageId, {
+          id: messageId,
+          generation,
+          resolve: (msg: WorkerResponseMessage) => {
+            if (!msg.vector) {
+              reject(new Error(msg.message ?? 'Worker failed to return embedding vector'))
+              return
+            }
+            const result: CachedEmbeddingResult = {
+              vector: msg.vector,
+              truncated: Boolean(msg.truncated),
+              tokenCount: Number(msg.tokenCount ?? 0)
+            }
+            if (generation === this.currentQueryGeneration && !this.isShuttingDown) {
+              this.cachedEmbeddingResult = result
+            }
+            resolve(result)
+          },
+          reject: (err) => {
+            reject(err)
+          },
+          timer
+        })
+
+        worker.postMessage({
+          id: messageId,
+          action: 'embed_text',
+          modelDir,
+          queryText
+        })
       })
-    })
+    })()
 
     this.embeddingInFlightPromise = promise
-    return promise
+    try {
+      return await promise
+    } finally {
+      if (this.embeddingInFlightPromise === promise) {
+        this.embeddingInFlightPromise = null
+      }
+    }
   }
 
   public async search(request: SemanticSearchRequest): Promise<SemanticSearchResponse> {
@@ -400,6 +480,7 @@ export class SemanticSearchCoordinator {
         eligibleCount: 0,
         unindexedCount: page.totalCount,
         staleCount: 0,
+        corruptCount: 0,
         offset,
         limit,
         hasMore: false,
@@ -423,6 +504,7 @@ export class SemanticSearchCoordinator {
         eligibleCount: 0,
         unindexedCount: 0,
         staleCount: 0,
+        corruptCount: 0,
         offset,
         limit,
         hasMore: false,
@@ -433,132 +515,191 @@ export class SemanticSearchCoordinator {
       }
     }
 
-    // 2. Query Generation Management
-    const queryKey = computeQueryKey(queryText, request)
-    let requestGen: number
-
-    if (this.activeQueryKey !== queryKey) {
-      // New query generation!
-      this.currentQueryGeneration++
-      this.activeQueryKey = queryKey
-      this.cachedEmbeddingResult = null
-      this.embeddingInFlightPromise = null
-      requestGen = this.currentQueryGeneration
-
-      // Reject all pending requests from older query generations
-      for (const [id, req] of this.activeRequests.entries()) {
-        if (req.generation < requestGen) {
-          clearTimeout(req.timer)
-          this.activeRequests.delete(id)
-          req.reject(new SearchCancelledError('Search superseded by a newer query'))
-        }
-      }
-
-      // If active worker was busy with an older query, terminate it to free up CPU
-      if (this.worker && this.activeRequests.size > 0) {
-        this.terminateWorker(this.worker)
-      }
-    } else {
-      requestGen = this.currentQueryGeneration
+    // 2. Enforce bounded concurrent search capacity
+    if (this.activeSearchCalls >= this.maxPendingRequests) {
+      throw new SearchOverloadError(
+        `Concurrent semantic search capacity exceeded (limit: ${this.maxPendingRequests})`
+      )
     }
 
-    // 3. Obtain query vector off main thread (deduplicating concurrent page requests)
-    const embedding = await this.getOrEmbedQuery(modelDir, queryText, requestGen)
+    this.activeSearchCalls++
+    try {
+      // Invalidate cached query embedding if the active model installation changed
+      if (this.lastActiveModelDir !== null && this.lastActiveModelDir !== modelDir) {
+        this.cachedEmbeddingResult = null
+        this.embeddingInFlightPromise = null
+      }
+      this.lastActiveModelDir = modelDir
 
-    // Guard against supersession during text embedding
-    if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
-      throw new SearchCancelledError('Search superseded by a newer query')
-    }
+      // 3. Query Generation Management
+      const queryKey = computeQueryKey(queryText, request)
+      let requestGen: number
 
-    // 4. Stream and rank candidates in search worker
-    const worker = this.ensureWorker()
-    const messageId = this.nextMessageId++
-    const catalogPath = this.catalog.getCatalogPath()
+      if (this.activeQueryKey !== queryKey) {
+        // New query generation!
+        this.currentQueryGeneration++
+        this.activeQueryKey = queryKey
+        this.cachedEmbeddingResult = null
+        this.embeddingInFlightPromise = null
+        requestGen = this.currentQueryGeneration
 
-    const searchDbPromise = new Promise<{
-      rankedItems: readonly { fileLocationId: number; score: number }[]
-      totalMatched: number
-      eligibleCount: number
-      unindexedCount: number
-      staleCount: number
-      offset: number
-      limit: number
-      hasMore: boolean
-      queryLatencyMs: number
-    }>((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => {
-        this.activeRequests.delete(messageId)
-        if (this.worker === worker) {
-          this.terminateWorker(worker)
+        // Check whether the worker was actively busy BEFORE deleting old request entries
+        let hadOlderActiveWork = false
+        for (const [id, req] of this.activeRequests.entries()) {
+          if (req.generation < requestGen) {
+            hadOlderActiveWork = true
+            clearTimeout(req.timer)
+            this.activeRequests.delete(id)
+            req.reject(new SearchCancelledError('Search superseded by a newer query'))
+          }
         }
-        rejectPromise(new SearchTimeoutError(`Search request ${messageId} timed out`))
-      }, this.requestTimeoutMs)
 
-      this.activeRequests.set(messageId, {
-        id: messageId,
-        generation: requestGen,
-        resolve: (res) => {
-          resolvePromise({
-            rankedItems: res.rankedItems ?? [],
-            totalMatched: res.totalMatched ?? 0,
-            eligibleCount: res.eligibleCount ?? 0,
-            unindexedCount: res.unindexedCount ?? 0,
-            staleCount: res.staleCount ?? 0,
-            offset: res.offset ?? offset,
-            limit: res.limit ?? limit,
-            hasMore: res.hasMore ?? false,
-            queryLatencyMs: res.queryLatencyMs ?? 0
+        // Terminate busy worker immediately to free CPU for the new query
+        if (this.worker && hadOlderActiveWork) {
+          this.terminateWorker(this.worker)
+        }
+      } else {
+        requestGen = this.currentQueryGeneration
+      }
+
+      // 4. Obtain query vector off main thread (deduplicating concurrent page requests)
+      const embedding = await this.getOrEmbedQuery(modelDir, queryText, requestGen)
+
+      // Guard against supersession during text embedding
+      if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
+        throw new SearchCancelledError('Search superseded by a newer query')
+      }
+
+      const runSearchDatabasePass = async (): Promise<{
+        rankedItems: readonly WorkerRankedItem[]
+        totalMatched: number
+        eligibleCount: number
+        unindexedCount: number
+        staleCount: number
+        corruptCount: number
+        offset: number
+        limit: number
+        hasMore: boolean
+        queryLatencyMs: number
+      }> => {
+        const worker = await this.ensureWorker(requestGen)
+        if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
+          throw new SearchCancelledError('Search superseded before worker search')
+        }
+
+        const messageId = this.nextMessageId++
+        const catalogPath = this.catalog.getCatalogPath()
+
+        const searchDbPromise = new Promise<{
+          rankedItems: readonly WorkerRankedItem[]
+          totalMatched: number
+          eligibleCount: number
+          unindexedCount: number
+          staleCount: number
+          corruptCount: number
+          offset: number
+          limit: number
+          hasMore: boolean
+          queryLatencyMs: number
+        }>((resolvePromise, rejectPromise) => {
+          const timer = setTimeout(() => {
+            this.activeRequests.delete(messageId)
+            if (this.worker === worker) {
+              this.terminateWorker(worker)
+            }
+            rejectPromise(new SearchTimeoutError(`Search request ${messageId} timed out`))
+          }, this.requestTimeoutMs)
+
+          this.activeRequests.set(messageId, {
+            id: messageId,
+            generation: requestGen,
+            resolve: (res) => {
+              resolvePromise({
+                rankedItems: res.rankedItems ?? [],
+                totalMatched: res.totalMatched ?? 0,
+                eligibleCount: res.eligibleCount ?? 0,
+                unindexedCount: res.unindexedCount ?? 0,
+                staleCount: res.staleCount ?? 0,
+                corruptCount: res.corruptCount ?? 0,
+                offset: res.offset ?? offset,
+                limit: res.limit ?? limit,
+                hasMore: res.hasMore ?? false,
+                queryLatencyMs: res.queryLatencyMs ?? 0
+              })
+            },
+            reject: rejectPromise,
+            timer
           })
-        },
-        reject: rejectPromise,
-        timer
-      })
-    })
+        })
 
-    worker.postMessage({
-      id: messageId,
-      action: 'search_database',
-      catalogPath,
-      queryVector: embedding.vector,
-      filters: {
-        category: 'photo',
-        ratingFilter: request.ratingFilter,
-        flagFilter: request.flagFilter,
-        collectionId: request.collectionId,
-        captureDateFrom: request.captureDateFrom,
-        captureDateTo: request.captureDateTo,
-        includeUnknownCaptureDate: request.includeUnknownCaptureDate,
-        cameraNormalized: request.cameraNormalized,
-        onlyUnknownCamera: request.onlyUnknownCamera,
-        lensNormalized: request.lensNormalized,
-        onlyUnknownLens: request.onlyUnknownLens,
-        minWidthPx: request.minWidthPx,
-        minHeightPx: request.minHeightPx,
-        includeUnknownDimensions: request.includeUnknownDimensions,
-        fileTypeBasis: request.fileTypeBasis,
-        fileTypeValue: request.fileTypeValue,
-        onlyUnknownDetectedFormat: request.onlyUnknownDetectedFormat
-      },
-      limit,
-      offset,
-      minScore
-    })
+        worker.postMessage({
+          id: messageId,
+          action: 'search_database',
+          catalogPath,
+          queryVector: embedding.vector,
+          filters: {
+            category: 'photo',
+            ratingFilter: request.ratingFilter,
+            flagFilter: request.flagFilter,
+            collectionId: request.collectionId,
+            captureDateFrom: request.captureDateFrom,
+            captureDateTo: request.captureDateTo,
+            includeUnknownCaptureDate: request.includeUnknownCaptureDate,
+            cameraNormalized: request.cameraNormalized,
+            onlyUnknownCamera: request.onlyUnknownCamera,
+            lensNormalized: request.lensNormalized,
+            onlyUnknownLens: request.onlyUnknownLens,
+            minWidthPx: request.minWidthPx,
+            minHeightPx: request.minHeightPx,
+            includeUnknownDimensions: request.includeUnknownDimensions,
+            fileTypeBasis: request.fileTypeBasis,
+            fileTypeValue: request.fileTypeValue,
+            onlyUnknownDetectedFormat: request.onlyUnknownDetectedFormat
+          },
+          limit,
+          offset,
+          minScore
+        })
 
-    const workerResult = await searchDbPromise
+        return await searchDbPromise
+      }
 
-    // Guard against supersession during candidate traversal and ranking
-    if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
-      throw new SearchCancelledError('Search superseded by a newer query')
-    }
+      const hydrateAndRevalidate = (
+        rankedItems: readonly WorkerRankedItem[]
+      ): { items: SemanticSearchResultItem[]; droppedStaleCount: number } => {
+        const hydrated: SemanticSearchResultItem[] = []
+        let droppedStaleCount = 0
 
-    // 5. Hydrate top-K photos on main process and revalidate identity
-    const items: SemanticSearchResultItem[] = []
-    for (let i = 0; i < workerResult.rankedItems.length; i++) {
-      const match = workerResult.rankedItems[i]
-      if (match) {
-        const photo = this.catalog.getFileLocationById(match.fileLocationId)
-        if (photo && photo.category === 'photo' && photo.discoveryObservationId > 0) {
-          items.push({
+        for (let i = 0; i < rankedItems.length; i++) {
+          const match = rankedItems[i]
+          if (!match) continue
+
+          const photo = this.catalog.getFileLocationById(match.fileLocationId)
+          if (!photo || photo.category !== 'photo' || photo.discoveryObservationId <= 0) {
+            droppedStaleCount++
+            continue
+          }
+
+          // Revalidate scored observation/content identity against current catalog state
+          const obsMatches =
+            match.discoveryObservationId === undefined ||
+            match.discoveryObservationId === photo.discoveryObservationId
+          const sizeMatches =
+            match.observedByteSize === undefined || match.observedByteSize === photo.byteSize
+          const mtimeMatches =
+            match.observedMtimeMs === undefined ||
+            isObservationTimestampMatching(match.observedMtimeMs, photo.filesystemMtimeMs)
+          const hashMatches =
+            match.contentSha256 === undefined ||
+            photo.activeHash === null ||
+            match.contentSha256.toLowerCase() === photo.activeHash.toLowerCase()
+
+          if (!obsMatches || !sizeMatches || !mtimeMatches || !hashMatches) {
+            droppedStaleCount++
+            continue
+          }
+
+          hydrated.push({
             photo: {
               id: photo.id,
               sourceId: photo.sourceId,
@@ -580,25 +721,55 @@ export class SemanticSearchCoordinator {
               annotationVersion: photo.annotationVersion ?? 0
             },
             score: match.score,
-            rank: offset + i + 1
+            rank: offset + hydrated.length + 1
           })
         }
-      }
-    }
 
-    return {
-      items,
-      totalMatched: workerResult.totalMatched,
-      eligibleCount: workerResult.eligibleCount,
-      unindexedCount: workerResult.unindexedCount,
-      staleCount: workerResult.staleCount,
-      offset,
-      limit,
-      hasMore: workerResult.hasMore,
-      queryLatencyMs: performance.now() - t0,
-      truncated: embedding.truncated,
-      tokenCount: embedding.tokenCount,
-      modelStatus: 'ready'
+        return { items: hydrated, droppedStaleCount }
+      }
+
+      let workerResult = await runSearchDatabasePass()
+
+      if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
+        throw new SearchCancelledError('Search superseded by a newer query')
+      }
+
+      let { items, droppedStaleCount } = hydrateAndRevalidate(workerResult.rankedItems)
+
+      // If catalog mutated between worker scoring and hydration, re-score once against updated catalog
+      if (droppedStaleCount > 0) {
+        workerResult = await runSearchDatabasePass()
+        if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
+          throw new SearchCancelledError('Search superseded by a newer query')
+        }
+        const rehydrated = hydrateAndRevalidate(workerResult.rankedItems)
+        items = rehydrated.items
+        droppedStaleCount = rehydrated.droppedStaleCount
+      }
+
+      const reconciledTotalMatched = Math.max(0, workerResult.totalMatched - droppedStaleCount)
+      const reconciledEligibleCount = Math.max(0, workerResult.eligibleCount - droppedStaleCount)
+      const reconciledStaleCount = workerResult.staleCount + droppedStaleCount
+      const reconciledHasMore =
+        offset + items.length < reconciledTotalMatched && workerResult.hasMore
+
+      return {
+        items,
+        totalMatched: reconciledTotalMatched,
+        eligibleCount: reconciledEligibleCount,
+        unindexedCount: workerResult.unindexedCount,
+        staleCount: reconciledStaleCount,
+        corruptCount: workerResult.corruptCount,
+        offset,
+        limit,
+        hasMore: reconciledHasMore,
+        queryLatencyMs: performance.now() - t0,
+        truncated: embedding.truncated,
+        tokenCount: embedding.tokenCount,
+        modelStatus: 'ready'
+      }
+    } finally {
+      this.activeSearchCalls--
     }
   }
 }

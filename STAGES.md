@@ -242,42 +242,42 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 - [x] **Offline Query Vector Generation & Dedicated Search Worker Lifecycle (`search-coordinator.ts`, `search-worker.ts`)**:
   - Dedicated background search worker (`search_worker.ts`) executing outside Electron main and renderer for tokenizer evaluation (`@huggingface/tokenizers@0.2.0`), ONNX text inference (`text_model_quantized.onnx`), candidate traversal, vector decoding, and ranking.
-  - Strict aggregate resource bounds: $\le 1$ active search worker, $\le 2$ image workers, and $\le 3$ total live workers across the application (counting terminating workers until process `'exit'`).
-  - Pre-load model directory integrity revalidation off main before loading; duplicate concurrent session loads prevented via in-flight promise caching (`getOrEmbedQuery`).
-  - Active worker cancellation, query supersession, execution timeouts (30,000 ms), shutdown cleanup, and capacity recovery.
+  - Strict aggregate resource bounds: $\le 1$ live search worker (`ensureWorker` waits for `terminatingWorkers` and `spawningWorkerPromise` so live workers never exceed 1), $\le 2$ image workers, and $\le 3$ total live workers across the application (counting terminating workers until process `'exit'`), plus bounded pending search capacity (`maxPendingRequests = 16`, throwing `SearchOverloadError` on saturation).
+  - Pre-load model directory integrity revalidation (`verifyModelDirIntegrity`) off main before every load/search without a directory `mtimeMs` shortcut (verifying `realpathSync` containment, non-symlink `lstatSync`, and SHA-256 of all 7 artifacts, releasing cached ONNX text session/tokenizer via `releaseTextSession()` on failure or installation change); duplicate concurrent session loads prevented via retry-safe in-flight promise caching (`getOrEmbedQuery`).
+  - Active worker cancellation, query supersession (checking `hadOlderActiveWork` before clearing old `activeRequests` so busy workers are terminated), execution timeouts (15,000 ms), shutdown cleanup, and capacity recovery.
   - Strict query input bounds ($\le 500$ characters, trimmed, non-empty) with honest 77-token truncation notice (`truncated: true`, `tokenCount: 77`).
-  - Validation of query vectors at the ranking boundary (`validateQueryVector`): 512 dimensions, finite float32 values, non-zero L2 norm, unit normalization ($|\lVert v \rVert_2 - 1.0| \le 10^{-3}$).
+  - Validation of query vectors at the ranking boundary (`validateQueryVector`): 512 dimensions, finite float32 values, non-zero L2 norm, unit normalization ($|\lVert v \rVert_2 - 1.0| \le 10^{-2}$).
   - Zero external query transmission or personal data upload; completely offline.
 - [x] **Query Identity vs. Page-Request Generation (`search-coordinator.ts`, `usePhotos.ts`)**:
   - Distinguishes query identity (query text + filter parameters) from page requests. Multiple concurrent page requests for the same query generation (e.g. prefetching offset 0 and offset 50) proceed concurrently without cancelling each other.
   - Truly older queries are superseded and rejected with `SearchCancelledError` (never an empty `{ items: [] }` mask).
   - Deterministic coordinator and renderer tests covering delayed/out-of-order responses, query replacement, search clearing, filter changes, and returning to evicted pages.
-- [x] **Complete Embedding Compatibility & Corrupt Candidate Isolation (`database.ts`, `search-worker.ts`, `vector.ts`)**:
-  - Complete compatibility clauses in candidate and coverage queries: matches `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`, `embedding_dimensions = 512`, `observed_byte_size = d.byte_size`, `(d.filesystem_mtime_ms IS NULL OR ABS(se.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)`, `(se.content_revision LIKE ('%:' || d.id || ':' || se.observed_byte_size || ':%:' || se.content_sha256)) AND (se.content_revision LIKE 'semrev:%' OR se.content_revision LIKE 'rev:%')`, and `(h.sha256 IS NULL OR h.sha256 = se.content_sha256)`. Tested each field independently.
-  - Photo identity and location revalidation on Electron main upon result hydration.
-  - Robust candidate error isolation (`tryDeserializeEmbeddingVector`): safely handles malformed lengths, NaN/Infinity, zero vectors, and non-unit vectors per candidate, skipping corrupt records without failing the search or corrupting coverage counts.
+- [x] **Complete Embedding Compatibility, Hydration Revalidation & Corrupt Candidate Isolation (`database.ts`, `search-worker.ts`, `search-coordinator.ts`, `vector.ts`)**:
+  - Complete compatibility validation in candidate and coverage queries (`isSemanticEmbeddingRecordCompatible`): matches `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`, `embedding_dimensions = 512`, `observed_byte_size = d.byte_size`, Stage 2B timestamp precision (`isObservationTimestampMatching`: exact equality for fractional `filesystem_mtime_ms`, `< 1.0 ms` for integer, conservative null check), exact canonical 5-part `content_revision` parsing (`^(semrev|rev):(\d+):(\d+):([^:]+):([0-9a-f]{64})$`), and active `hash_observations` `sha256` match (`h.sha256 IS NULL OR h.sha256 = se.content_sha256`). Tested each field independently without `LIKE` wildcards or loose tolerance.
+  - Main-process hydration identity revalidation (`discoveryObservationId`, `observedByteSize`, `filesystemMtimeMs`, `activeHash`) with a single retry and count reconciliation when catalog state mutates between worker scoring and hydration.
+  - Robust candidate error isolation (`tryDeserializeEmbeddingVector`): safely handles malformed lengths, NaN/Infinity, zero vectors, and non-unit vectors per candidate, skipping corrupt records without failing the search, excluding them from `eligibleCount`, and reporting `corruptCount`.
 - [x] **Filter-Before-Ranking & Bounded Resource Bounds (`ranking.ts`, `TopKMinHeap`)**:
   - Filter-before-ranking: Prunes candidates using Stage 5B (rating, flag, collection) and Stage 6C (date range, camera, lens, resolution, file type) SQL filters BEFORE vector decoding and cosine score ranking. Non-matching photos are pruned at the database level and never occupy candidate heap space.
-  - Incremental streaming candidate vector evaluation with a bounded `TopKMinHeap` ($O(\log K)$ sift operations, $O(1)$ rejection of non-competitive candidates) bounded by `MAX_RETAINED_K = 10,100` (`offset <= 10,000`, `limit <= 100`). Whole-catalog vector index materialization in JavaScript memory is strictly prevented. Verified at scale with 50,001 synthetic embeddings.
-  - Single-pass coverage aggregate query counts `eligible_count`, `unindexed_count`, and `stale_count`.
+  - Incremental streaming candidate vector evaluation (`rankCandidatesWithBoundedPaging`): uses `TopKMinHeap` in JS memory for `offset + limit <= 1,000` ($O(\log K)$ sift operations, $O(1)$ rejection) and a private disk-backed temporary SQLite database (`new DatabaseSync('')` with `PRAGMA temp_store = FILE; PRAGMA cache_size = -2000;` — 2 MiB cache cap) for `offset + limit > 1,000` so all offsets remain reachable without whole-catalog JS index materialization or an unapproved collection/offset cap. Verified at scale with 50,001 synthetic embeddings and beyond offset 10,000.
+  - Coverage counts report `eligibleCount` (compatible non-corrupt searchable embeddings), `unindexedCount`, `staleCount`, and `corruptCount`.
   - Deterministic tie-breaking: `score DESC, fileLocationId ASC`.
-  - Honest deep-pagination bounds: IPC schema bounds `offset: z.number().int().nonnegative().max(10_000)` and `limit: z.number().int().positive().max(100)`. Renderer `searchScores` map evicted alongside LRU page cache records.
+  - Pagination bounds: `offset: z.number().int().nonnegative()` (unbounded non-negative integer) and `limit: z.number().int().positive().max(100)`. Renderer `searchScores` map evicted alongside LRU page cache records.
 - [x] **Typed IPC, Sandboxed Preload & Cancellation (`src/shared/`, `src/preload/`, `src/main/ipc/`)**:
   - Narrow typed IPC contracts: `SEMANTIC_SEARCH_PHOTOS` (`'semantic:search-photos'`), `SEMANTIC_SEARCH_CANCEL` (`'semantic:search-cancel'`).
   - Bidirectional runtime Zod schema validation and sender validation.
   - Sandboxed preload bundle verified to require only `electron`.
   - Active search cancellation promptly aborts in-flight worker searches and frees worker capacity.
 - [x] **Photos UI Search Bar Integration (`PhotosSearchBar.tsx`, `usePhotos.ts`, `PhotosPanel.tsx`)**:
-  - Compact search bar in Photos toolbar with input, clear button, loading spinner, match count badge, query latency and token count display, and unindexed/stale coverage warnings.
+  - Compact search bar in Photos toolbar with input, clear button, loading spinner, match count badge, query latency and token count display, and unindexed/stale/corrupt coverage warnings (`data-testid="search-corrupt-warning"`).
   - Prominent disclaimer that matches are semantic AI inferences, not factual object labels.
   - Photo cards display percentage similarity match badges (`xx% match`).
   - Works seamlessly with all existing Stage 5B and Stage 6C filters.
   - Clearing search restores ordinary browsing without reload or state corruption.
   - Preserves selected-photo provenance, review actions, virtual-grid bounds, and scroll/pagination resets.
 - [x] **Real-Electron Built & Unpacked Verification (`scripts/verify-electron-semantic-search.mjs`)**:
-  - `verify:semantic-search` (24/24 checks passed in built mode).
-  - `verify:semantic-search:unpacked` (25/25 checks passed in unpacked mode).
-  - Exercises unprovisioned handling, off-main CLIP ViT-B/32 text embedding inference, natural-language query matches against real fixtures, filter-before-ranking candidate pruning, honest 77-token truncation, active search cancellation, Photos UI search bar integration, non-factual disclaimer display, card similarity badges, clearing search restoration of ordinary browsing, sub-15ms query latency, concurrent page requests, main process heartbeat responsiveness (< 200 ms), and 100% source bitwise invariance.
+  - `verify:semantic-search` (25/25 checks passed in built mode).
+  - `verify:semantic-search:unpacked` (26/26 checks passed in unpacked mode).
+  - Exercises unprovisioned handling, off-main CLIP ViT-B/32 text embedding inference, natural-language query matches against real fixtures, filter-before-ranking candidate pruning, honest 77-token truncation, active search cancellation, Photos UI search bar integration, non-factual disclaimer display, card similarity badges, clearing search restoration of ordinary browsing, query latency, concurrent page requests, 10,200+ synthetic large-catalog deep pagination (`offset: 10050`, `corruptCount === 1`), main process heartbeat responsiveness (< 200 ms), and 100% source bitwise invariance.
 
 ### Pre-Stage-7 Modularity Maintenance (Planned)
 

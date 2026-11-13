@@ -6,6 +6,7 @@
  * Bounded auxiliary heap / top-K list with constant memory guarantees.
  */
 
+import { DatabaseSync } from 'node:sqlite'
 import { SEMANTIC_EMBEDDING_DIMENSIONS } from './manifest'
 
 export const RANKING_LIMITS = {
@@ -283,5 +284,101 @@ export function rankCandidates(
     items: paginated,
     totalMatched,
     hasMore
+  }
+}
+
+export const IN_MEMORY_HEAP_PAGING_THRESHOLD = 1_000
+
+/**
+ * Ranks an iterable/stream of candidates against a query vector with no artificial
+ * offset cap while keeping memory strictly bounded:
+ * - For offset + limit <= 1,000, uses TopKMinHeap in-memory (<= 1,000 retained entries).
+ * - For offset + limit > 1,000, streams into a private disk-backed temporary SQLite
+ *   database with cache_size capped to 2 MiB and temp_store = FILE.
+ */
+export function rankCandidatesWithBoundedPaging(
+  queryVector: Float32Array,
+  candidates: Iterable<RankCandidate>,
+  options: RankOptions = {}
+): RankResult {
+  const limit = Math.min(Math.max(1, options.limit ?? 50), RANKING_LIMITS.MAX_LIMIT)
+  const offset = Math.max(0, options.offset ?? 0)
+  const minScore = options.minScore ?? 0.0
+
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new RangeError(`Invalid offset: ${offset}`)
+  }
+
+  validateQueryVector(queryVector)
+
+  if (offset + limit <= IN_MEMORY_HEAP_PAGING_THRESHOLD) {
+    return rankCandidates(queryVector, candidates, { limit, offset, minScore })
+  }
+
+  const scratchDb = new DatabaseSync('')
+  try {
+    scratchDb.exec(`
+      PRAGMA temp_store = FILE;
+      PRAGMA cache_size = -2000;
+      PRAGMA synchronous = OFF;
+      PRAGMA journal_mode = OFF;
+      CREATE TABLE ranked_candidates (
+        file_location_id INTEGER NOT NULL,
+        score REAL NOT NULL
+      );
+    `)
+
+    const insertStmt = scratchDb.prepare(
+      'INSERT INTO ranked_candidates (file_location_id, score) VALUES (?, ?);'
+    )
+    let totalMatched = 0
+
+    scratchDb.exec('BEGIN TRANSACTION;')
+    try {
+      for (const candidate of candidates) {
+        const score = cosineSimilarity(queryVector, candidate.vector)
+        if (score < minScore) {
+          continue
+        }
+        totalMatched++
+        insertStmt.run(candidate.fileLocationId, score)
+      }
+      scratchDb.exec('COMMIT;')
+    } catch (err) {
+      try {
+        scratchDb.exec('ROLLBACK;')
+      } catch {
+        // ignore rollback error
+      }
+      throw err
+    }
+
+    scratchDb.exec(
+      'CREATE INDEX idx_ranked_candidates_order ON ranked_candidates (score DESC, file_location_id ASC);'
+    )
+
+    const rows = scratchDb
+      .prepare(
+        'SELECT file_location_id, score FROM ranked_candidates ORDER BY score DESC, file_location_id ASC LIMIT ? OFFSET ?;'
+      )
+      .all(limit, offset) as Array<{ file_location_id: number; score: number }>
+
+    const items: RankedItem[] = rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      score: r.score
+    }))
+    const hasMore = offset + items.length < totalMatched
+
+    return {
+      items,
+      totalMatched,
+      hasMore
+    }
+  } finally {
+    try {
+      scratchDb.close()
+    } catch {
+      // ignore close error
+    }
   }
 }

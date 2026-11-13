@@ -69,6 +69,7 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
       eligibleCount: 10,
       unindexedCount: 0,
       staleCount: 0,
+      corruptCount: 0,
       offset: 0,
       limit: 50,
       hasMore: false,
@@ -110,6 +111,7 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
       eligibleCount: 1,
       unindexedCount: 0,
       staleCount: 0,
+      corruptCount: 0,
       offset: 0,
       limit: 50,
       hasMore: false,
@@ -143,6 +145,7 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
         eligibleCount: 1,
         unindexedCount: 0,
         staleCount: 0,
+        corruptCount: 0,
         offset: 0,
         limit: 50,
         hasMore: false,
@@ -167,6 +170,7 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
       eligibleCount: 1,
       unindexedCount: 0,
       staleCount: 0,
+      corruptCount: 0,
       offset: 0,
       limit: 50,
       hasMore: false,
@@ -208,6 +212,7 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
         eligibleCount: 50 * PHOTO_BOUNDS.PAGE_SIZE,
         unindexedCount: 0,
         staleCount: 0,
+        corruptCount: 0,
         offset: opts.offset ?? 0,
         limit: PHOTO_BOUNDS.PAGE_SIZE,
         hasMore: true,
@@ -252,5 +257,47 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
 
     // Page 0 should be reloaded and Photo 10000 restored!
     expect(result.current.searchScores.has(10_000)).toBe(true)
+  })
+
+  it('supports deep jumps beyond offset 10,000 and propagates corruptCount honestly', async () => {
+    vi.mocked(window.api.searchPhotosSemantic).mockImplementation(async (opts) => {
+      const offset = opts.offset ?? 0
+      const pagePhoto = makeMockPhoto(offset + 1)
+      return {
+        items: [{ photo: pagePhoto, score: 0.72, rank: offset + 1 }],
+        totalMatched: 15_000,
+        eligibleCount: 14_995,
+        unindexedCount: 0,
+        staleCount: 0,
+        corruptCount: 5,
+        offset,
+        limit: PHOTO_BOUNDS.PAGE_SIZE,
+        hasMore: offset + PHOTO_BOUNDS.PAGE_SIZE < 15_000,
+        queryLatencyMs: 9,
+        truncated: false,
+        tokenCount: 3,
+        modelStatus: 'ready'
+      }
+    })
+
+    const { result } = renderHook(() => usePhotos())
+
+    await act(async () => {
+      result.current.setSearchQuery('forest')
+    })
+
+    expect(result.current.searchResultMeta?.corruptCount).toBe(5)
+    expect(result.current.totalCount).toBe(15_000)
+
+    // Jump directly beyond offset 10,000 (page 210 => offset 10,500)
+    await act(async () => {
+      result.current.ensureRangeLoaded(10_500, 10_510)
+    })
+
+    expect(window.api.searchPhotosSemantic).toHaveBeenCalledWith(
+      expect.objectContaining({ offset: 10_500, limit: PHOTO_BOUNDS.PAGE_SIZE })
+    )
+    expect(result.current.getPhoto(10_500)?.id).toBe(10_501)
+    expect(result.current.searchScores.get(10_501)).toBeCloseTo(0.72, 5)
   })
 })

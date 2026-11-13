@@ -21,6 +21,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import {
   copyFileSync,
   existsSync,
@@ -882,6 +883,116 @@ async function main() {
       throw new Error(`Average query latency too high: ${avgLatency}ms`)
     }
     pass(`Average search query round-trip latency: ${avgLatency.toFixed(1)}ms across 5 runs`)
+
+    // 14b. Large-Catalog Deep Pagination (>10,000), Corrupt Count & Main Heartbeat Check
+    console.log(
+      '[Phase 12b] Seeding 10,200 synthetic embeddings + 1 corrupt embedding for large-catalog real Electron check...'
+    )
+    const catalogDbPath = join(userDataDir, 'vault-catalog.db')
+    const synthDb = new DatabaseSync(catalogDbPath)
+    try {
+      const refRow = synthDb
+        .prepare(
+          `SELECT source_id, model_id, model_commit, model_manifest_sha256, preprocessing_version, embedding_blob
+           FROM photo_semantic_embeddings se
+           JOIN file_locations f ON f.id = se.file_location_id
+           LIMIT 1;`
+        )
+        .get()
+      if (!refRow) {
+        throw new Error('Expected at least one indexed photo in catalog for synthetic seeding')
+      }
+
+      const synthSha = 'e'.repeat(64)
+      synthDb.exec('BEGIN TRANSACTION;')
+      const insFile = synthDb.prepare(`
+        INSERT INTO file_locations (
+          source_id, original_path, normalized_path, file_name, extension, category,
+          created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, '.jpg', 'photo', 1700000000000, 1700000000000);
+      `)
+      const insDisc = synthDb.prepare(`
+        INSERT INTO discovery_observations (
+          file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+          observed_at_ms, last_seen_at_ms, is_current
+        ) VALUES (?, 2048, 1700000000000, 1700000000000, 1700000000000, 1700000000000, 1);
+      `)
+      const insHash = synthDb.prepare(`
+        INSERT INTO hash_observations (
+          file_location_id, discovery_observation_id, sha256,
+          observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+        ) VALUES (?, ?, ?, 2048, 1700000000000, 1700000000000, 1);
+      `)
+      const insEmb = synthDb.prepare(`
+        INSERT INTO photo_semantic_embeddings (
+          file_id, file_location_id, discovery_observation_id,
+          content_sha256, content_revision, source_path, observed_byte_size, observed_mtime_ms,
+          model_id, model_commit, model_manifest_sha256, preprocessing_version,
+          embedding_dimensions, embedding_blob, is_current, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, 2048, 1700000000000, ?, ?, ?, ?, 512, ?, 1, 1700000000000);
+      `)
+
+      const corruptBuf = Buffer.alloc(2048) // all zeros -> corrupt zero-norm vector
+      for (let i = 0; i < 10_201; i++) {
+        const fakePath = join(photosDir, `synthetic_scale_${i}.jpg`)
+        const fRes = insFile.run(
+          refRow.source_id,
+          fakePath,
+          fakePath.toLowerCase(),
+          `synthetic_scale_${i}.jpg`
+        )
+        const fId = Number(fRes.lastInsertRowid)
+        const dRes = insDisc.run(fId)
+        const dId = Number(dRes.lastInsertRowid)
+        insHash.run(fId, dId, synthSha)
+        const rev = `semrev:${dId}:2048:1700000000000:${synthSha}`
+        const blobToUse = i === 10_200 ? corruptBuf : refRow.embedding_blob
+        insEmb.run(
+          fId,
+          fId,
+          dId,
+          synthSha,
+          rev,
+          fakePath,
+          refRow.model_id,
+          refRow.model_commit,
+          refRow.model_manifest_sha256,
+          refRow.preprocessing_version,
+          blobToUse
+        )
+      }
+      synthDb.exec('COMMIT;')
+    } finally {
+      synthDb.close()
+    }
+
+    const largeSearchPromise = evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'natural landscape scenery', offset: 10050, limit: 25, minScore: -1.0 })`
+    )
+    const tLargeHb0 = Date.now()
+    const largeHbInfo = await evaluate(app.cdp, `window.api.getAppInfo()`)
+    const largeHbLatency = Date.now() - tLargeHb0
+    const deepRes = await largeSearchPromise
+
+    if (!largeHbInfo || !largeHbInfo.version || largeHbLatency > 200) {
+      throw new Error(
+        `Main process heartbeat delayed (${largeHbLatency}ms) during 10,200+ catalog search`
+      )
+    }
+    if (deepRes.items.length !== 25 || deepRes.offset !== 10050) {
+      throw new Error(
+        `Deep pagination beyond 10,000 failed: items=${deepRes.items.length}, offset=${deepRes.offset}`
+      )
+    }
+    if (deepRes.totalMatched < 10_200 || deepRes.corruptCount !== 1) {
+      throw new Error(
+        `Expected totalMatched >= 10200 and corruptCount === 1, got totalMatched=${deepRes.totalMatched}, corruptCount=${deepRes.corruptCount}`
+      )
+    }
+    pass(
+      `Large-catalog deep search (offset=10,050 across ${deepRes.totalMatched} matches, corruptCount=${deepRes.corruptCount}) succeeded with responsive main heartbeat (${largeHbLatency}ms)`
+    )
 
     // 15. Source File Preservation Invariance
     console.log('[Phase 13] Verifying source file bitwise preservation invariance...')

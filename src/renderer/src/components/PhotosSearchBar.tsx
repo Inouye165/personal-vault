@@ -14,6 +14,7 @@ export interface PhotosSearchBarResultMeta {
   readonly eligibleCount: number
   readonly unindexedCount: number
   readonly staleCount: number
+  readonly corruptCount?: number
   readonly truncated: boolean
   readonly tokenCount: number
   readonly queryLatencyMs: number
@@ -131,6 +132,11 @@ export function PhotosSearchBar({
             )}
             {searchResult.staleCount > 0 && (
               <span className="search-coverage-warning">• {searchResult.staleCount} stale</span>
+            )}
+            {(searchResult.corruptCount ?? 0) > 0 && (
+              <span className="search-coverage-warning" data-testid="search-corrupt-warning">
+                • {searchResult.corruptCount} damaged (reindex recommended)
+              </span>
             )}
             {searchResult.truncated && (
               <span className="search-truncation-notice">• Query truncated to 77 tokens</span>
