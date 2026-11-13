@@ -198,11 +198,38 @@ export function assertSearchPerformanceAndResourceBounds(report) {
   }
 }
 
+function assertWorkflowTiming(workflow, name) {
+  if (!workflow || typeof workflow !== 'object') {
+    throw new Error(`Missing lifecycle evidence for workflow '${name}'`)
+  }
+  const startedAtMs = assertFiniteNumber(workflow.startedAtMs, `workflows.${name}.startedAtMs`)
+  const endedAtMs = assertFiniteNumber(workflow.endedAtMs, `workflows.${name}.endedAtMs`)
+  if (endedAtMs <= startedAtMs) {
+    throw new Error(
+      `Invalid lifecycle interval for workflow '${name}' (startedAtMs=${startedAtMs}, endedAtMs=${endedAtMs})`
+    )
+  }
+  if (workflow.completed !== true) {
+    throw new Error(`Workflow '${name}' did not report completed=true`)
+  }
+  return { startedAtMs, endedAtMs }
+}
+
+function assertValidJobId(value, label) {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim()
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return String(value)
+  }
+  throw new Error(`Missing or invalid jobId '${label}': ${String(value)}`)
+}
+
 export function assertConcurrentWorkloadOverlap(input) {
   if (!input || typeof input !== 'object') {
     throw new Error('Missing concurrent workload overlap input')
   }
-  const { samples, deltaTotalDecodes, deltaCacheMisses } = input
+  const { samples, workflows, deltaTotalDecodes, deltaCacheMisses } = input
   assertFiniteNumber(deltaTotalDecodes, 'deltaTotalDecodes')
   assertFiniteNumber(deltaCacheMisses, 'deltaCacheMisses')
   if (deltaTotalDecodes < 1 || deltaCacheMisses < 1) {
@@ -210,6 +237,93 @@ export function assertConcurrentWorkloadOverlap(input) {
       `Expected actual uncached thumbnail decodes during overlap test (deltaTotalDecodes=${deltaTotalDecodes}, deltaCacheMisses=${deltaCacheMisses})`
     )
   }
+  if (!workflows || typeof workflows !== 'object') {
+    throw new Error('Missing correlated workflow lifecycle evidence (workflows)')
+  }
+
+  const thumbsTiming = assertWorkflowTiming(workflows.thumbnails, 'thumbnails')
+  const metaTiming = assertWorkflowTiming(workflows.metadata, 'metadata')
+  const semTiming = assertWorkflowTiming(workflows.semanticIndex, 'semanticIndex')
+  const searchTiming = assertWorkflowTiming(workflows.search, 'search')
+
+  const thumbIds = workflows.thumbnails.locationIds
+  if (!Array.isArray(thumbIds) || thumbIds.length < 1) {
+    throw new Error('Missing workflows.thumbnails.locationIds')
+  }
+  const thumbDecodes = assertFiniteNumber(
+    workflows.thumbnails.deltaTotalDecodes,
+    'workflows.thumbnails.deltaTotalDecodes'
+  )
+  const thumbMisses = assertFiniteNumber(
+    workflows.thumbnails.deltaCacheMisses,
+    'workflows.thumbnails.deltaCacheMisses'
+  )
+  if (
+    thumbDecodes < thumbIds.length ||
+    thumbMisses < thumbIds.length ||
+    deltaTotalDecodes < thumbIds.length ||
+    deltaCacheMisses < thumbIds.length
+  ) {
+    throw new Error(
+      `Expected actual uncached thumbnail decodes for all ${thumbIds.length} requests (deltaTotalDecodes=${deltaTotalDecodes}, deltaCacheMisses=${deltaCacheMisses})`
+    )
+  }
+
+  const metadataJobId = assertValidJobId(workflows.metadata.jobId, 'workflows.metadata.jobId')
+  const metadataProcessed = assertFiniteNumber(
+    workflows.metadata.processedCount,
+    'workflows.metadata.processedCount'
+  )
+  if (metadataProcessed < 1) {
+    throw new Error(
+      `Metadata workflow must record fresh processedCount >= 1 (jobId=${metadataJobId}, processedCount=${metadataProcessed})`
+    )
+  }
+
+  const semanticJobId = assertValidJobId(
+    workflows.semanticIndex.jobId,
+    'workflows.semanticIndex.jobId'
+  )
+  const semanticProcessed = assertFiniteNumber(
+    workflows.semanticIndex.processedCount,
+    'workflows.semanticIndex.processedCount'
+  )
+  if (semanticProcessed < 1) {
+    throw new Error(
+      `Semantic indexing workflow must record fresh processedCount >= 1 (jobId=${semanticJobId}, processedCount=${semanticProcessed})`
+    )
+  }
+
+  if (typeof workflows.search.queryText !== 'string' || !workflows.search.queryText.trim()) {
+    throw new Error('Missing workflows.search.queryText')
+  }
+  const searchResultCount = assertFiniteNumber(
+    workflows.search.resultCount,
+    'workflows.search.resultCount'
+  )
+  if (searchResultCount < 1) {
+    throw new Error(`Search workflow returned no results (resultCount=${searchResultCount})`)
+  }
+
+  const sharedIntervalStartMs = Math.max(
+    thumbsTiming.startedAtMs,
+    metaTiming.startedAtMs,
+    semTiming.startedAtMs,
+    searchTiming.startedAtMs
+  )
+  const sharedIntervalEndMs = Math.min(
+    thumbsTiming.endedAtMs,
+    metaTiming.endedAtMs,
+    semTiming.endedAtMs,
+    searchTiming.endedAtMs
+  )
+  const sharedOverlapDurationMs = sharedIntervalEndMs - sharedIntervalStartMs
+  if (sharedOverlapDurationMs <= 0) {
+    throw new Error(
+      `No shared four-workflow overlap interval (sharedIntervalStartMs=${sharedIntervalStartMs}, sharedIntervalEndMs=${sharedIntervalEndMs})`
+    )
+  }
+
   if (!Array.isArray(samples) || samples.length < 2) {
     throw new Error(
       `Insufficient overlap polling samples (${Array.isArray(samples) ? samples.length : 0})`
@@ -222,12 +336,18 @@ export function assertConcurrentWorkloadOverlap(input) {
   let peakLiveWorkers = 0
   let peakSearchLiveWorkers = 0
   let peakTotalAppLiveWorkers = 0
-  let sawMetadataRunning = false
-  let sawSemanticRunning = false
-  let sawSearchWithImageWorkerOverlap = false
+  let qualifyingSampleCount = 0
 
   for (let i = 0; i < samples.length; i++) {
     const s = samples[i]
+    const timestampMs = assertFiniteNumber(s?.timestampMs, `overlapSamples[${i}].timestampMs`)
+    const thumbnailsInFlight = assertFiniteNumber(
+      s?.thumbnailsInFlight,
+      `overlapSamples[${i}].thumbnailsInFlight`
+    )
+    if (thumbnailsInFlight < 0) {
+      throw new Error(`Invalid negative thumbnailsInFlight at overlapSamples[${i}]`)
+    }
     const d = validateDiagnosticsSnapshot(s?.diag, `overlapSamples[${i}].diag`)
     const activeSemanticTasks = assertFiniteNumber(
       s.diag.activeSemanticTasks,
@@ -245,40 +365,54 @@ export function assertConcurrentWorkloadOverlap(input) {
     peakSearchLiveWorkers = Math.max(peakSearchLiveWorkers, d.searchLiveWorkers)
     peakTotalAppLiveWorkers = Math.max(peakTotalAppLiveWorkers, d.totalAppLiveWorkers)
 
-    if (s.metadataJobStatus === 'running') sawMetadataRunning = true
-    if (s.semanticJobStatus === 'running') sawSemanticRunning = true
+    const insideSharedInterval =
+      timestampMs >= sharedIntervalStartMs && timestampMs <= sharedIntervalEndMs
+    const metadataMatches =
+      s.metadataJobStatus === 'running' &&
+      (s.metadataJobId == null || String(s.metadataJobId) === metadataJobId)
+    const semanticMatches =
+      s.semanticJobStatus === 'running' &&
+      (s.semanticJobId == null || String(s.semanticJobId) === semanticJobId)
+    const imageWorkerActive =
+      activeSemanticTasks >= 1 || activeMetadataTasks >= 1 || d.activeWorkers >= 1
 
     if (
+      insideSharedInterval &&
+      thumbnailsInFlight >= 1 &&
+      metadataMatches &&
+      semanticMatches &&
       d.searchActiveCalls >= 1 &&
-      (activeSemanticTasks >= 1 || activeMetadataTasks >= 1 || d.activeWorkers >= 1)
+      imageWorkerActive
     ) {
-      sawSearchWithImageWorkerOverlap = true
+      qualifyingSampleCount++
     }
   }
 
-  if (peakActiveSemanticTasks < 1 || !sawSemanticRunning) {
+  if (qualifyingSampleCount < 1) {
+    const sampleSummary = samples.map((s) => ({
+      t: s.timestampMs,
+      thumbs: s.thumbnailsInFlight,
+      meta: s.metadataJobStatus,
+      sem: s.semanticJobStatus,
+      searchCalls: s.diag?.searchActiveCalls,
+      activeW: s.diag?.activeWorkers,
+      activeMeta: s.diag?.activeMetadataTasks,
+      activeSem: s.diag?.activeSemanticTasks
+    }))
     throw new Error(
-      `Semantic indexing work was not observed active during overlap window (peakActiveSemanticTasks=${peakActiveSemanticTasks}, sawSemanticRunning=${sawSemanticRunning})`
-    )
-  }
-  if (peakActiveMetadataTasks < 1 || !sawMetadataRunning) {
-    throw new Error(
-      `Metadata extraction work was not observed active during overlap window (peakActiveMetadataTasks=${peakActiveMetadataTasks}, sawMetadataRunning=${sawMetadataRunning})`
-    )
-  }
-  if (peakSearchActiveCalls < 1) {
-    throw new Error(
-      `Semantic search call was never observed active (peakSearchActiveCalls=${peakSearchActiveCalls})`
-    )
-  }
-  if (!sawSearchWithImageWorkerOverlap) {
-    throw new Error(
-      'Never observed simultaneous active search and active image-worker execution in any diagnostic poll'
+      `No polled sample observed all four workflows simultaneously in flight within the shared interval [${sharedIntervalStartMs}, ${sharedIntervalEndMs}] (samples=${JSON.stringify(sampleSummary)})`
     )
   }
 
   return {
     sampleCount: samples.length,
+    qualifyingSampleCount,
+    sharedIntervalStartMs,
+    sharedIntervalEndMs,
+    sharedOverlapDurationMs,
+    metadataJobId,
+    semanticJobId,
+    thumbnailCount: thumbIds.length,
     deltaTotalDecodes,
     deltaCacheMisses,
     peakActiveSemanticTasks,

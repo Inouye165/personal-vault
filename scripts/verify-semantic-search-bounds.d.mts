@@ -17,6 +17,13 @@ export function assertSearchPerformanceAndResourceBounds(report: unknown): {
 
 export function assertConcurrentWorkloadOverlap(input: unknown): {
   sampleCount: number
+  qualifyingSampleCount: number
+  sharedIntervalStartMs: number
+  sharedIntervalEndMs: number
+  sharedOverlapDurationMs: number
+  metadataJobId: string
+  semanticJobId: string
+  thumbnailCount: number
   deltaTotalDecodes: number
   deltaCacheMisses: number
   peakActiveSemanticTasks: number

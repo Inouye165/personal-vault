@@ -1087,13 +1087,13 @@ async function main() {
     // 12f. Prove genuine concurrent workload overlap on fresh uncached, unindexed, un-extracted fixtures
     const overlapPhotosDir = join(tempBase, 'overlap_photos')
     mkdirSync(overlapPhotosDir, { recursive: true })
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 6; i++) {
       await sharp({
         create: {
           width: 400,
           height: 300,
           channels: 3,
-          background: { r: 25 * i, g: 140, b: 60 + 20 * i }
+          background: { r: 20 * i, g: 140, b: 60 + 20 * i }
         }
       })
         .jpeg({ quality: 88 })
@@ -1116,13 +1116,14 @@ async function main() {
     const overlapItems = allPhotosAfterOverlapScan.items.filter((p) =>
       p.fileName.startsWith('overlap_')
     )
-    if (overlapItems.length !== 4) {
-      throw new Error(`Expected 4 fresh overlap photos, found ${overlapItems.length}`)
+    if (overlapItems.length !== 6) {
+      throw new Error(`Expected 6 fresh overlap photos, found ${overlapItems.length}`)
     }
 
     const diagBeforeOverlap = await evaluate(app.cdp, `window.api.getPhotosDiagnostics()`)
 
     // Fire uncached thumbnail decodes, metadata extraction, semantic indexing, and semantic search together
+    const overlapQueryText = 'lush green evergreen pine trees'
     const overlapStartEval = evaluate(
       app.cdp,
       `(async () => {
@@ -1133,30 +1134,135 @@ async function main() {
             filesystemMtimeMs: p.filesystemMtimeMs
           }))
         )}
-        const [thumbs, metaJob, indexJob, searchRes] = await Promise.all([
-          Promise.all(
-            items.map((item) =>
-              window.api.getThumbnail({
-                locationId: item.id,
-                expectedByteSize: item.byteSize,
-                expectedMtimeMs: item.filesystemMtimeMs,
-                priority: 'high'
-              })
-            )
-          ),
-          window.api.startPhotoMetadataExtraction({ retryFailed: false }),
-          window.api.startSemanticIndexing(),
-          window.api.searchPhotosSemantic({
-            queryText: 'lush green evergreen pine trees',
+        const tracker = {
+          thumbnailsInFlight: items.length,
+          thumbnailsStartedAtMs: null,
+          thumbnailsEndedAtMs: null,
+          thumbnailsCompleted: false,
+          metadataStartedAtMs: null,
+          metadataEndedAtMs: null,
+          metadataJobId: null,
+          metadataCompleted: false,
+          metadataProcessed: 0,
+          semanticStartedAtMs: null,
+          semanticEndedAtMs: null,
+          semanticJobId: null,
+          semanticCompleted: false,
+          semanticProcessed: 0,
+          searchStartedAtMs: null,
+          searchEndedAtMs: null,
+          searchCompleted: false,
+          searchResultCount: 0,
+          searchTop: null
+        }
+        window.__stage6eOverlap = tracker
+
+        const metaPromise = (async () => {
+          tracker.metadataStartedAtMs = Date.now()
+          const job = await window.api.startPhotoMetadataExtraction({ retryFailed: false })
+          tracker.metadataJobId = job.jobId
+          while (true) {
+            const prog = await window.api.getPhotoMetadataProgress()
+            if (
+              prog.jobId === job.jobId &&
+              (prog.status === 'completed' || prog.status === 'failed')
+            ) {
+              tracker.metadataEndedAtMs = Date.now()
+              tracker.metadataCompleted = prog.status === 'completed'
+              tracker.metadataProcessed = prog.processedPhotos ?? 0
+              return { job, prog }
+            }
+            await new Promise((r) => setTimeout(r, 20))
+          }
+        })()
+
+        const semanticPromise = (async () => {
+          tracker.semanticStartedAtMs = Date.now()
+          const job = await window.api.startSemanticIndexing()
+          tracker.semanticJobId = job.jobId
+          while (true) {
+            const prog = await window.api.getSemanticIndexProgress()
+            if (
+              prog.jobId === job.jobId &&
+              (prog.status === 'completed' || prog.status === 'failed')
+            ) {
+              tracker.semanticEndedAtMs = Date.now()
+              tracker.semanticCompleted = prog.status === 'completed'
+              tracker.semanticProcessed = prog.processedPhotos ?? 0
+              return { job, prog }
+            }
+            await new Promise((r) => setTimeout(r, 20))
+          }
+        })()
+
+        // Wait until both background jobs have registered their new jobIds and entered 'running'
+        const readyDeadline = Date.now() + 5000
+        while (Date.now() < readyDeadline) {
+          if (tracker.metadataJobId != null && tracker.semanticJobId != null) {
+            const [mProg, sProg] = await Promise.all([
+              window.api.getPhotoMetadataProgress(),
+              window.api.getSemanticIndexProgress()
+            ])
+            if (
+              mProg.jobId === tracker.metadataJobId &&
+              mProg.status === 'running' &&
+              sProg.jobId === tracker.semanticJobId &&
+              sProg.status === 'running'
+            ) {
+              break
+            }
+          }
+          await new Promise((r) => setTimeout(r, 10))
+        }
+
+        const thumbsPromise = (async () => {
+          tracker.thumbnailsStartedAtMs = Date.now()
+          const results = await Promise.all(
+            items.map(async (item) => {
+              try {
+                return await window.api.getThumbnail({
+                  locationId: item.id,
+                  expectedByteSize: item.byteSize,
+                  expectedMtimeMs: item.filesystemMtimeMs,
+                  priority: 'high'
+                })
+              } finally {
+                tracker.thumbnailsInFlight = Math.max(0, tracker.thumbnailsInFlight - 1)
+              }
+            })
+          )
+          tracker.thumbnailsEndedAtMs = Date.now()
+          tracker.thumbnailsCompleted = results.every((t) => t.status === 'ready')
+          return results
+        })()
+
+        const searchPromise = (async () => {
+          tracker.searchStartedAtMs = Date.now()
+          const res = await window.api.searchPhotosSemantic({
+            queryText: ${JSON.stringify(overlapQueryText)},
             offset: 0,
             limit: 5
           })
+          tracker.searchEndedAtMs = Date.now()
+          tracker.searchCompleted = true
+          tracker.searchResultCount = res.items.length
+          tracker.searchTop = res.items[0]?.photo?.fileName ?? null
+          return res
+        })()
+
+        const [thumbs, metaRes, semRes, searchRes] = await Promise.all([
+          thumbsPromise,
+          metaPromise,
+          semanticPromise,
+          searchPromise
         ])
+
         return {
           thumbStatuses: thumbs.map((t) => t.status),
-          metaStatus: metaJob.status,
-          indexStatus: indexJob.status,
-          searchTop: searchRes.items[0]?.photo?.fileName
+          metaStatus: metaRes.prog.status,
+          indexStatus: semRes.prog.status,
+          searchTop: searchRes.items[0]?.photo?.fileName ?? null,
+          tracker
         }
       })()`
     )
@@ -1164,32 +1270,85 @@ async function main() {
     const overlapSamples = []
     const overlapDeadline = Date.now() + 30000
     while (Date.now() < overlapDeadline) {
-      const [diag, metaProg, semProg] = await Promise.all([
-        evaluate(app.cdp, `window.api.getPhotosDiagnostics()`),
-        evaluate(app.cdp, `window.api.getPhotoMetadataProgress()`),
-        evaluate(app.cdp, `window.api.getSemanticIndexProgress()`)
-      ])
+      const poll = await evaluate(
+        app.cdp,
+        `(async () => {
+          const [diag, metaProg, semProg] = await Promise.all([
+            window.api.getPhotosDiagnostics(),
+            window.api.getPhotoMetadataProgress(),
+            window.api.getSemanticIndexProgress()
+          ])
+          return {
+            timestampMs: Date.now(),
+            diag,
+            metaProg,
+            semProg,
+            tracker: window.__stage6eOverlap ?? null
+          }
+        })()`
+      )
       overlapSamples.push({
-        diag,
-        metadataJobStatus: metaProg.status,
-        semanticJobStatus: semProg.status
+        timestampMs: poll.timestampMs,
+        thumbnailsInFlight: poll.tracker?.thumbnailsInFlight ?? 0,
+        metadataJobId: poll.metaProg?.jobId ?? poll.tracker?.metadataJobId ?? null,
+        metadataJobStatus: poll.metaProg?.status ?? 'idle',
+        semanticJobId: poll.semProg?.jobId ?? poll.tracker?.semanticJobId ?? null,
+        semanticJobStatus: poll.semProg?.status ?? 'idle',
+        diag: poll.diag
       })
       if (
-        (metaProg.status === 'completed' || metaProg.status === 'failed') &&
-        (semProg.status === 'completed' || semProg.status === 'failed')
+        poll.tracker?.thumbnailsCompleted &&
+        poll.tracker?.searchCompleted &&
+        (poll.metaProg.status === 'completed' || poll.metaProg.status === 'failed') &&
+        (poll.semProg.status === 'completed' || poll.semProg.status === 'failed')
       ) {
         break
       }
-      await sleep(30)
+      await sleep(25)
     }
 
     const overlapWorkRes = await overlapStartEval
     const diagAfterOverlap = await evaluate(app.cdp, `window.api.getPhotosDiagnostics()`)
+    const deltaTotalDecodes =
+      (diagAfterOverlap.totalDecodes ?? 0) - (diagBeforeOverlap.totalDecodes ?? 0)
+    const deltaCacheMisses =
+      (diagAfterOverlap.cacheMisses ?? 0) - (diagBeforeOverlap.cacheMisses ?? 0)
+    const t = overlapWorkRes.tracker
     const overlapSummary = assertConcurrentWorkloadOverlap({
       samples: overlapSamples,
-      deltaTotalDecodes:
-        (diagAfterOverlap.totalDecodes ?? 0) - (diagBeforeOverlap.totalDecodes ?? 0),
-      deltaCacheMisses: (diagAfterOverlap.cacheMisses ?? 0) - (diagBeforeOverlap.cacheMisses ?? 0)
+      deltaTotalDecodes,
+      deltaCacheMisses,
+      workflows: {
+        thumbnails: {
+          locationIds: overlapItems.map((p) => p.id),
+          startedAtMs: t.thumbnailsStartedAtMs,
+          endedAtMs: t.thumbnailsEndedAtMs,
+          completed: t.thumbnailsCompleted,
+          deltaTotalDecodes,
+          deltaCacheMisses
+        },
+        metadata: {
+          jobId: t.metadataJobId,
+          startedAtMs: t.metadataStartedAtMs,
+          endedAtMs: t.metadataEndedAtMs,
+          completed: t.metadataCompleted,
+          processedCount: t.metadataProcessed
+        },
+        semanticIndex: {
+          jobId: t.semanticJobId,
+          startedAtMs: t.semanticStartedAtMs,
+          endedAtMs: t.semanticEndedAtMs,
+          completed: t.semanticCompleted,
+          processedCount: t.semanticProcessed
+        },
+        search: {
+          queryText: overlapQueryText,
+          startedAtMs: t.searchStartedAtMs,
+          endedAtMs: t.searchEndedAtMs,
+          completed: t.searchCompleted,
+          resultCount: t.searchResultCount
+        }
+      }
     })
     if (
       overlapWorkRes.thumbStatuses.some((s) => s !== 'ready') ||
@@ -1197,8 +1356,33 @@ async function main() {
     ) {
       throw new Error(`Overlap workload results invalid: ${JSON.stringify(overlapWorkRes)}`)
     }
+    const qualifyingSample = overlapSamples.find(
+      (s) =>
+        s.timestampMs >= overlapSummary.sharedIntervalStartMs &&
+        s.timestampMs <= overlapSummary.sharedIntervalEndMs &&
+        s.thumbnailsInFlight >= 1 &&
+        s.metadataJobStatus === 'running' &&
+        s.semanticJobStatus === 'running' &&
+        (s.diag?.searchActiveCalls ?? 0) >= 1
+    )
+    console.log(
+      `[INFO] Overlap trace: sharedInterval=[${overlapSummary.sharedIntervalStartMs}, ${overlapSummary.sharedIntervalEndMs}] (${overlapSummary.sharedOverlapDurationMs}ms), qualifyingSamples=${overlapSummary.qualifyingSampleCount}/${overlapSummary.sampleCount}, metaJobId=${overlapSummary.metadataJobId}, semJobId=${overlapSummary.semanticJobId}, sample=${JSON.stringify(
+        {
+          timestampMs: qualifyingSample?.timestampMs,
+          thumbnailsInFlight: qualifyingSample?.thumbnailsInFlight,
+          metadataJobStatus: qualifyingSample?.metadataJobStatus,
+          semanticJobStatus: qualifyingSample?.semanticJobStatus,
+          activeWorkers: qualifyingSample?.diag?.activeWorkers,
+          liveWorkers: qualifyingSample?.diag?.liveWorkers,
+          activeMetadataTasks: qualifyingSample?.diag?.activeMetadataTasks,
+          activeSemanticTasks: qualifyingSample?.diag?.activeSemanticTasks,
+          searchActiveCalls: qualifyingSample?.diag?.searchActiveCalls,
+          totalAppLiveWorkers: qualifyingSample?.diag?.totalAppLiveWorkers
+        }
+      )}`
+    )
     pass(
-      `Proven simultaneous overlap across ${overlapSummary.sampleCount} polls (decodes=${overlapSummary.deltaTotalDecodes}, misses=${overlapSummary.deltaCacheMisses}, peakActiveMeta=${overlapSummary.peakActiveMetadataTasks}, peakActiveSem=${overlapSummary.peakActiveSemanticTasks}, peakSearchActive=${overlapSummary.peakSearchActiveCalls}, peakTotalAppLiveWorkers=${overlapSummary.peakTotalAppLiveWorkers}<=3)`
+      `Proven correlated four-workflow overlap (${overlapSummary.sharedOverlapDurationMs}ms shared interval, ${overlapSummary.qualifyingSampleCount}/${overlapSummary.sampleCount} qualifying polls, decodes=${overlapSummary.deltaTotalDecodes}, misses=${overlapSummary.deltaCacheMisses}, peakActiveMeta=${overlapSummary.peakActiveMetadataTasks}, peakActiveSem=${overlapSummary.peakActiveSemanticTasks}, peakSearchActive=${overlapSummary.peakSearchActiveCalls}, peakTotalAppLiveWorkers=${overlapSummary.peakTotalAppLiveWorkers}<=3)`
     )
 
     // Relaunch without artificial test delays for uncontaminated production UI, scale & restart timings
@@ -1323,7 +1507,7 @@ async function main() {
       })()`
     )
 
-    const totalRealPhotosCount = initialPhotoBaselines.size + 4
+    const totalRealPhotosCount = initialPhotoBaselines.size + overlapItems.length
     let totalCountText = ''
     for (let i = 0; i < 40; i++) {
       totalCountText = await evaluate(

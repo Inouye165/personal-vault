@@ -191,13 +191,50 @@ describe('Stage 6E semantic search verification acceptance bounds (fail-closed)'
     ).toThrow(/peakMountedCells out of bounds/)
   })
 
-  it('proves concurrent workload overlap and rejects sequential or cached-only runs', () => {
+  it('proves correlated four-workflow overlap and rejects sequential, pairwise-only, cached-only, or incomplete traces', () => {
+    const validWorkflows = {
+      thumbnails: {
+        locationIds: [101, 102, 103, 104],
+        startedAtMs: 1000,
+        endedAtMs: 1320,
+        completed: true,
+        deltaTotalDecodes: 4,
+        deltaCacheMisses: 4
+      },
+      metadata: {
+        jobId: 11,
+        startedAtMs: 1010,
+        endedAtMs: 1450,
+        completed: true,
+        processedCount: 4
+      },
+      semanticIndex: {
+        jobId: 22,
+        startedAtMs: 1020,
+        endedAtMs: 1520,
+        completed: true,
+        processedCount: 4
+      },
+      search: {
+        queryText: 'sunlit forest path',
+        startedAtMs: 1030,
+        endedAtMs: 1290,
+        completed: true,
+        resultCount: 12
+      }
+    }
+
     const valid = assertConcurrentWorkloadOverlap({
       deltaTotalDecodes: 4,
       deltaCacheMisses: 4,
+      workflows: validWorkflows,
       samples: [
         {
+          timestampMs: 1120,
+          thumbnailsInFlight: 2,
+          metadataJobId: 11,
           metadataJobStatus: 'running',
+          semanticJobId: 22,
           semanticJobStatus: 'running',
           diag: makeValidDiag({
             activeWorkers: 2,
@@ -209,7 +246,11 @@ describe('Stage 6E semantic search verification acceptance bounds (fail-closed)'
           })
         },
         {
+          timestampMs: 1540,
+          thumbnailsInFlight: 0,
+          metadataJobId: 11,
           metadataJobStatus: 'completed',
+          semanticJobId: 22,
           semanticJobStatus: 'completed',
           diag: makeValidDiag({
             activeWorkers: 0,
@@ -223,15 +264,177 @@ describe('Stage 6E semantic search verification acceptance bounds (fail-closed)'
       ]
     })
     expect(valid.peakTotalAppLiveWorkers).toBe(3)
+    expect(valid.sharedOverlapDurationMs).toBe(260)
+    expect(valid.qualifyingSampleCount).toBe(1)
+
+    // Rejects the exact 3-sample sequential sequence reproduced in review
+    expect(() =>
+      assertConcurrentWorkloadOverlap({
+        deltaTotalDecodes: 4,
+        deltaCacheMisses: 4,
+        workflows: {
+          thumbnails: {
+            locationIds: [101, 102, 103, 104],
+            startedAtMs: 1000,
+            endedAtMs: 1150,
+            completed: true,
+            deltaTotalDecodes: 4,
+            deltaCacheMisses: 4
+          },
+          semanticIndex: {
+            jobId: 22,
+            startedAtMs: 1100,
+            endedAtMs: 1250,
+            completed: true,
+            processedCount: 4
+          },
+          metadata: {
+            jobId: 11,
+            startedAtMs: 1260,
+            endedAtMs: 1400,
+            completed: true,
+            processedCount: 4
+          },
+          search: {
+            queryText: 'sunlit forest path',
+            startedAtMs: 1410,
+            endedAtMs: 1550,
+            completed: true,
+            resultCount: 12
+          }
+        },
+        samples: [
+          {
+            timestampMs: 1120,
+            thumbnailsInFlight: 1,
+            metadataJobId: 11,
+            metadataJobStatus: 'pending',
+            semanticJobId: 22,
+            semanticJobStatus: 'running',
+            diag: makeValidDiag({
+              activeSemanticTasks: 1,
+              activeMetadataTasks: 0,
+              searchActiveCalls: 0
+            })
+          },
+          {
+            timestampMs: 1300,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
+            metadataJobStatus: 'running',
+            semanticJobId: 22,
+            semanticJobStatus: 'completed',
+            diag: makeValidDiag({
+              activeSemanticTasks: 0,
+              activeMetadataTasks: 1,
+              searchActiveCalls: 0
+            })
+          },
+          {
+            timestampMs: 1450,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
+            metadataJobStatus: 'completed',
+            semanticJobId: 22,
+            semanticJobStatus: 'completed',
+            diag: makeValidDiag({
+              activeSemanticTasks: 0,
+              activeMetadataTasks: 0,
+              searchActiveCalls: 1,
+              activeWorkers: 1
+            })
+          }
+        ]
+      })
+    ).toThrow(/No shared four-workflow overlap interval/)
+
+    // Rejects pairwise overlaps with no shared four-workflow interval
+    expect(() =>
+      assertConcurrentWorkloadOverlap({
+        deltaTotalDecodes: 4,
+        deltaCacheMisses: 4,
+        workflows: {
+          thumbnails: {
+            locationIds: [101, 102, 103, 104],
+            startedAtMs: 1000,
+            endedAtMs: 1200,
+            completed: true,
+            deltaTotalDecodes: 4,
+            deltaCacheMisses: 4
+          },
+          semanticIndex: {
+            jobId: 22,
+            startedAtMs: 1050,
+            endedAtMs: 1300,
+            completed: true,
+            processedCount: 4
+          },
+          metadata: {
+            jobId: 11,
+            startedAtMs: 1250,
+            endedAtMs: 1500,
+            completed: true,
+            processedCount: 4
+          },
+          search: {
+            queryText: 'sunlit forest path',
+            startedAtMs: 1260,
+            endedAtMs: 1450,
+            completed: true,
+            resultCount: 12
+          }
+        },
+        samples: [
+          {
+            timestampMs: 1100,
+            thumbnailsInFlight: 2,
+            metadataJobId: 11,
+            metadataJobStatus: 'pending',
+            semanticJobId: 22,
+            semanticJobStatus: 'running',
+            diag: makeValidDiag({
+              activeSemanticTasks: 1,
+              activeMetadataTasks: 0,
+              searchActiveCalls: 0
+            })
+          },
+          {
+            timestampMs: 1350,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
+            metadataJobStatus: 'running',
+            semanticJobId: 22,
+            semanticJobStatus: 'completed',
+            diag: makeValidDiag({
+              activeSemanticTasks: 0,
+              activeMetadataTasks: 1,
+              searchActiveCalls: 1
+            })
+          }
+        ]
+      })
+    ).toThrow(/No shared four-workflow overlap interval/)
 
     // Rejects cached-only thumbnail reuse (0 cache misses)
     expect(() =>
       assertConcurrentWorkloadOverlap({
         deltaTotalDecodes: 1,
         deltaCacheMisses: 0,
+        workflows: {
+          ...validWorkflows,
+          thumbnails: {
+            ...validWorkflows.thumbnails,
+            deltaTotalDecodes: 1,
+            deltaCacheMisses: 0
+          }
+        },
         samples: [
           {
+            timestampMs: 1120,
+            thumbnailsInFlight: 2,
+            metadataJobId: 11,
             metadataJobStatus: 'running',
+            semanticJobId: 22,
             semanticJobStatus: 'running',
             diag: makeValidDiag({
               activeWorkers: 2,
@@ -243,7 +446,11 @@ describe('Stage 6E semantic search verification acceptance bounds (fail-closed)'
             })
           },
           {
+            timestampMs: 1540,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
             metadataJobStatus: 'completed',
+            semanticJobId: 22,
             semanticJobStatus: 'completed',
             diag: makeValidDiag({ searchActiveCalls: 0 })
           }
@@ -251,39 +458,86 @@ describe('Stage 6E semantic search verification acceptance bounds (fail-closed)'
       })
     ).toThrow(/actual uncached thumbnail decodes/)
 
-    // Rejects non-overlapping sequential execution
+    // Rejects missing lifecycle evidence
     expect(() =>
       assertConcurrentWorkloadOverlap({
-        deltaTotalDecodes: 2,
-        deltaCacheMisses: 2,
+        deltaTotalDecodes: 4,
+        deltaCacheMisses: 4,
+        workflows: {
+          ...validWorkflows,
+          metadata: {
+            jobId: 11,
+            startedAtMs: 1010,
+            endedAtMs: 1450,
+            completed: false,
+            processedCount: 4
+          }
+        },
         samples: [
           {
+            timestampMs: 1120,
+            thumbnailsInFlight: 2,
+            metadataJobId: 11,
             metadataJobStatus: 'running',
+            semanticJobId: 22,
             semanticJobStatus: 'running',
             diag: makeValidDiag({
               activeWorkers: 2,
               liveWorkers: 2,
               activeMetadataTasks: 1,
               activeSemanticTasks: 1,
-              searchActiveCalls: 0,
-              totalAppLiveWorkers: 2
+              searchActiveCalls: 1,
+              totalAppLiveWorkers: 3
             })
           },
           {
+            timestampMs: 1540,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
             metadataJobStatus: 'completed',
+            semanticJobId: 22,
             semanticJobStatus: 'completed',
-            diag: makeValidDiag({
-              activeWorkers: 0,
-              liveWorkers: 0,
-              activeMetadataTasks: 0,
-              activeSemanticTasks: 0,
-              searchActiveCalls: 1,
-              totalAppLiveWorkers: 1
-            })
+            diag: makeValidDiag({ searchActiveCalls: 0 })
           }
         ]
       })
-    ).toThrow(/Never observed simultaneous active search and active image-worker execution/)
+    ).toThrow(/metadata.*completed/i)
+
+    // Rejects overlapping timestamps when no polled sample observes all 4 in flight
+    expect(() =>
+      assertConcurrentWorkloadOverlap({
+        deltaTotalDecodes: 4,
+        deltaCacheMisses: 4,
+        workflows: validWorkflows,
+        samples: [
+          {
+            timestampMs: 1120,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
+            metadataJobStatus: 'running',
+            semanticJobId: 22,
+            semanticJobStatus: 'running',
+            diag: makeValidDiag({
+              activeWorkers: 2,
+              liveWorkers: 2,
+              activeMetadataTasks: 1,
+              activeSemanticTasks: 1,
+              searchActiveCalls: 1,
+              totalAppLiveWorkers: 3
+            })
+          },
+          {
+            timestampMs: 1540,
+            thumbnailsInFlight: 0,
+            metadataJobId: 11,
+            metadataJobStatus: 'completed',
+            semanticJobId: 22,
+            semanticJobStatus: 'completed',
+            diag: makeValidDiag({ searchActiveCalls: 0 })
+          }
+        ]
+      })
+    ).toThrow(/No polled sample observed all four workflows simultaneously in flight/)
   })
 
   it('proves 40-page LRU eviction and Page 0 reload while rejecting unevicted or wiped scores', () => {
