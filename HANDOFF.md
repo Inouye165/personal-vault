@@ -6,6 +6,7 @@
 - **Branch**: `feat/stage-6d-semantic-search` (created directly from verified Stage 6C documentation closeout `4318fd2`, descending from accepted Stage 6C implementation `c8a766f`, Stage 6B closeout `653c01e`, accepted Stage 6B implementation `0b0c814`, Stage 6A closeout `ad796b4`, accepted Stage 6A implementation `155d7bd`, and Stage 5 closeout `9b8faa7`)
 - **Base Commit**: `4318fd2`
 - **Accepted Stage 6C Commit**: `c8a766f` (`c8a766f284c7c88b2098651f890c6488d5feae80`)
+- **Accepted Stage 6D Commit**: `1f07012` (`1f07012ff8785344a1bc990b86d70889b9c5c943`; documentation closeout follows separately on `feat/stage-6d-semantic-search`)
 - **Stage 1 status**: Complete (independently accepted at `070e3cb`).
 - **Stage 2 status**: Complete (all substages 2A-2D independently accepted; Stage 2D accepted at `71e1af7`, documentation closeout committed at `eea7daa`).
 - **Stage 3 status**: Complete (independently accepted at `79bbf44`, documentation closeout committed at `cf91653`).
@@ -15,11 +16,13 @@
   - **Stage 6A (Offline Semantic Search Feasibility & Technical Spike)**: **Complete** (independently accepted at `155d7bd` on `feat/stage-6a-semantic-evaluation`, closeout at `ad796b4`).
   - **Stage 6B (Model Provisioning, Resumable Semantic Indexing & Persistent SQLite Index)**: **Complete** (independently accepted at `0b0c814` on `feat/stage-6b-semantic-index`, closeout at `653c01e`).
   - **Stage 6C (Photo Metadata Extraction & Fact/Inference-Separated SQL Filters)**: **Complete** (independently accepted at `c8a766f` on `feat/stage-6c-photo-metadata`, closeout at `4318fd2`).
-  - **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)**: **Awaiting independent review** on `feat/stage-6d-semantic-search`.
+  - **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)**: **Complete** (independently accepted at `1f07012` on `feat/stage-6d-semantic-search`).
   - **Substage 6E**: **Planned** (End-to-end packaged Electron verification for semantic search + metadata filters, plus Stage 6 closeout).
 - **Installed Electron Version**: `45.2.3` (`node` `v22.18.0`, `npm` `v10.9.3`)
-- **Evidence Source**: Full test suite (**968 passed across 79 test files**, `npm test` exit 0, including 50,001-candidate scale ranking test in `tests/main/semantic-search-ranking.test.ts` and deterministic scoring-snapshot regression test in `tests/main/semantic-search-coordinator.test.ts`), strict typecheck (`npm run typecheck` exit 0), ESLint (`npm run lint` exit 0), Prettier formatting check (`npm run format:check` exit 0), production bundle build (`npm run build` exit 0), unpacked desktop binary build (`npm run build:unpack` exit 0), real Electron natural-language photo search verification in built and unpacked modes (`npm run verify:semantic-search` 25/25 passed; `npm run verify:semantic-search:unpacked` 26/26 passed, including 10,200+ synthetic deep-pagination beyond offset 10,000, `corruptCount === 1`, and concurrent main heartbeat < 200 ms), plus re-run prior-stage regression and smoke checks (`verify:semantic-index` 10/10, `verify:semantic-index:unpacked` 11/11, `verify:metadata` 11/11, `verify:metadata:unpacked` 12/12, `smoke:built`, `smoke:unpacked` — all exiting with code 0).
-- **Constraints**: Never implement on `main`; no push, merge, or publication is authorized. Preserve source preservation invariance: source files strictly read-only. Source files and vault copies are never touched, altered, moved, or deleted.
+- **Evidence Source**:
+  - **Independent reviewer at `1f07012`**: Inspected final correction diff; independently reproduced the original scoring race after the fix (observation 1 retained score 1; subsequent observation 2 scored 0); passed snapshot regression covering heap and disk-backed ranking; passed `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build`, and `git diff --check`; confirmed `git ls-remote` matched `1f07012`; observed `npm test` at **963 passed, 1 skipped, 4 failed** (the 4 failures resulted from sandbox permissions preventing junction/symlink creation, not application defects; real-Electron reruns could not connect to the local debugging endpoint).
+  - **Implementation host at `1f07012`**: Full test suite (**968 passed across 79 test files**, `npm test` exit 0, including 50,001-candidate scale ranking test in `tests/main/semantic-search-ranking.test.ts` and deterministic scoring-snapshot regression test in `tests/main/semantic-search-coordinator.test.ts`), strict typecheck (`npm run typecheck` exit 0), ESLint (`npm run lint` exit 0), Prettier formatting check (`npm run format:check` exit 0), production bundle build (`npm run build` exit 0), unpacked desktop binary build (`npm run build:unpack` exit 0), real Electron natural-language photo search verification in built and unpacked modes (`npm run verify:semantic-search` 25/25 passed; `npm run verify:semantic-search:unpacked` 26/26 passed, including 10,200+ synthetic deep-pagination beyond offset 10,000, `corruptCount === 1`, and concurrent main heartbeat < 200 ms), plus re-run semantic-index (`verify:semantic-index` 10/10, `verify:semantic-index:unpacked` 11/11), metadata (`verify:metadata` 11/11, `verify:metadata:unpacked` 12/12), and smoke (`smoke:built`, `smoke:unpacked`) checks (all exiting with code 0; `verify:photo-review` 12/12 and `verify:photos` 19/19 also passed at `ca1a995`).
+- **Constraints**: Never implement on `main`; Ron authorized pushing `feat/stage-6d-semantic-search` to `origin/feat/stage-6d-semantic-search`. Merge and publication remain unauthorized. Preserve source preservation invariance: source files strictly read-only. Source files and vault copies are never touched, altered, moved, or deleted.
 
 ---
 
@@ -125,10 +128,10 @@ The following unrelated files remain intact, untracked, and untouched:
 
 ---
 
-## 4. Next Assignment (Following Stage 6D Review)
+## 4. Next Assignment (Following Stage 6D Closeout)
 
-- **Current Substage**: **Stage 6D — Natural-Language Photo Search IPC, Ranking, and Photos UI Integration** (**Awaiting independent review** on `feat/stage-6d-semantic-search`).
-- **Overall Stage 6 Status**: **In progress** (Substages 6A, 6B, and 6C Complete; Substage 6D Awaiting review; Substage 6E Planned).
+- **Completed Substage**: **Stage 6D — Natural-Language Photo Search IPC, Ranking, and Photos UI Integration** (**Complete**, independently accepted at `1f07012` on `feat/stage-6d-semantic-search`).
+- **Overall Stage 6 Status**: **In progress** (Substages 6A, 6B, 6C, and 6D Complete; Substage 6E Planned).
 - **Next Planned Substage**: **Stage 6E — End-to-End Packaged Verification & Stage 6 Closeout** (`Planned`).
 
 ---
@@ -142,4 +145,4 @@ Prior to entering Stage 7 (document extraction, classification, OCR, and unified
 3. **Preload & Schema Contracts**: Split `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain-scoped contract modules.
 4. **Photos UI Decomposition**: Split `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks.
 
-_Note: This is recorded for planning purposes only; no refactoring has been performed during Stage 6D corrections._
+_Note: This is recorded for planning purposes only; no refactoring was performed during Stage 6D._

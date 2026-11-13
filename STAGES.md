@@ -1,27 +1,27 @@
 # Personal Vault - Development and Public Release Tracker
 
-Updated: November 11, 2026.
+Updated: November 13, 2026.
 
 This tracker covers all development through public release. Detailed tasks belong in [TODO.md](TODO.md); verification evidence and limitations belong in [HANDOFF.md](HANDOFF.md).
 
 ## Current position
 
-Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substage 6B: Model provisioning, resumable semantic indexing, and persistent SQLite index is Complete, independently accepted at `0b0c814`; Substage 6C: EXIF technical metadata extraction and fact/inference-separated SQL filters is Complete, independently accepted at `c8a766f`; Substage 6D: Natural-language photo search IPC, ranking, and Photos UI integration is Awaiting review on `feat/stage-6d-semantic-search`; Substage 6E is Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
+Stages 1-5 are complete (independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`). Stage 6 is In progress (Substage 6A: Offline semantic search feasibility evaluation and technical spike is Complete, independently accepted at `155d7bd`; Substage 6B: Model provisioning, resumable semantic indexing, and persistent SQLite index is Complete, independently accepted at `0b0c814`; Substage 6C: EXIF technical metadata extraction and fact/inference-separated SQL filters is Complete, independently accepted at `c8a766f`; Substage 6D: Natural-language photo search IPC, ranking, and Photos UI integration is Complete, independently accepted at `1f07012` on `feat/stage-6d-semantic-search`; Substage 6E is Planned). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
 The project has **eight main stages**. Lettered substages divide the work; they do not add main stages.
 
-| Stage | Deliverable                                                    | Status      | Acceptance                                                               |
-| ----- | -------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------ |
-| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                                                |
-| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                                                |
-| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                                                |
-| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                                                |
-| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a`                                 |
-| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`; 6D Awaiting review; 6E Planned |
-| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                                                  |
-| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                                                  |
+| Stage | Deliverable                                                    | Status      | Acceptance                                                         |
+| ----- | -------------------------------------------------------------- | ----------- | ------------------------------------------------------------------ |
+| 1     | Engineering foundation and secure desktop shell                | Complete    | `070e3cb`                                                          |
+| 2     | Discovery, hashing, SQLite catalog, and resumable scan jobs    | Complete    | `71e1af7`                                                          |
+| 3     | Exact duplicate grouping and review                            | Complete    | `79bbf44`                                                          |
+| 4     | Verified vault copying and portable metadata                   | Complete    | `1a1fb69`                                                          |
+| 5     | Fast photo browsing, ratings, and similarity review            | Complete    | 5A `951fd25`, 5B `4071948`, 5C `543135a`                           |
+| 6     | Semantic photo search and metadata filters                     | In progress | 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`, 6D `1f07012`; 6E Planned |
+| 7     | Document extraction, classification, OCR, and unified search   | Planned     | Pending                                                            |
+| 8     | Export, recovery, release validation, beta, and public release | Planned     | Pending                                                            |
 
 Status meanings: **Planned** = future work; **Starting** = preparation underway; **In progress** = implementation underway or a parent stage partly complete; **Awaiting review** = submitted for independent review; **Complete** = independently accepted; **Blocked** = a named dependency prevents progress. A branch name alone does not establish implementation progress.
 
@@ -238,7 +238,7 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ### Stage 6D - Natural-language photo search IPC, ranking, and Photos UI integration
 
-**Awaiting independent review.**
+**Complete; independently accepted at `1f07012`.**
 
 - [x] **Offline Query Vector Generation & Dedicated Search Worker Lifecycle (`search-coordinator.ts`, `search-worker.ts`)**:
   - Dedicated background search worker (`search_worker.ts`) executing outside Electron main and renderer for tokenizer evaluation (`@huggingface/tokenizers@0.2.0`), ONNX text inference (`text_model_quantized.onnx`), candidate traversal, vector decoding, and ranking.
@@ -288,14 +288,14 @@ Before implementing Stage 7 document extraction and unified search, execute a de
 - **Preload Bridge & Schemas**: Modularize `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain contracts (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
 - **Photos UI**: Decompose `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks (toolbar, filter bar, search controls, virtual grid, provenance sidebar).
 
-Planning only; no production refactoring is performed during Stage 6D corrections.
+Planning only; no production refactoring was performed during Stage 6D.
 
 ### Stage 6 Checklist
 
 - [x] Evaluate local embedding models and resource/packaging requirements (6A Complete; independently accepted at `155d7bd`).
-- [x] Implement content-based photo search and a persistent search index (6B Complete; 6D Awaiting review; 6E Planned).
-- [x] Filter by available date, camera, lens, resolution, and file-type metadata (6C Complete; independently accepted at `c8a766f`; 6D-6E Planned).
-- [x] Preserve unknown dates/locations and separate inferences from recorded facts (6B and 6C Complete; 6D Awaiting review; 6E Planned).
+- [x] Implement content-based photo search and a persistent search index (6B Complete; 6D Complete at `1f07012`; 6E Planned).
+- [x] Filter by available date, camera, lens, resolution, and file-type metadata (6C Complete; independently accepted at `c8a766f`; 6D Complete at `1f07012`; 6E Planned).
+- [x] Preserve unknown dates/locations and separate inferences from recorded facts (6B, 6C, and 6D Complete; 6E Planned).
 
 Exit: users can find photos by content and available metadata using the supported offline workflow.
 
