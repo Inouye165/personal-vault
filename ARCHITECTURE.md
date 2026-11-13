@@ -544,9 +544,9 @@ src/
       - Clearing search restores ordinary browsing without reload or state corruption.
       - Photo cards display similarity percentage badges for machine inference matches.
 
-18. **Pre-Stage-7 Modularity Maintenance Plan (Planned)**:
-    - Prior to Stage 7 document extraction and unified search, a dedicated modularity refactoring pass will decouple oversized coordination surfaces:
-      - **Catalog Repositories**: Decompose `database.ts` into focused domain repositories (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`, `SearchRepository`) sharing a unified `CatalogDatabase` connection.
-      - **IPC Routing**: Split `src/main/index.ts` IPC registration into domain routers with encapsulated sender checks and channel dispatch.
-      - **Preload & Shared Contracts**: Group IPC schemas and preload APIs by domain (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
-      - **Photos UI Decomposition**: Break `PhotosPanel.tsx` into decoupled subcomponents and domain hooks (toolbar, filter panel, search bar, virtual grid, provenance sidebar).
+18. **Pre-Stage-7 Modularity Maintenance Plan (In progress — Slice 1 Complete / accepted at `2e6e54c`)**:
+    - Prior to Stage 7 document extraction and unified search, a bounded sequence of behavior-preserving modularity refactoring slices is decomposing oversized coordination surfaces:
+      - **Catalog Repositories — Slice 1: Semantic Photo Search (Complete; independently accepted at `2e6e54c`)**: Extracted `searchPhotosSemantic` into `SemanticSearchRepository` (`src/main/services/catalog/semantic-search-repository.ts`) and shared SQL filter construction into `buildPhotoFilterClauses` (`src/main/services/catalog/photo-filter-sql.ts`), preserving `CatalogDatabase` public API, connection lifecycle, and transaction ownership via delegation. Remaining catalog repository slices (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`) remain **Planned**.
+      - **IPC Routing (Planned)**: Split `src/main/index.ts` IPC registration into domain routers with encapsulated sender checks and channel dispatch.
+      - **Preload & Shared Contracts (Planned)**: Group IPC schemas and preload APIs by domain (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
+      - **Photos UI Decomposition (Planned)**: Break `PhotosPanel.tsx` into decoupled subcomponents and domain hooks (toolbar, filter panel, search bar, virtual grid, provenance sidebar).

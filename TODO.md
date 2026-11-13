@@ -222,14 +222,14 @@ Verification (Substage 6E): independent review accepted at `e565835` (`e565835a6
 
 ---
 
-## Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Awaiting independent review)
+## Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Complete / accepted at `2e6e54c`)
 
-Status: **In progress** (Executed before Stage 7 document extraction and unified search; Slice 1 **Awaiting independent review**, later slices **Planned**).
+Status: **In progress** (Executed before Stage 7 document extraction and unified search; Slice 1 **Complete — independently accepted at `2e6e54c`**, later slices **Planned**).
 
 Acceptance criteria: decompose oversized domain coordination surfaces into focused, single-responsibility modules without changing observable behavior:
 
-- [ ] **Catalog Repository** (Slice 1 **Awaiting independent review**, remaining repositories **Planned**):
-  - [x] Slice 1 (`refactor/pre-stage-7-catalog-search`, **Awaiting independent review**): Extract `searchPhotosSemantic` into `SemanticSearchRepository` (`src/main/services/catalog/semantic-search-repository.ts`) and shared SQL filter builder into `buildPhotoFilterClauses` (`src/main/services/catalog/photo-filter-sql.ts`), preserving `CatalogDatabase` public API, connection lifecycle, and transaction ownership.
+- [ ] **Catalog Repository** (Slice 1 **Complete — independently accepted at `2e6e54c`**, remaining repositories **Planned**):
+  - [x] Slice 1 (`refactor/pre-stage-7-catalog-search`, **Complete — independently accepted at `2e6e54c`**): Extract `searchPhotosSemantic` into `SemanticSearchRepository` (`src/main/services/catalog/semantic-search-repository.ts`) and shared SQL filter builder into `buildPhotoFilterClauses` (`src/main/services/catalog/photo-filter-sql.ts`), preserving `CatalogDatabase` public API, connection lifecycle, and transaction ownership.
   - [ ] Remaining catalog repositories (**Planned**): `SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`.
 - [ ] **IPC Handlers (Planned)**: Split monolithic IPC registration in `src/main/index.ts` and handler files into domain-scoped routers with isolated sender validation and channel subscriptions.
 - [ ] **Preload Bridge & Schemas (Planned)**: Modularize `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain contracts (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).

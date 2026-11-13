@@ -19,10 +19,11 @@
   - **Stage 6C (Photo Metadata Extraction & Fact/Inference-Separated SQL Filters)**: **Complete** (independently accepted at `c8a766f` on `feat/stage-6c-photo-metadata`, closeout at `4318fd2`).
   - **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)**: **Complete** (independently accepted at `1f07012` on `feat/stage-6d-semantic-search`, closeout at `1b552d3`).
   - **Substage 6E (End-to-End Packaged Electron Verification & Stage 6 Closeout)**: **Complete** (independently accepted at `e565835` on `feat/stage-6e-final-verification`).
-- **Pre-Stage-7 modularity maintenance**: **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Awaiting independent review**; remaining slices **Planned**).
+- **Pre-Stage-7 modularity maintenance**: **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Complete; independently accepted at `2e6e54c`**; remaining slices **Planned**).
 - **Stages 7–8**: **Planned**.
 - **Installed Electron Version**: `45.2.3` (`node` `v22.18.0`, `npm` `v10.9.3`)
 - **Evidence Source**:
+  - **Independent reviewer at `2e6e54c` (Pre-Stage-7 Maintenance Slice 1)**: Ran `npm test` (**975 passed, 1 skipped, 5 environment failures**: four symlink/junction permission errors and one localhost `EACCES`); ran focused search and metadata IPC tests (**14 passed**); passed `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build`, and `git diff --check`. Real-Electron verification timed out reaching the debugging endpoint (environment limitation, not an application defect); remote SHA could not be independently rechecked due to network failure.
   - **Independent reviewer at `e565835` (Stage 6E)**: Inspected the overlap-verification correction and instrumentation; confirmed the sequential false-pass reproduction is rejected; ran `npm test` (**975 passed, 1 skipped, 4 junction/symlink permission failures** in the reviewer sandbox environment, not application defects); passed `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build`, and `git diff --check`; verified `git ls-remote` matched `e565835`. Electron verification could not reach the local debugging endpoint in the reviewer environment (environment limitation, not an application defect).
   - **Independent reviewer at `1f07012` (Stage 6D)**: Inspected final correction diff; independently reproduced the original scoring race after the fix (observation 1 retained score 1; subsequent observation 2 scored 0); passed snapshot regression covering heap and disk-backed ranking; passed `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build`, and `git diff --check`; confirmed `git ls-remote` matched `1f07012`; observed `npm test` at **963 passed, 1 skipped, 4 failed** (the 4 failures resulted from sandbox permissions preventing junction/symlink creation, not application defects; real-Electron reruns could not connect to the local debugging endpoint).
   - **Implementation host at `e565835` (Stage 6E)**: `npm test` (**980 passed across 80 files**), `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build`, `npm run build:unpack`, `npm run verify:semantic-search` (**35/35 passed** in built mode), `npm run verify:semantic-search:unpacked` (**36/36 passed** in unpacked mode), correlated four-workflow overlap (`411 ms` / `13/56` polls built; `418 ms` / `13/51` polls unpacked), fail-closed performance bounds, deterministic 40-page LRU eviction/reload, and recorded prior-stage regressions (`verify:photos` 19/19, `verify:photos:unpacked` 19/19, `verify:metadata` 11/11, `verify:metadata:unpacked` 12/12, `verify:semantic-index` 10/10, `verify:semantic-index:unpacked` 11/11, `smoke:built`, `smoke:unpacked`, and `verify:photo-review`, `verify:similarity`, `verify:vault`, `verify:duplicates`, `verify:scan`, `verify:sqlite` earlier in Stage 6E).
@@ -190,16 +191,16 @@ The following unrelated files remain intact, untracked, and untouched:
 
 ---
 
-## 7. Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Awaiting independent review)
+## 7. Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Complete / accepted at `2e6e54c`)
 
 Prior to entering Stage 7 (document extraction, classification, OCR, and unified multi-modal search), modularity maintenance is planned as a bounded sequence of behavior-preserving slices:
 
-1. **Catalog Repositories — Slice 1: Semantic Photo Search (`refactor/pre-stage-7-catalog-search`, Awaiting independent review)**:
+1. **Catalog Repositories — Slice 1: Semantic Photo Search (`refactor/pre-stage-7-catalog-search`, Complete — independently accepted at `2e6e54c945bc1da33e23a7525057129aad4234df`)**:
    - **What moved and why**: Extracted semantic photo-search query/mapping responsibilities from `src/main/services/catalog/database.ts` into `src/main/services/catalog/semantic-search-repository.ts` (`SemanticSearchRepository`) and extracted the shared Stage 5B/6C SQL filter clause builder into `src/main/services/catalog/photo-filter-sql.ts` (`buildPhotoFilterClauses`), eliminating filter-SQL duplication between `CatalogDatabase.queryFileLocations` and `SemanticSearchRepository.searchPhotosSemantic` and reducing `database.ts` by ~430 lines.
    - **Remaining responsibilities of `CatalogDatabase`**: Owns the authoritative `DatabaseSync` connection, schema compatibility checks, migrations, transaction boundaries, `assertOpen()`/`close()`, `getFileLocationById` mapping, and all other domain persistence methods (sources, discovery/hash observations, scan jobs, duplicate reviews, vault imports, photo annotations/collections, perceptual similarity, technical metadata, semantic indexing) until their respective slices are executed.
    - **Connection and transaction ownership**: `CatalogDatabase` retains sole ownership of opening, migrating, and closing the `DatabaseSync` connection and managing transactions. `SemanticSearchRepository` does not open connections or manage transactions; it receives `getDb: () => this.getRawDb()` (which enforces `this.assertOpen()` and throws `DatabaseClosedError` when closed) and `getFileLocationById: (id) => this.getFileLocationById(id)`.
    - **Public API compatibility**: `CatalogDatabase.searchPhotosSemantic(input)` preserves its exact signature and behavior by delegating to `this.semanticSearchRepository.searchPhotosSemantic(input)`. Added a `DatabaseClosedError` regression test in `tests/main/catalog-semantic-search.test.ts` verifying closed-connection handling across the delegation boundary.
-   - **Verification results (all exited 0 after final code edits)**:
+   - **Implementation host verification (all exited 0 on `2e6e54c`)**:
      - `npm test`: **80 passed (80 files), 981 passed (981 tests)** (exit 0)
      - `npm run typecheck`: clean pass (exit 0)
      - `npm run lint`: clean pass (exit 0)
@@ -211,6 +212,11 @@ Prior to entering Stage 7 (document extraction, classification, OCR, and unified
      - `npm run verify:metadata`: **11/11 passed** (exit 0); `npm run verify:metadata:unpacked`: **12/12 passed** (exit 0)
      - `npm run verify:semantic-index`: **10/10 passed** (exit 0); `npm run verify:semantic-index:unpacked`: **11/11 passed** (exit 0)
      - `npm run smoke:built`: passed (exit 0); `npm run smoke:unpacked`: passed (exit 0)
+   - **Independent reviewer verification (at `2e6e54c`)**:
+     - `npm test`: **975 passed, 1 skipped, 5 environment failures** (four symlink/junction permission errors and one localhost `EACCES`).
+     - Focused search and metadata IPC tests: **14 passed**.
+     - `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build`, and `git diff --check`: passed.
+     - Real-Electron verification timed out reaching the debugging endpoint (environment limitation); remote SHA could not be independently rechecked due to network failure.
    - **Remaining catalog repository slices (Planned)**: `SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`.
 2. **IPC Handler Decomposition (Planned)**: Modularize `src/main/index.ts` and IPC dispatch into domain-specific routers with isolated sender validation.
 3. **Preload & Schema Contracts (Planned)**: Split `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain-scoped contract modules.
