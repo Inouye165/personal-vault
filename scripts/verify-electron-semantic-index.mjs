@@ -170,6 +170,8 @@ async function waitForApi(cdp, timeoutMs = 20000) {
   return false
 }
 
+const unpackedLaunchCwds = []
+
 async function launchApp(userDataDir, port, extraEnv = {}) {
   const commonArgs = [`--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`]
   const env = { ...process.env, ...extraEnv }
@@ -179,8 +181,10 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
+    const launchCwd = mkdtempSync(join(tmpdir(), 'pv-semindex-unpacked-cwd-'))
+    unpackedLaunchCwds.push(launchCwd)
     child = spawn(exePath, commonArgs, {
-      cwd: rootDir,
+      cwd: launchCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env
     })
@@ -1091,6 +1095,16 @@ async function main() {
       'Source preservation invariance confirmed: original bytes, byte sizes, creation timestamps (birthtimeMs), and modification timestamps (mtimeMs) unchanged'
     )
 
+    for (const dir of unpackedLaunchCwds) {
+      const leftover = existsSync(dir) ? readdirSync(dir) : []
+      if (leftover.length > 0) {
+        throw new Error(`Unpacked launch wrote into cwd (${dir}): ${leftover.join(', ')}`)
+      }
+    }
+    if (mode === 'unpacked') {
+      pass('Unpacked binary launched from neutral cwd with zero launch-directory writes')
+    }
+
     console.log(
       `\n>>> ALL ${passCount} REAL-ELECTRON STAGE 6B SEMANTIC INDEX CHECKS PASSED (${mode.toUpperCase()}) <<<\n`
     )
@@ -1107,6 +1121,13 @@ async function main() {
       httpServer.close()
     } catch {
       // ignore
+    }
+    for (const dir of unpackedLaunchCwds) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        // ignore
+      }
     }
     try {
       rmSync(tempBase, { recursive: true, force: true })

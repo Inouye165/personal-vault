@@ -7,11 +7,12 @@
  * file preservation.
  */
 
-import { mkdirSync, realpathSync, rmSync, statSync, existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { realpathSync, statSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks'
 import { ThumbnailDiskCache, readWebPDimensions } from './cache'
+import { resolveMainWorkerScriptPath } from '../worker-path'
 import {
   THUMBNAIL_LIMITS,
   type ThumbnailCoordinatorOptions,
@@ -142,69 +143,15 @@ interface ActiveWorkerEntry {
   hasLoadedSemanticModel: boolean
 }
 
-let cachedBundledWorkerPath: string | null = null
-
-function resolveWorkerScriptPath(customPath?: string): string {
-  if (customPath && existsSync(customPath)) {
-    return customPath
-  }
-  const isTest = process.env.VITEST !== undefined || process.env.NODE_ENV === 'test'
-  if (!isTest) {
-    const builtInSameDir = join(__dirname, 'thumbnail_worker.js')
-    if (existsSync(builtInSameDir)) {
-      return builtInSameDir
-    }
-    const projectBuilt = resolve(process.cwd(), 'out', 'main', 'thumbnail_worker.js')
-    if (existsSync(projectBuilt)) {
-      return projectBuilt
-    }
-  }
-
-  if (cachedBundledWorkerPath && existsSync(cachedBundledWorkerPath)) {
-    return cachedBundledWorkerPath
-  }
-
-  // Dynamic bundling for tests/dev to ensure live code execution without reading stale builds
-  const outMainDir = join(process.cwd(), 'out', 'main')
-  const tempWorker = isTest
-    ? join(outMainDir, `thumbnail_worker.vitest.${process.pid}.cjs`)
-    : join(outMainDir, 'thumbnail_worker.js')
-  if (!isTest && existsSync(tempWorker)) {
-    cachedBundledWorkerPath = tempWorker
-    return tempWorker
-  }
-  try {
-    mkdirSync(outMainDir, { recursive: true })
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const esbuild = require('esbuild')
-    const workerSource = resolve(__dirname, 'worker.ts')
-    const entry = existsSync(workerSource)
-      ? workerSource
-      : resolve(process.cwd(), 'src', 'main', 'services', 'thumbnails', 'worker.ts')
-
-    esbuild.buildSync({
-      entryPoints: [entry],
-      outfile: tempWorker,
-      bundle: true,
-      platform: 'node',
-      format: 'cjs',
-      external: ['sharp', 'electron', 'onnxruntime-node']
-    })
-    cachedBundledWorkerPath = tempWorker
-    if (isTest) {
-      process.once('exit', () => {
-        try {
-          rmSync(tempWorker, { force: true })
-        } catch {
-          // ignore
-        }
-      })
-    }
-    return tempWorker
-  } catch {
-    const projectBuilt = resolve(process.cwd(), 'out', 'main', 'thumbnail_worker.js')
-    return projectBuilt
-  }
+export function resolveWorkerScriptPath(customPath?: string): string {
+  const localWorkerSource = resolve(__dirname, 'worker.ts')
+  return resolveMainWorkerScriptPath({
+    workerFileName: 'thumbnail_worker.js',
+    sourceEntryPath: localWorkerSource,
+    customPath,
+    moduleDir: __dirname,
+    esbuildExternals: ['sharp', 'electron', 'onnxruntime-node']
+  })
 }
 
 function normalizeRequestParams(params: ThumbnailRequestParams): NormalizedThumbnailRequestParams {

@@ -7,11 +7,11 @@
  */
 
 import { Worker } from 'node:worker_threads'
-import { resolve, join } from 'node:path'
-import { existsSync, mkdirSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { CatalogDatabase } from '../catalog/database'
 import type { SemanticModelManager } from './model-manager'
 import { isObservationTimestampMatching } from './vector'
+import { resolveMainWorkerScriptPath } from '../worker-path'
 import type {
   SemanticSearchRequest,
   SemanticSearchResponse,
@@ -42,58 +42,14 @@ export class SearchOverloadError extends Error {
   }
 }
 
-let cachedBundledSearchWorkerPath: string | null = null
-
 export function resolveSearchWorkerScriptPath(customPath?: string): string {
-  if (customPath && existsSync(customPath)) {
-    return customPath
-  }
-  const isTest = process.env.VITEST !== undefined || process.env.NODE_ENV === 'test'
-  if (!isTest) {
-    const builtInSameDir = join(__dirname, 'search_worker.js')
-    if (existsSync(builtInSameDir)) {
-      return builtInSameDir
-    }
-    const projectBuilt = resolve(process.cwd(), 'out', 'main', 'search_worker.js')
-    if (existsSync(projectBuilt)) {
-      return projectBuilt
-    }
-  }
-
-  if (cachedBundledSearchWorkerPath && existsSync(cachedBundledSearchWorkerPath)) {
-    return cachedBundledSearchWorkerPath
-  }
-
-  const outMainDir = join(process.cwd(), 'out', 'main')
-  const tempWorker = isTest
-    ? join(outMainDir, `search_worker.vitest.${process.pid}.cjs`)
-    : join(outMainDir, 'search_worker.js')
-  if (!isTest && existsSync(tempWorker)) {
-    cachedBundledSearchWorkerPath = tempWorker
-    return tempWorker
-  }
-
-  try {
-    mkdirSync(outMainDir, { recursive: true })
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const esbuild = require('esbuild')
-    const workerSource = resolve(__dirname, 'search-worker.ts')
-    esbuild.buildSync({
-      entryPoints: [workerSource],
-      bundle: true,
-      platform: 'node',
-      target: 'node22',
-      format: 'cjs',
-      outfile: tempWorker,
-      external: ['electron', 'better-sqlite3', 'node:sqlite', 'onnxruntime-node', 'sharp'],
-      sourcemap: false
-    })
-    cachedBundledSearchWorkerPath = tempWorker
-    return tempWorker
-  } catch {
-    const fallbackOut = resolve(process.cwd(), 'out', 'main', 'search_worker.js')
-    return fallbackOut
-  }
+  return resolveMainWorkerScriptPath({
+    workerFileName: 'search_worker.js',
+    sourceEntryPath: resolve(__dirname, 'search-worker.ts'),
+    customPath,
+    moduleDir: __dirname,
+    esbuildExternals: ['electron', 'better-sqlite3', 'node:sqlite', 'onnxruntime-node', 'sharp']
+  })
 }
 
 export interface SemanticSearchCoordinatorOptions {

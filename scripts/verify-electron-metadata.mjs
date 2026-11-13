@@ -300,6 +300,8 @@ async function waitForApi(cdp, timeoutMs = 20000) {
   return false
 }
 
+const unpackedLaunchCwds = []
+
 async function launchApp(userDataDir, port, extraEnv = {}) {
   const commonArgs = [`--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`]
   const env = { ...process.env, ...extraEnv }
@@ -309,8 +311,10 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
+    const launchCwd = mkdtempSync(join(tmpdir(), 'pv-metadata-unpacked-cwd-'))
+    unpackedLaunchCwds.push(launchCwd)
     child = spawn(exePath, commonArgs, {
-      cwd: rootDir,
+      cwd: launchCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env
     })
@@ -1714,6 +1718,16 @@ async function main() {
       'Bitwise source preservation invariance confirmed across all 66 immutable source photos and 7 model files (SHA-256, byte size, creation time, and modification time unchanged)'
     )
 
+    for (const dir of unpackedLaunchCwds) {
+      const leftover = existsSync(dir) ? readdirSync(dir) : []
+      if (leftover.length > 0) {
+        throw new Error(`Unpacked launch wrote into cwd (${dir}): ${leftover.join(', ')}`)
+      }
+    }
+    if (mode === 'unpacked') {
+      pass('Unpacked binary launched from neutral cwd with zero launch-directory writes')
+    }
+
     console.log(
       `\n>>> ALL ${passCount} REAL-ELECTRON STAGE 6C METADATA & SQL FILTER CHECKS PASSED (${mode.toUpperCase()}) <<<\n`
     )
@@ -1727,6 +1741,13 @@ async function main() {
       killTree(currentApp.child)
     }
     await sleep(300)
+    for (const dir of unpackedLaunchCwds) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        // ignore
+      }
+    }
     try {
       rmSync(tempBase, { recursive: true, force: true })
     } catch {

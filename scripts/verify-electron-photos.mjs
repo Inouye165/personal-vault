@@ -169,6 +169,8 @@ async function waitForApi(cdp, timeoutMs = 15000) {
   return false
 }
 
+const unpackedLaunchCwds = []
+
 async function launchApp(userDataDir, port, extraEnv = {}) {
   const commonArgs = [`--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`]
   const env = { ...process.env, ...extraEnv }
@@ -178,8 +180,10 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
+    const launchCwd = mkdtempSync(join(tmpdir(), 'pv-photos-unpacked-cwd-'))
+    unpackedLaunchCwds.push(launchCwd)
     child = spawn(exePath, commonArgs, {
-      cwd: rootDir,
+      cwd: launchCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env
     })
@@ -816,6 +820,37 @@ async function main() {
       throw new Error('Photos virtual grid container failed to mount in DOM')
     }
 
+    // Verify selecting a supported photo renders both thumbnail and details preview image
+    let previewReady = false
+    for (let p = 0; p < 60; p++) {
+      await evaluate(
+        cdp,
+        `(() => {
+          if (!document.querySelector('.photo-card.selected')) {
+            const card = Array.from(
+              document.querySelectorAll('.photo-card:not(.photo-skeleton)')
+            ).find((c) => Boolean(c.querySelector('img.photo-thumbnail-img')));
+            if (card) card.click();
+          }
+        })()`
+      )
+      previewReady = await evaluate(
+        cdp,
+        `(() => {
+          const img = document.querySelector('.details-preview-img');
+          return Boolean(img && img.complete && img.naturalWidth > 0);
+        })()`
+      )
+      if (previewReady) break
+      await sleep(150)
+    }
+    if (!previewReady) {
+      throw new Error(
+        'Selected photo details preview image (.details-preview-img) failed to render'
+      )
+    }
+    pass('Selected photo details preview image rendered cleanly in DOM')
+
     // Continuous metrics collectors across the workload
     const ipcRoundTripLatencies = []
     let peakActiveWorkers = 0
@@ -1185,12 +1220,29 @@ async function main() {
     }
     pass('Source preservation invariance confirmed: original source bytes untouched')
 
+    for (const dir of unpackedLaunchCwds) {
+      const leftover = existsSync(dir) ? readdirSync(dir) : []
+      if (leftover.length > 0) {
+        throw new Error(`Unpacked launch wrote into cwd (${dir}): ${leftover.join(', ')}`)
+      }
+    }
+    if (mode === 'unpacked') {
+      pass('Unpacked binary launched from neutral cwd with zero launch-directory writes')
+    }
+
     console.log(
       `\n>>> ALL ${testCount} REAL-ELECTRON PHOTO VERIFICATION CHECKS PASSED (${mode}) <<<\n`
     )
   } finally {
     if (currentApp) {
       killTree(currentApp.child)
+    }
+    for (const dir of unpackedLaunchCwds) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        // ignore
+      }
     }
     try {
       rmSync(tempBase, { recursive: true, force: true })

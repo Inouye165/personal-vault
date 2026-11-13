@@ -13,7 +13,7 @@
  * Only the process tree started by this script is terminated.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -180,13 +180,14 @@ let activeChild = null
 
 async function main() {
   const userDataDir = mkdtempSync(join(tmpdir(), 'pv-smoke-'))
+  const launchCwd = mode === 'unpacked' ? mkdtempSync(join(tmpdir(), 'pv-smoke-cwd-')) : root
   const port = await freePort()
   const { command, argv } = launchCommand(port, userDataDir)
   const events = []
   let stderr = ''
   let stdout = ''
   const child = spawn(command, argv, {
-    cwd: root,
+    cwd: launchCwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   })
@@ -381,6 +382,13 @@ async function main() {
     cdp?.close()
     killTree(child)
     await Promise.race([exited, sleep(5000)])
+    if (mode === 'unpacked') {
+      const leftover = readdirSync(launchCwd)
+      if (leftover.length > 0) {
+        failures.push(`Unpacked launch wrote into cwd (${launchCwd}): ${leftover.join(', ')}`)
+      }
+      rmSync(launchCwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    }
     rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 
