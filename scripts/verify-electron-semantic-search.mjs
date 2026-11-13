@@ -638,19 +638,102 @@ async function main() {
     }
     pass('Long query (> 77 tokens) honestly truncated with truncated: true and tokenCount: 77')
 
-    // 12. Active Cancellation and Rapid Replacement
-    console.log('[Phase 10] Testing active cancellation and rapid replacement queries...')
+    // 12. Active Cancellation, Rapid Replacement, Concurrent Pages & Main Process Heartbeat
+    console.log(
+      '[Phase 10] Testing active cancellation, replacement, concurrent pages, and main process heartbeat...'
+    )
+
+    // 12a. Active cancellation
     const searchP1 = evaluate(
       app.cdp,
       `window.api.searchPhotosSemantic({ queryText: 'yellow sunrise daylight morning' })`
     )
     await evaluate(app.cdp, `window.api.cancelPhotosSemanticSearch()`)
-    const cancelRes = await searchP1
-    // Cancellation should cleanly return without crashing
-    if (typeof cancelRes !== 'object') {
-      throw new Error('Cancel call did not resolve safely')
+    let cancelError = null
+    try {
+      await searchP1
+    } catch (err) {
+      cancelError = err
     }
-    pass('Active search cancelled promptly without error')
+    if (!cancelError || !String(cancelError).toLowerCase().includes('cancel')) {
+      throw new Error(`Expected search to reject with cancellation error, got: ${cancelError}`)
+    }
+    pass('Active search was genuinely cancelled and rejected with SearchCancelledError')
+
+    // 12b. Rapid query replacement
+    const replaceP1 = evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'first replacement query' })`
+    )
+    const replaceP2 = evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'second replacement query' })`
+    )
+    let p1SupersededError = null
+    try {
+      await replaceP1
+    } catch (err) {
+      p1SupersededError = err
+    }
+    if (!p1SupersededError || !String(p1SupersededError).toLowerCase().includes('superseded')) {
+      throw new Error(
+        `Expected first query to reject with supersession error, got: ${p1SupersededError}`
+      )
+    }
+    const r2Success = await replaceP2
+    if (!r2Success || r2Success.modelStatus !== 'ready') {
+      throw new Error('Replacement query failed to resolve successfully')
+    }
+    pass('Rapid query replacement superseded older search and resolved newer search successfully')
+
+    // 12c. Concurrent page requests for the same query generation
+    const [page0Res, page1Res] = await Promise.all([
+      evaluate(
+        app.cdp,
+        `window.api.searchPhotosSemantic({ queryText: 'ocean horizon blue water', offset: 0, limit: 1 })`
+      ),
+      evaluate(
+        app.cdp,
+        `window.api.searchPhotosSemantic({ queryText: 'ocean horizon blue water', offset: 1, limit: 1 })`
+      )
+    ])
+    if (page0Res.offset !== 0 || page1Res.offset !== 1) {
+      throw new Error(
+        `Concurrent page requests offsets mismatch: ${page0Res.offset}, ${page1Res.offset}`
+      )
+    }
+    if (page0Res.items.length === 0 || page1Res.items.length === 0) {
+      throw new Error('Concurrent page requests failed to return expected items')
+    }
+    if (page0Res.items[0].photo.id === page1Res.items[0].photo.id) {
+      throw new Error('Concurrent pages returned identical photo instead of paginated results')
+    }
+    pass(
+      'Concurrent page requests for identical query generation executed and paginated successfully'
+    )
+
+    // 12d. Main-process responsiveness during active worker search (independent heartbeat)
+    const inFlightSearchPromise = evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'green forest trees leaves foliage canopy landscape' })`
+    )
+    // Send lightweight app info IPC while worker search is executing
+    const tHeartbeatStart = Date.now()
+    const appInfo = await evaluate(app.cdp, `window.api.getAppInfo()`)
+    const heartbeatLatency = Date.now() - tHeartbeatStart
+    await inFlightSearchPromise
+
+    if (!appInfo || !appInfo.version) {
+      throw new Error('Main process heartbeat failed to return app info')
+    }
+    if (heartbeatLatency > 200) {
+      throw new Error(
+        `Main process heartbeat delayed (${heartbeatLatency}ms) during worker search execution`
+      )
+    }
+    pass(
+      `Main process event loop remained responsive during search worker execution (heartbeat: ${heartbeatLatency}ms)`
+    )
 
     // 13. UI Navigation & Search Bar Controls
     console.log('[Phase 11] Verifying Photos view search bar DOM controls and state integration...')

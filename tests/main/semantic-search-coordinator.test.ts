@@ -5,7 +5,10 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { CatalogDatabase } from '../../src/main/services/catalog/database'
 import { SemanticModelManager } from '../../src/main/services/semantic/model-manager'
-import { SemanticSearchCoordinator } from '../../src/main/services/semantic/search-coordinator'
+import {
+  SemanticSearchCoordinator,
+  SearchCancelledError
+} from '../../src/main/services/semantic/search-coordinator'
 import {
   SEMANTIC_EMBEDDING_DIMENSIONS,
   SEMANTIC_MODEL_ID,
@@ -156,33 +159,76 @@ describe('Stage 6D: SemanticSearchCoordinator - Lifecycle, Races, Cancellation',
     expect(res.items).toEqual([])
   })
 
-  it('handles rapid replacement queries: earlier requests do not overwrite newer queries', async () => {
+  it('supports concurrent page requests for the same query generation without cancelling each other', async () => {
     await modelManager.importFromDirectory(REAL_MODEL_DIR)
 
-    // Add indexed photo
+    // Add 4 indexed photos with distinct vectors
+    for (let i = 1; i <= 4; i++) {
+      addPhoto(`photo_${i}.jpg`, makeVector(i))
+    }
+
+    // Fire page 0 and page 1 concurrently for the SAME query
+    const page0Promise = coordinator.search({
+      queryText: 'mountain landscape',
+      limit: 2,
+      offset: 0,
+      minScore: -1.0
+    })
+
+    const page1Promise = coordinator.search({
+      queryText: 'mountain landscape',
+      limit: 2,
+      offset: 2,
+      minScore: -1.0
+    })
+
+    const [page0, page1] = await Promise.all([page0Promise, page1Promise])
+
+    expect(page0.items.length).toBe(2)
+    expect(page1.items.length).toBe(2)
+    expect(page0.totalMatched).toBe(4)
+    expect(page1.totalMatched).toBe(4)
+    expect(page0.offset).toBe(0)
+    expect(page1.offset).toBe(2)
+    // Page 0 and Page 1 should contain non-overlapping items
+    const page0Ids = page0.items.map((i) => i.photo.id)
+    const page1Ids = page1.items.map((i) => i.photo.id)
+    for (const id of page0Ids) {
+      expect(page1Ids).not.toContain(id)
+    }
+  })
+
+  it('handles rapid query replacement: older query rejects with SearchCancelledError and newer query succeeds', async () => {
+    await modelManager.importFromDirectory(REAL_MODEL_DIR)
+
     const vec = makeVector(1)
     addPhoto('beach.jpg', vec)
 
-    // Fire two searches in rapid succession
+    // Fire first search
     const p1 = coordinator.search({
-      queryText: 'query one',
-      limit: 10,
-      offset: 0
-    })
-    const p2 = coordinator.search({
-      queryText: 'query two',
+      queryText: 'first query',
       limit: 10,
       offset: 0
     })
 
-    const [, r2] = await Promise.all([p1, p2])
-    // The later query must be ready and valid
+    // Immediately replace with second search (new query generation)
+    const p2 = coordinator.search({
+      queryText: 'second query',
+      limit: 10,
+      offset: 0
+    })
+
+    // First query must reject with SearchCancelledError (not return mask with items: [])
+    await expect(p1).rejects.toThrow(SearchCancelledError)
+
+    // Second query must resolve successfully
+    const r2 = await p2
     expect(r2.modelStatus).toBe('ready')
-    // Cancellation or completion of r1 is safe and does not corrupt r2
+    expect(r2.items.length).toBe(1)
     expect(r2.tokenCount).toBeGreaterThan(0)
   })
 
-  it('cancels active search promptly when cancel is requested', async () => {
+  it('cancels active search promptly and rejects with SearchCancelledError when cancel is requested', async () => {
     await modelManager.importFromDirectory(REAL_MODEL_DIR)
 
     const searchPromise = coordinator.search({
@@ -193,8 +239,29 @@ describe('Stage 6D: SemanticSearchCoordinator - Lifecycle, Races, Cancellation',
 
     coordinator.cancelActiveSearch()
 
-    const res = await searchPromise
-    // Either gracefully aborted or completed, but never throws uncaught error
-    expect(res).toBeDefined()
+    await expect(searchPromise).rejects.toThrow(SearchCancelledError)
+  })
+
+  it('maintains bounded worker lifecycle (<= 1 active search worker) and reports diagnostics', async () => {
+    await modelManager.importFromDirectory(REAL_MODEL_DIR)
+
+    const diagBefore = coordinator.getDiagnostics()
+    expect(diagBefore.liveWorkers).toBeLessThanOrEqual(1)
+
+    // Perform a search
+    await coordinator.search({
+      queryText: 'forest trees',
+      limit: 5,
+      offset: 0
+    })
+
+    const diagAfter = coordinator.getDiagnostics()
+    expect(diagAfter.liveWorkers).toBe(1)
+    expect(diagAfter.terminatingWorkers).toBe(0)
+
+    // Shutting down terminates worker
+    await coordinator.shutdown()
+    const diagShutdown = coordinator.getDiagnostics()
+    expect(diagShutdown.activeWorkers).toBe(0)
   })
 })

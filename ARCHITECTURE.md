@@ -505,20 +505,27 @@ src/
       - Semantic match scores are cosine similarities in $[-1.0, 1.0]$ derived from multimodal CLIP embeddings, rendered in UI as percentage match badges. They are machine inferences, not factual object labels, ground-truth classification, or probabilistic confidence.
       - Source preservation: source files are strictly read-only and 100% untouched.
       - Privacy & offline-first: text tokenization, text ONNX embedding inference, and cosine vector ranking run 100% locally on CPU without external network transmission.
-    - **Offline Text Tokenization & ONNX Embedding (`TextEmbedder`, `SearchWorker`)**:
-      - Uses pinned `@huggingface/tokenizers@0.2.0` with `tokenizer.json` and quantized ONNX text model (`text_model_quantized.onnx`) from the verified `<userData>/models/` directory.
+    - **Dedicated Search Worker Lifecycle & Bounds (`search_worker.ts`, `search-coordinator.ts`)**:
+      - Dedicated worker thread (`out/main/search_worker.js`) executing outside Electron main and renderer for tokenizer evaluation (`@huggingface/tokenizers@0.2.0`), ONNX text inference (`text_model_quantized.onnx`), candidate traversal, vector decoding, and ranking.
+      - Worker capacity: $\le 1$ active search worker, $\le 2$ image workers, and $\le 3$ total live workers across the application (counting terminating workers until process `'exit'`).
+      - Pre-load model directory integrity revalidation off main before loading; duplicate concurrent session loads prevented via in-flight promise caching (`getOrEmbedQuery`).
+      - Active worker cancellation, query supersession, execution timeouts (30,000 ms), shutdown cleanup, and capacity recovery.
       - Text input bound: $\le 500$ characters, trimmed, non-empty. Honestly truncates queries exceeding CLIP's 77-token context window with `truncated: true` and reported `tokenCount`.
-      - Text ONNX CPU session run in a dedicated worker thread (`src/main/services/semantic/search-worker.ts`) and managed by `SemanticSearchCoordinator`, keeping heavy inference and ranking off Electron main and renderer.
-    - **Filter-Before-Ranking & Bounded Cosine Ranking (`searchPhotosSemantic`, `ranking.ts`)**:
+      - Query vector validation at the ranking boundary (`validateQueryVector`): 512 dimensions, finite float32 values, non-zero L2 norm, unit normalization ($|\lVert v \rVert_2 - 1.0| \le 10^{-3}$).
+    - **Query Identity vs. Page-Request Generation (`search-coordinator.ts`, `usePhotos.ts`)**:
+      - Separates query identity (query text + filter parameters) from page requests. Multiple concurrent page requests for the same query generation (e.g. prefetching offset 0 and offset 50) proceed concurrently without cancelling each other.
+      - Truly older queries are superseded and rejected with `SearchCancelledError` (never masked as an empty `{ items: [] }` result).
+      - Renderer sequence safety: handles out-of-order pages, query replacement, clearing search, and filter changes without state corruption or stale cell overwrites.
+    - **Complete Embedding Compatibility & Corrupt Candidate Isolation (`database.ts`, `search-worker.ts`, `vector.ts`)**:
+      - Complete compatibility matching in candidate and coverage queries: `model_id`, `model_commit`, `model_manifest_sha256`, `preprocessing_version`, `vector_dimensions = 512`, `observed_byte_size = d.byte_size`, `(d.filesystem_mtime_ms IS NULL OR ABS(se.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)`, `(se.content_revision LIKE ('%:' || d.id || ':' || se.observed_byte_size || ':%:' || se.content_sha256)) AND (se.content_revision LIKE 'semrev:%' OR se.content_revision LIKE 'rev:%')`, and `(h.sha256 IS NULL OR h.sha256 = se.content_sha256)`.
+      - Revalidates photo identity and file location currency on Electron main upon hydrating worker candidate records.
+      - Corrupt candidate isolation (`tryDeserializeEmbeddingVector`): safely handles malformed lengths, NaN/Infinity, zero vectors, and non-unit vectors per candidate, skipping corrupt records without failing the search.
+    - **Filter-Before-Ranking & Bounded Cosine Ranking (`ranking.ts`, `database.ts`, `TopKMinHeap`)**:
       - Stage 5B (rating, flag, collection) and Stage 6C (date range, camera, lens, dimensions, file-type) filters are applied in SQLite BEFORE top-$K$ selection and cosine ranking. Non-matching photos are pruned at the database level and never occupy candidate heap space.
-      - Streaming candidate vector traversal via SQLite `stmt.iterate()` using a bounded min-heap ($O(K)$ auxiliary memory where $K = \text{offset} + \text{limit}$), avoiding whole-catalog vector index materialization in JavaScript memory. Tested and verified over >50,000 synthetic embeddings.
-      - Rejects non-finite (`NaN`/`Infinity`), wrong-dimension ($\ne 512$), non-unit-norm, or malformed-size vector blobs.
+      - Streaming candidate vector traversal via SQLite `stmt.iterate()` using a bounded `TopKMinHeap` ($O(\log K)$ sift operations, $O(1)$ rejection of non-competitive candidates) bounded by `MAX_RETAINED_K = 10,100` (`offset <= 10,000`, `limit <= 100`), avoiding whole-catalog vector index materialization in JavaScript memory. Tested and verified over >50,000 synthetic embeddings.
       - Single aggregate query computes coverage counters: `eligible_count`, `unindexed_count`, and `stale_count`.
       - Stable deterministic ordering: `score DESC, fileLocationId ASC`.
-      - Bounded pagination: `limit <= 100`.
-    - **Lifecycle, Cancellation & Rapid Replacement (`SemanticSearchCoordinator`)**:
-      - Earlier search requests are cancelled or superseded upon receiving a newer request; monotonic search request tokens ensure earlier delayed responses never overwrite newer queries.
-      - Explicit cancellation (`semantic:search-cancel`) aborts active worker search/inference promptly.
+      - Bounded pagination: `limit <= 100`, `offset <= 10,000`. Renderer `searchScores` map evicted alongside LRU page cache records.
     - **Typed IPC & Sandboxed Preload**:
       - Narrow IPC channels: `SEMANTIC_SEARCH_PHOTOS` (`'semantic:search-photos'`), `SEMANTIC_SEARCH_CANCEL` (`'semantic:search-cancel'`).
       - Bidirectional Zod schema validation (`SemanticSearchRequestSchema`, `SemanticSearchResponseSchema`, `SemanticSearchCancelRequestSchema`, `SemanticSearchCancelResponseSchema`). Sender validation enforced.
@@ -528,3 +535,10 @@ src/
       - Seamlessly combines with rating, flag, collection, and Stage 6C technical metadata filters.
       - Clearing search restores ordinary browsing without reload or state corruption.
       - Photo cards display similarity percentage badges for machine inference matches.
+
+18. **Pre-Stage-7 Modularity Maintenance Plan (Planned)**:
+    - Prior to Stage 7 document extraction and unified search, a dedicated modularity refactoring pass will decouple oversized coordination surfaces:
+      - **Catalog Repositories**: Decompose `database.ts` into focused domain repositories (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`, `SearchRepository`) sharing a unified `CatalogDatabase` connection.
+      - **IPC Routing**: Split `src/main/index.ts` IPC registration into domain routers with encapsulated sender checks and channel dispatch.
+      - **Preload & Shared Contracts**: Group IPC schemas and preload APIs by domain (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
+      - **Photos UI Decomposition**: Break `PhotosPanel.tsx` into decoupled subcomponents and domain hooks (toolbar, filter panel, search bar, virtual grid, provenance sidebar).

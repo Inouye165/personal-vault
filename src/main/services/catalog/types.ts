@@ -912,6 +912,8 @@ export interface SemanticSearchCatalogInput {
   readonly offset?: number
   readonly minScore?: number
   readonly modelId?: string
+  readonly modelCommit?: string
+  readonly modelManifestSha256?: string
   readonly preprocessingVersion?: string
 }
 

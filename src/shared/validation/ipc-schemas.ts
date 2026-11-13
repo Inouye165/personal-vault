@@ -1276,7 +1276,7 @@ export type GetPhotoMetadataFacetsResponse = z.infer<typeof GetPhotoMetadataFace
 export const SemanticSearchRequestSchema = z
   .object({
     queryText: z.string().min(1).max(500),
-    offset: z.number().int().nonnegative().default(0),
+    offset: z.number().int().nonnegative().max(10_000).default(0),
     limit: z.number().int().positive().max(100).default(50),
     minScore: z.number().min(-1.0).max(1.0).default(0.0),
     ratingFilter: PhotoRatingFilterSchema.default('all'),

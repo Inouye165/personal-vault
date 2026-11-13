@@ -300,4 +300,125 @@ describe('Stage 6D: Catalog Semantic Search - Filter-Before-Ranking & Invalidati
     expect(result.unindexedCount).toBe(1)
     expect(result.totalMatched).toBe(1)
   })
+
+  describe('Full embedding compatibility and corrupt candidate isolation', () => {
+    it('excludes photos with modified model_commit and truthfully increments staleCount', async () => {
+      const queryVector = makeVector(21)
+      const photoId = createTestPhotoWithEmbedding({
+        fileName: 'commit_test.jpg',
+        vector: queryVector,
+        isCurrentEmbedding: true
+      })
+
+      // Invalidate model_commit directly in SQLite
+      catalog
+        .getRawDb()
+        .prepare(
+          'UPDATE photo_semantic_embeddings SET model_commit = ? WHERE file_location_id = ?;'
+        )
+        .run('incompatible_commit_hash', photoId)
+
+      const res = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {}
+      })
+
+      expect(res.eligibleCount).toBe(0)
+      expect(res.staleCount).toBe(1)
+      expect(res.unindexedCount).toBe(0)
+      expect(res.items).toEqual([])
+      expect(res.totalMatched).toBe(0)
+    })
+
+    it('excludes photos with modified model_manifest_sha256 and truthfully increments staleCount', async () => {
+      const queryVector = makeVector(22)
+      const photoId = createTestPhotoWithEmbedding({
+        fileName: 'manifest_test.jpg',
+        vector: queryVector,
+        isCurrentEmbedding: true
+      })
+
+      // Invalidate manifest hash
+      catalog
+        .getRawDb()
+        .prepare(
+          'UPDATE photo_semantic_embeddings SET model_manifest_sha256 = ? WHERE file_location_id = ?;'
+        )
+        .run('b'.repeat(64), photoId)
+
+      const res = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {}
+      })
+
+      expect(res.eligibleCount).toBe(0)
+      expect(res.staleCount).toBe(1)
+      expect(res.unindexedCount).toBe(0)
+      expect(res.items).toEqual([])
+      expect(res.totalMatched).toBe(0)
+    })
+
+    it('excludes photos with modified content_revision and truthfully increments staleCount', async () => {
+      const queryVector = makeVector(23)
+      const photoId = createTestPhotoWithEmbedding({
+        fileName: 'revision_test.jpg',
+        vector: queryVector,
+        isCurrentEmbedding: true
+      })
+
+      // Invalidate content_revision
+      catalog
+        .getRawDb()
+        .prepare(
+          'UPDATE photo_semantic_embeddings SET content_revision = ? WHERE file_location_id = ?;'
+        )
+        .run('outdated_corrupted_revision_string', photoId)
+
+      const res = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {}
+      })
+
+      expect(res.eligibleCount).toBe(0)
+      expect(res.staleCount).toBe(1)
+      expect(res.unindexedCount).toBe(0)
+      expect(res.items).toEqual([])
+      expect(res.totalMatched).toBe(0)
+    })
+
+    it('isolates corrupt candidate blobs and preserves valid search results', async () => {
+      const queryVector = makeVector(24)
+      const validPhotoId = createTestPhotoWithEmbedding({
+        fileName: 'valid_candidate.jpg',
+        vector: queryVector,
+        isCurrentEmbedding: true
+      })
+      const corruptPhotoId = createTestPhotoWithEmbedding({
+        fileName: 'corrupt_candidate.jpg',
+        vector: queryVector,
+        isCurrentEmbedding: true
+      })
+
+      // Corrupt candidate's blob with NaN values
+      const nanRaw = new Float32Array(512)
+      nanRaw.fill(Number.NaN)
+      const nanBlob = Buffer.from(nanRaw.buffer)
+      catalog
+        .getRawDb()
+        .prepare(
+          'UPDATE photo_semantic_embeddings SET embedding_blob = ? WHERE file_location_id = ?;'
+        )
+        .run(nanBlob, corruptPhotoId)
+
+      const res = await catalog.searchPhotosSemantic({
+        queryVector,
+        filters: {}
+      })
+
+      // Search succeeds, valid photo is returned, corrupt candidate is skipped
+      expect(res.items.length).toBe(1)
+      expect(res.items[0]?.photo.id).toBe(validPhotoId)
+      expect(res.items[0]?.score).toBeCloseTo(1.0, 5)
+    })
+  })
 })

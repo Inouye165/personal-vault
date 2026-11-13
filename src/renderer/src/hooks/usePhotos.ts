@@ -281,15 +281,9 @@ export function usePhotos(): UsePhotosResult {
             queryLatencyMs: res.queryLatencyMs
           })
 
-          setSearchScores((prev) => {
-            const next = new Map(pageIndex === 0 ? [] : prev)
-            for (const item of res.items) {
-              next.set(item.photo.id, item.score)
-            }
-            return next
-          })
-
           const pageItems = res.items.map((i) => i.photo)
+          const evictedPhotoIds: number[] = []
+
           setPages((prev) => {
             const next = new Map(prev)
             next.set(pageIndex, pageItems)
@@ -302,11 +296,28 @@ export function usePhotos(): UsePhotosResult {
             while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
               const evictedPage = lru.shift()
               if (evictedPage !== undefined) {
+                const itemsToEvict = next.get(evictedPage)
+                if (itemsToEvict) {
+                  for (const p of itemsToEvict) {
+                    evictedPhotoIds.push(p.id)
+                  }
+                }
                 next.delete(evictedPage)
               }
             }
             pageLruRef.current = lru
 
+            return next
+          })
+
+          setSearchScores((prev) => {
+            const next = new Map(pageIndex === 0 ? [] : prev)
+            for (const item of res.items) {
+              next.set(item.photo.id, item.score)
+            }
+            for (const id of evictedPhotoIds) {
+              next.delete(id)
+            }
             return next
           })
         } else {
@@ -370,7 +381,14 @@ export function usePhotos(): UsePhotosResult {
       } catch (err: unknown) {
         if (generationRef.current === currentGeneration) {
           inFlightPagesRef.current.delete(pageIndex)
-          setError(err instanceof Error ? err.message : 'Failed to load photographs')
+          const msg = err instanceof Error ? err.message : 'Failed to load photographs'
+          if (
+            !msg.includes('SEARCH_CANCELLED') &&
+            !msg.includes('cancelled') &&
+            !msg.includes('superseded')
+          ) {
+            setError(msg)
+          }
         }
       } finally {
         if (generationRef.current === currentGeneration && pageIndex === 0) {

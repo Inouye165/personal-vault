@@ -99,8 +99,20 @@ import type {
   SemanticSearchCatalogResult,
   SemanticSearchCatalogResultItem
 } from './types'
-import { validateAndSerializeEmbeddingVector, deserializeEmbeddingVector } from '../semantic/vector'
-import { SEMANTIC_MODEL_ID, SEMANTIC_PREPROCESSING_VERSION } from '../semantic/manifest'
+import {
+  validateAndSerializeEmbeddingVector,
+  deserializeEmbeddingVector,
+  tryDeserializeEmbeddingVector
+} from '../semantic/vector'
+import {
+  SEMANTIC_MODEL_ID,
+  SEMANTIC_MODEL_COMMIT,
+  SEMANTIC_PREPROCESSING_VERSION,
+  REQUIRED_MODEL_ARTIFACTS,
+  computeManifestSha256
+} from '../semantic/manifest'
+
+const DEFAULT_SEMANTIC_MANIFEST_SHA256 = computeManifestSha256(REQUIRED_MODEL_ARTIFACTS)
 import { rankCandidates } from '../semantic/ranking'
 import { METADATA_LIMITS, METADATA_PARSER_RECIPE_VERSION } from '../metadata/types'
 import type { AnnotationJournal } from '../annotations/journal'
@@ -397,11 +409,21 @@ export function isObservationTimestampMatching(
 export class CatalogDatabase {
   private readonly db: DatabaseSync
   private journal?: AnnotationJournal
+  public readonly catalogPath: string
   private closed = false
 
-  private constructor(db: DatabaseSync, journal?: AnnotationJournal) {
+  private constructor(
+    db: DatabaseSync,
+    journal?: AnnotationJournal,
+    catalogPath: string = ':memory:'
+  ) {
     this.db = db
     this.journal = journal
+    this.catalogPath = catalogPath
+  }
+
+  public getCatalogPath(): string {
+    return this.catalogPath
   }
 
   public getRawDb(): DatabaseSync {
@@ -438,7 +460,7 @@ export class CatalogDatabase {
         runMigrations(rawDb)
       }
 
-      const instance = new CatalogDatabase(rawDb, options.journal)
+      const instance = new CatalogDatabase(rawDb, options.journal, options.catalogPath)
       if (instance.journal && !options.readOnly) {
         instance.reconcileJournalWithDatabase()
       }
@@ -1370,6 +1392,10 @@ export class CatalogDatabase {
     const offset = Math.max(0, input.offset ?? 0)
     const minScore = input.minScore ?? 0.0
     const modelId = input.modelId ?? SEMANTIC_MODEL_ID
+    const modelCommit = input.modelCommit ?? SEMANTIC_MODEL_COMMIT
+    const modelManifestSha256 = (
+      input.modelManifestSha256 ?? DEFAULT_SEMANTIC_MANIFEST_SHA256
+    ).toLowerCase()
     const preprocessingVersion = input.preprocessingVersion ?? SEMANTIC_PREPROCESSING_VERSION
 
     const filterOptions: QueryFileLocationsOptions = {
@@ -1382,6 +1408,28 @@ export class CatalogDatabase {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const allFilterParams = [...joinParams, ...params]
 
+    const semanticEmbeddingOnClause = `
+      se.file_location_id = f.id
+       AND se.discovery_observation_id = d.id
+       AND se.is_current = 1
+       AND se.model_id = ?
+       AND se.model_commit = ?
+       AND se.model_manifest_sha256 = ?
+       AND se.preprocessing_version = ?
+       AND se.embedding_dimensions = 512
+       AND se.observed_byte_size = d.byte_size
+       AND (d.filesystem_mtime_ms IS NULL OR ABS(se.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)
+       AND (se.content_revision LIKE ('%:' || d.id || ':' || se.observed_byte_size || ':%:' || se.content_sha256))
+       AND (se.content_revision LIKE 'semrev:%' OR se.content_revision LIKE 'rev:%')
+       AND (h.sha256 IS NULL OR h.sha256 = se.content_sha256)
+    `
+    const semanticModelQueryParams: SQLInputValue[] = [
+      modelId,
+      modelCommit,
+      modelManifestSha256,
+      preprocessingVersion
+    ]
+
     // 1. Single aggregate count query for coverage and candidates under current filters
     const countSql = `
       SELECT
@@ -1389,25 +1437,21 @@ export class CatalogDatabase {
         COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS eligible_count,
         COALESCE(SUM(CASE
           WHEN se.id IS NULL AND EXISTS (
-            SELECT 1 FROM photo_semantic_embeddings h
-            WHERE h.file_location_id = f.id
+            SELECT 1 FROM photo_semantic_embeddings h_se
+            WHERE h_se.file_location_id = f.id
           ) THEN 1 ELSE 0 END
         ), 0) AS stale_count,
         COALESCE(SUM(CASE
           WHEN se.id IS NULL AND NOT EXISTS (
-            SELECT 1 FROM photo_semantic_embeddings h
-            WHERE h.file_location_id = f.id
+            SELECT 1 FROM photo_semantic_embeddings h_se
+            WHERE h_se.file_location_id = f.id
           ) THEN 1 ELSE 0 END
         ), 0) AS unindexed_count
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-      LEFT JOIN photo_semantic_embeddings se
-        ON se.file_location_id = f.id
-       AND se.discovery_observation_id = d.id
-       AND se.is_current = 1
-       AND se.model_id = ?
-       AND se.preprocessing_version = ?
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN photo_semantic_embeddings se
+        ON ${semanticEmbeddingOnClause}
       LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
         AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       ${techMetaJoinClause}
@@ -1415,7 +1459,7 @@ export class CatalogDatabase {
     `
     const countRow = this.db
       .prepare(countSql)
-      .get(modelId, preprocessingVersion, ...allFilterParams) as Record<string, unknown> | undefined
+      .get(...semanticModelQueryParams, ...allFilterParams) as Record<string, unknown> | undefined
 
     const eligibleCount = Number(countRow?.eligible_count ?? 0)
     const staleCount = Number(countRow?.stale_count ?? 0)
@@ -1442,13 +1486,9 @@ export class CatalogDatabase {
         se.embedding_blob
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-      JOIN photo_semantic_embeddings se
-        ON se.file_location_id = f.id
-       AND se.discovery_observation_id = d.id
-       AND se.is_current = 1
-       AND se.model_id = ?
-       AND se.preprocessing_version = ?
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      JOIN photo_semantic_embeddings se
+        ON ${semanticEmbeddingOnClause}
       LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
         AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       ${techMetaJoinClause}
@@ -1457,14 +1497,17 @@ export class CatalogDatabase {
     `
 
     const stmt = this.db.prepare(candidatesSql)
-    const cursor = stmt.iterate(modelId, preprocessingVersion, ...allFilterParams) as Iterable<{
+    const cursor = stmt.iterate(...semanticModelQueryParams, ...allFilterParams) as Iterable<{
       file_location_id: number
       embedding_blob: Buffer | Uint8Array
     }>
 
     function* streamCandidates() {
       for (const row of cursor) {
-        const vector = deserializeEmbeddingVector(row.embedding_blob)
+        const vector = tryDeserializeEmbeddingVector(row.embedding_blob)
+        if (!vector) {
+          continue
+        }
         yield {
           fileLocationId: row.file_location_id,
           vector
@@ -1484,7 +1527,7 @@ export class CatalogDatabase {
       const match = rankResult.items[i]
       if (match) {
         const photo = this.getFileLocationById(match.fileLocationId)
-        if (photo) {
+        if (photo && photo.category === 'photo' && photo.discoveryObservationId > 0) {
           items.push({
             photo,
             score: match.score,

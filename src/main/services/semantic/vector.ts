@@ -79,24 +79,73 @@ export function validateAndSerializeEmbeddingVector(
   return Buffer.from(buf)
 }
 
-export function deserializeEmbeddingVector(
-  blob: Buffer | Uint8Array,
+export function tryDeserializeEmbeddingVector(
+  blob: unknown,
   expectedDimensions = SEMANTIC_EMBEDDING_DIMENSIONS
-): Float32Array {
+): Float32Array | null {
+  if (!blob || !(blob instanceof Uint8Array || Buffer.isBuffer(blob))) {
+    return null
+  }
+
   const expectedByteLength =
     expectedDimensions === SEMANTIC_EMBEDDING_DIMENSIONS
       ? SEMANTIC_EMBEDDING_BYTE_LENGTH
       : expectedDimensions * 4
 
   if (blob.byteLength !== expectedByteLength) {
-    throw new Error(
-      `Corrupt embedding blob byte length: expected ${expectedByteLength} bytes, got ${blob.byteLength}`
-    )
+    return null
   }
 
-  const copy = new Uint8Array(blob.byteLength)
-  copy.set(new Uint8Array(blob.buffer, blob.byteOffset, blob.byteLength))
-  const vector = new Float32Array(copy.buffer, copy.byteOffset, expectedDimensions)
-  validateEmbeddingVector(vector, expectedDimensions)
-  return vector
+  try {
+    const copy = new Uint8Array(blob.byteLength)
+    copy.set(new Uint8Array(blob.buffer, blob.byteOffset, blob.byteLength))
+    const vector = new Float32Array(copy.buffer, copy.byteOffset, expectedDimensions)
+
+    let sumSq = 0
+    for (let i = 0; i < expectedDimensions; i++) {
+      const v = vector[i]
+      if (v === undefined || !Number.isFinite(v)) {
+        return null
+      }
+      sumSq += v * v
+    }
+
+    const norm = Math.sqrt(sumSq)
+    if (!Number.isFinite(norm) || norm <= 1e-12) {
+      return null
+    }
+
+    if (Math.abs(norm - 1.0) > NORM_TOLERANCE) {
+      return null
+    }
+
+    return vector
+  } catch {
+    return null
+  }
+}
+
+export function deserializeEmbeddingVector(
+  blob: Buffer | Uint8Array,
+  expectedDimensions = SEMANTIC_EMBEDDING_DIMENSIONS
+): Float32Array {
+  const result = tryDeserializeEmbeddingVector(blob, expectedDimensions)
+  if (!result) {
+    const expectedByteLength =
+      expectedDimensions === SEMANTIC_EMBEDDING_DIMENSIONS
+        ? SEMANTIC_EMBEDDING_BYTE_LENGTH
+        : expectedDimensions * 4
+    if (blob.byteLength !== expectedByteLength) {
+      throw new Error(
+        `Corrupt embedding blob byte length: expected ${expectedByteLength} bytes, got ${blob.byteLength}`
+      )
+    }
+    // Re-run validate to produce exact error for tests expecting throw
+    const copy = new Uint8Array(blob.byteLength)
+    copy.set(new Uint8Array(blob.buffer, blob.byteOffset, blob.byteLength))
+    const vector = new Float32Array(copy.buffer, copy.byteOffset, expectedDimensions)
+    validateEmbeddingVector(vector, expectedDimensions)
+    return vector
+  }
+  return result
 }

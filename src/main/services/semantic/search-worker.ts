@@ -10,12 +10,86 @@
 
 import { parentPort } from 'node:worker_threads'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
+import { createHash } from 'node:crypto'
+import { existsSync, lstatSync } from 'node:fs'
+import { open } from 'node:fs/promises'
+import { join } from 'node:path'
 import { embedQueryText, releaseTextSession } from './text-embedder'
 import { rankCandidates, type RankCandidate } from './ranking'
-import { deserializeEmbeddingVector } from './vector'
-import { SEMANTIC_MODEL_ID, SEMANTIC_PREPROCESSING_VERSION } from './manifest'
+import { tryDeserializeEmbeddingVector } from './vector'
+import {
+  SEMANTIC_MODEL_ID,
+  SEMANTIC_MODEL_COMMIT,
+  SEMANTIC_PREPROCESSING_VERSION,
+  REQUIRED_MODEL_ARTIFACTS,
+  computeManifestSha256
+} from './manifest'
 import type { QueryFileLocationsOptions } from '../catalog/types'
 import { METADATA_PARSER_RECIPE_VERSION } from '../metadata/types'
+
+const DEFAULT_SEMANTIC_MANIFEST_SHA256 = computeManifestSha256(REQUIRED_MODEL_ARTIFACTS)
+
+let lastVerifiedDir: string | null = null
+let lastVerifiedMtime: number = 0
+
+async function verifyModelDirIntegrity(modelDir: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    if (!existsSync(modelDir)) {
+      return { ok: false, error: 'Model directory does not exist' }
+    }
+    const stat = lstatSync(modelDir)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      return { ok: false, error: 'Model directory is not a canonical directory' }
+    }
+
+    if (lastVerifiedDir === modelDir && stat.mtimeMs === lastVerifiedMtime) {
+      return { ok: true }
+    }
+
+    for (const spec of REQUIRED_MODEL_ARTIFACTS) {
+      const filePath = join(modelDir, spec.relativePath)
+      if (!existsSync(filePath)) {
+        return { ok: false, error: `Missing required model artifact: ${spec.relativePath}` }
+      }
+      const fileStat = lstatSync(filePath)
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        return { ok: false, error: `Artifact is not a regular file: ${spec.relativePath}` }
+      }
+      if (fileStat.size !== spec.byteSize) {
+        return {
+          ok: false,
+          error: `Artifact byte size mismatch for ${spec.relativePath}: expected ${spec.byteSize}, got ${fileStat.size}`
+        }
+      }
+      const handle = await open(filePath, 'r')
+      try {
+        const hash = createHash('sha256')
+        const buf = Buffer.allocUnsafe(64 * 1024)
+        let totalRead = 0
+        while (true) {
+          const { bytesRead } = await handle.read(buf, 0, buf.length, totalRead)
+          if (bytesRead <= 0) break
+          hash.update(buf.subarray(0, bytesRead))
+          totalRead += bytesRead
+        }
+        if (totalRead !== spec.byteSize) {
+          return { ok: false, error: `Artifact read size mismatch for ${spec.relativePath}` }
+        }
+        if (hash.digest('hex').toLowerCase() !== spec.sha256.toLowerCase()) {
+          return { ok: false, error: `Artifact digest mismatch for ${spec.relativePath}` }
+        }
+      } finally {
+        await handle.close()
+      }
+    }
+
+    lastVerifiedDir = modelDir
+    lastVerifiedMtime = stat.mtimeMs
+    return { ok: true }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
 
 function buildPhotoFilterClauses(options: QueryFileLocationsOptions): {
   conditions: string[]
@@ -243,7 +317,7 @@ if (parentPort) {
     'message',
     async (message: {
       id: number
-      action: 'embed_text' | 'search_database' | 'release_session'
+      action: 'embed_text' | 'search_database' | 'search' | 'release_session' | 'ping'
       modelDir?: string
       queryText?: string
       catalogPath?: string
@@ -253,9 +327,16 @@ if (parentPort) {
       offset?: number
       minScore?: number
       modelId?: string
+      modelCommit?: string
+      modelManifestSha256?: string
       preprocessingVersion?: string
     }) => {
       try {
+        if (message.action === 'ping') {
+          parentPort!.postMessage({ id: message.id, status: 'pong' })
+          return
+        }
+
         if (message.action === 'release_session') {
           await releaseTextSession()
           parentPort!.postMessage({ id: message.id, status: 'released' })
@@ -263,35 +344,101 @@ if (parentPort) {
         }
 
         if (message.action === 'embed_text') {
+          if (!message.modelDir) {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'error',
+              code: 'INVALID_PARAMS',
+              message: 'Missing modelDir'
+            })
+            return
+          }
+          const verify = await verifyModelDirIntegrity(message.modelDir)
+          if (!verify.ok) {
+            parentPort!.postMessage({
+              id: message.id,
+              status: 'error',
+              code: 'MODEL_CORRUPT',
+              message: verify.error ?? 'Model integrity verification failed'
+            })
+            return
+          }
           const res = await embedQueryText({
-            modelDir: message.modelDir!,
-            queryText: message.queryText!
+            modelDir: message.modelDir,
+            queryText: message.queryText ?? ''
           })
           parentPort!.postMessage({ id: message.id, ...res })
           return
         }
 
-        if (message.action === 'search_database') {
+        if (message.action === 'search_database' || message.action === 'search') {
           const t0 = performance.now()
           const {
             catalogPath,
-            queryVector,
             filters = {},
             limit = 50,
             offset = 0,
             minScore = 0.0,
             modelId = SEMANTIC_MODEL_ID,
+            modelCommit = SEMANTIC_MODEL_COMMIT,
+            modelManifestSha256 = DEFAULT_SEMANTIC_MANIFEST_SHA256,
             preprocessingVersion = SEMANTIC_PREPROCESSING_VERSION
           } = message
 
-          if (!catalogPath || !queryVector) {
+          if (!catalogPath) {
             parentPort!.postMessage({
               id: message.id,
               status: 'error',
               code: 'INVALID_PARAMS',
-              message: 'Missing catalogPath or queryVector'
+              message: 'Missing catalogPath'
             })
             return
+          }
+
+          let activeVector = message.queryVector
+          let truncated = false
+          let tokenCount = 0
+
+          if (!activeVector) {
+            if (!message.modelDir || message.queryText === undefined) {
+              parentPort!.postMessage({
+                id: message.id,
+                status: 'error',
+                code: 'INVALID_PARAMS',
+                message: 'Must provide either queryVector or modelDir and queryText'
+              })
+              return
+            }
+
+            const verify = await verifyModelDirIntegrity(message.modelDir)
+            if (!verify.ok) {
+              parentPort!.postMessage({
+                id: message.id,
+                status: 'error',
+                code: 'MODEL_CORRUPT',
+                message: verify.error ?? 'Model integrity verification failed'
+              })
+              return
+            }
+
+            const embedRes = await embedQueryText({
+              modelDir: message.modelDir,
+              queryText: message.queryText
+            })
+
+            if (embedRes.status !== 'ready') {
+              parentPort!.postMessage({
+                id: message.id,
+                status: 'error',
+                code: embedRes.code ?? 'EMBED_FAILED',
+                message: embedRes.message ?? 'Failed to embed query text'
+              })
+              return
+            }
+
+            activeVector = embedRes.vector
+            truncated = embedRes.truncated
+            tokenCount = embedRes.tokenCount
           }
 
           const db = new DatabaseSync(catalogPath, { readOnly: true })
@@ -306,6 +453,28 @@ if (parentPort) {
             const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
             const allFilterParams = [...joinParams, ...params]
 
+            const semanticEmbeddingOnClause = `
+              se.file_location_id = f.id
+               AND se.discovery_observation_id = d.id
+               AND se.is_current = 1
+               AND se.model_id = ?
+               AND se.model_commit = ?
+               AND se.model_manifest_sha256 = ?
+               AND se.preprocessing_version = ?
+               AND se.embedding_dimensions = 512
+               AND se.observed_byte_size = d.byte_size
+               AND (d.filesystem_mtime_ms IS NULL OR ABS(se.observed_mtime_ms - d.filesystem_mtime_ms) <= 1)
+               AND (se.content_revision LIKE ('%:' || d.id || ':' || se.observed_byte_size || ':%:' || se.content_sha256))
+               AND (se.content_revision LIKE 'semrev:%' OR se.content_revision LIKE 'rev:%')
+               AND (h.sha256 IS NULL OR h.sha256 = se.content_sha256)
+            `
+            const semanticModelQueryParams: SQLInputValue[] = [
+              modelId,
+              modelCommit,
+              modelManifestSha256.toLowerCase(),
+              preprocessingVersion
+            ]
+
             // 1. Coverage & candidate count query
             const countSql = `
               SELECT
@@ -313,25 +482,21 @@ if (parentPort) {
                 COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS eligible_count,
                 COALESCE(SUM(CASE
                   WHEN se.id IS NULL AND EXISTS (
-                    SELECT 1 FROM photo_semantic_embeddings h
-                    WHERE h.file_location_id = f.id
+                    SELECT 1 FROM photo_semantic_embeddings h_se
+                    WHERE h_se.file_location_id = f.id
                   ) THEN 1 ELSE 0 END
                 ), 0) AS stale_count,
                 COALESCE(SUM(CASE
                   WHEN se.id IS NULL AND NOT EXISTS (
-                    SELECT 1 FROM photo_semantic_embeddings h
-                    WHERE h.file_location_id = f.id
+                    SELECT 1 FROM photo_semantic_embeddings h_se
+                    WHERE h_se.file_location_id = f.id
                   ) THEN 1 ELSE 0 END
                 ), 0) AS unindexed_count
               FROM file_locations f
               JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-              LEFT JOIN photo_semantic_embeddings se
-                ON se.file_location_id = f.id
-               AND se.discovery_observation_id = d.id
-               AND se.is_current = 1
-               AND se.model_id = ?
-               AND se.preprocessing_version = ?
               LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+              LEFT JOIN photo_semantic_embeddings se
+                ON ${semanticEmbeddingOnClause}
               LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
                 AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
               ${techMetaJoinClause}
@@ -339,7 +504,7 @@ if (parentPort) {
             `
             const countRow = db
               .prepare(countSql)
-              .get(modelId, preprocessingVersion, ...allFilterParams) as
+              .get(...semanticModelQueryParams, ...allFilterParams) as
               Record<string, unknown> | undefined
 
             const eligibleCount = Number(countRow?.eligible_count ?? 0)
@@ -350,7 +515,7 @@ if (parentPort) {
               parentPort!.postMessage({
                 id: message.id,
                 status: 'ready',
-                items: [],
+                rankedItems: [],
                 totalMatched: 0,
                 eligibleCount: 0,
                 unindexedCount,
@@ -358,7 +523,10 @@ if (parentPort) {
                 offset,
                 limit,
                 hasMore: false,
-                queryLatencyMs: performance.now() - t0
+                queryLatencyMs: performance.now() - t0,
+                queryVector: activeVector,
+                truncated,
+                tokenCount
               })
               return
             }
@@ -370,13 +538,9 @@ if (parentPort) {
                 se.embedding_blob
               FROM file_locations f
               JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-              JOIN photo_semantic_embeddings se
-                ON se.file_location_id = f.id
-               AND se.discovery_observation_id = d.id
-               AND se.is_current = 1
-               AND se.model_id = ?
-               AND se.preprocessing_version = ?
               LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+              JOIN photo_semantic_embeddings se
+                ON ${semanticEmbeddingOnClause}
               LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
                 AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
               ${techMetaJoinClause}
@@ -385,8 +549,7 @@ if (parentPort) {
             `
             const stmt = db.prepare(candidatesSql)
             const cursor = stmt.iterate(
-              modelId,
-              preprocessingVersion,
+              ...semanticModelQueryParams,
               ...allFilterParams
             ) as Iterable<{
               file_location_id: number
@@ -395,7 +558,10 @@ if (parentPort) {
 
             function* streamCandidates(): Generator<RankCandidate> {
               for (const row of cursor) {
-                const vector = deserializeEmbeddingVector(row.embedding_blob)
+                const vector = tryDeserializeEmbeddingVector(row.embedding_blob)
+                if (!vector) {
+                  continue
+                }
                 yield {
                   fileLocationId: row.file_location_id,
                   vector
@@ -403,7 +569,7 @@ if (parentPort) {
               }
             }
 
-            const rankResult = rankCandidates(queryVector, streamCandidates(), {
+            const rankResult = rankCandidates(activeVector, streamCandidates(), {
               limit,
               offset,
               minScore
@@ -420,7 +586,10 @@ if (parentPort) {
               offset,
               limit,
               hasMore: rankResult.hasMore,
-              queryLatencyMs: performance.now() - t0
+              queryLatencyMs: performance.now() - t0,
+              queryVector: activeVector,
+              truncated,
+              tokenCount
             })
           } finally {
             db.close()

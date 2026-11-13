@@ -3,10 +3,15 @@ import { describe, expect, it } from 'vitest'
 import {
   cosineSimilarity,
   rankCandidates,
+  validateQueryVector,
   type RankCandidate
 } from '../../src/main/services/semantic/ranking'
 import { SEMANTIC_EMBEDDING_DIMENSIONS } from '../../src/main/services/semantic/manifest'
-import { normalizeEmbeddingVector } from '../../src/main/services/semantic/vector'
+import {
+  normalizeEmbeddingVector,
+  tryDeserializeEmbeddingVector,
+  validateAndSerializeEmbeddingVector
+} from '../../src/main/services/semantic/vector'
 
 describe('Stage 6D: Semantic Search Ranking & Bounded Heap', () => {
   function makeUnitVector(seed: number, dims = SEMANTIC_EMBEDDING_DIMENSIONS): Float32Array {
@@ -200,6 +205,119 @@ describe('Stage 6D: Semantic Search Ranking & Bounded Heap', () => {
       expect(elapsedMs).toBeLessThan(3000) // fast linear scan
       // Memory delta must not exceed 20 MiB for ranking 50,001 streamed candidates
       expect(memDelta).toBeLessThan(20 * 1024 * 1024)
+    })
+  })
+
+  describe('validateQueryVector at ranking boundary', () => {
+    it('validates and accepts finite unit-normalized Float32Array', () => {
+      const validVec = makeUnitVector(42)
+      const res = validateQueryVector(validVec)
+      expect(res).toBe(validVec)
+    })
+
+    it('rejects non-Float32Array', () => {
+      expect(() => validateQueryVector([1, 2, 3])).toThrow(TypeError)
+      expect(() => validateQueryVector(null)).toThrow(TypeError)
+    })
+
+    it('rejects dimension mismatch', () => {
+      const shortVec = new Float32Array(256)
+      expect(() => validateQueryVector(shortVec)).toThrow(RangeError)
+    })
+
+    it('rejects non-finite values (NaN / Infinity)', () => {
+      const nanVec = makeUnitVector(1)
+      nanVec[10] = Number.NaN
+      expect(() => validateQueryVector(nanVec)).toThrow(RangeError)
+
+      const infVec = makeUnitVector(1)
+      infVec[20] = Number.POSITIVE_INFINITY
+      expect(() => validateQueryVector(infVec)).toThrow(RangeError)
+    })
+
+    it('rejects zero or unnormalized vectors', () => {
+      const zeroVec = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+      expect(() => validateQueryVector(zeroVec)).toThrow(RangeError)
+
+      const unnormVec = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+      unnormVec[0] = 5.0 // norm is 5.0, not 1.0
+      expect(() => validateQueryVector(unnormVec)).toThrow(RangeError)
+    })
+  })
+
+  describe('tryDeserializeEmbeddingVector per-candidate corruption isolation', () => {
+    it('successfully deserializes valid serialized vector', () => {
+      const validVec = makeUnitVector(77)
+      const blob = validateAndSerializeEmbeddingVector(validVec)
+      const parsed = tryDeserializeEmbeddingVector(blob)
+      expect(parsed).not.toBeNull()
+      expect(parsed!.length).toBe(SEMANTIC_EMBEDDING_DIMENSIONS)
+      expect(cosineSimilarity(validVec, parsed!)).toBeCloseTo(1.0, 5)
+    })
+
+    it('returns null on invalid input types or wrong byte lengths without throwing', () => {
+      expect(tryDeserializeEmbeddingVector(null)).toBeNull()
+      expect(tryDeserializeEmbeddingVector(undefined)).toBeNull()
+      expect(tryDeserializeEmbeddingVector('not-a-buffer')).toBeNull()
+      expect(tryDeserializeEmbeddingVector(Buffer.alloc(100))).toBeNull() // wrong size (expected 2048)
+      expect(tryDeserializeEmbeddingVector(Buffer.alloc(4096))).toBeNull()
+    })
+
+    it('returns null for blobs containing NaN or Infinity', () => {
+      const raw = makeUnitVector(1)
+      raw[5] = Number.NaN
+      const blob = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
+      expect(tryDeserializeEmbeddingVector(blob)).toBeNull()
+
+      const rawInf = makeUnitVector(1)
+      rawInf[5] = Number.POSITIVE_INFINITY
+      const blobInf = Buffer.from(rawInf.buffer, rawInf.byteOffset, rawInf.byteLength)
+      expect(tryDeserializeEmbeddingVector(blobInf)).toBeNull()
+    })
+
+    it('returns null for zero vectors or non-unit norm blobs', () => {
+      const zeroBlob = Buffer.alloc(SEMANTIC_EMBEDDING_DIMENSIONS * 4) // all zeroes
+      expect(tryDeserializeEmbeddingVector(zeroBlob)).toBeNull()
+
+      const unnorm = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+      unnorm[0] = 2.5
+      const unnormBlob = Buffer.from(unnorm.buffer, unnorm.byteOffset, unnorm.byteLength)
+      expect(tryDeserializeEmbeddingVector(unnormBlob)).toBeNull()
+    })
+  })
+
+  describe('Deep jumps and deep pagination bounds in ranking', () => {
+    it('enforces maximum offset bound (offset <= 10,000)', () => {
+      const queryVec = makeUnitVector(1)
+      expect(() => rankCandidates(queryVec, [], { offset: 10_001, limit: 50 })).toThrow(RangeError)
+    })
+
+    it('ranks correctly at maximum supported deep offset (offset = 10,000, limit = 50)', () => {
+      const queryVec = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+      queryVec[0] = 1.0
+      // Stream 10,100 candidates with known scores
+      function* generateCandidates(): Generator<RankCandidate> {
+        for (let i = 1; i <= 10_100; i++) {
+          const v = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+          // Scores strictly decreasing from 1.0 down
+          const score = 1.0 - (i - 1) * 0.00005
+          v[0] = score
+          v[1] = Math.sqrt(Math.max(0, 1 - score * score))
+          yield { fileLocationId: i, vector: v }
+        }
+      }
+
+      const result = rankCandidates(queryVec, generateCandidates(), {
+        offset: 10_000,
+        limit: 50
+      })
+
+      expect(result.totalMatched).toBe(10_100)
+      expect(result.items.length).toBe(50)
+      // Items should start at fileLocationId 10,001 through 10,050
+      expect(result.items[0]?.fileLocationId).toBe(10_001)
+      expect(result.items[49]?.fileLocationId).toBe(10_050)
+      expect(result.hasMore).toBe(true)
     })
   })
 })
