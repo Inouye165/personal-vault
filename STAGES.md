@@ -173,15 +173,15 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 
 ## Stage 6 - Semantic photo search
 
-**In progress; Substages 6A, 6B, and 6C Complete (independently accepted at `155d7bd`, `0b0c814`, and `c8a766f`); Substages 6D-6E Planned.**
+**In progress; Substages 6A, 6B, 6C, and 6D Complete (independently accepted at `155d7bd`, `0b0c814`, `c8a766f`, and `1f07012`); Substage 6E Planned.**
 
-| Substage | Deliverable                                                                  | Status      | Submission reference                | Acceptance reference |
-| -------- | ---------------------------------------------------------------------------- | ----------- | ----------------------------------- | -------------------- |
-| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete    | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
-| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete    | `feat/stage-6b-semantic-index`      | `0b0c814`            |
-| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Complete    | `feat/stage-6c-photo-metadata`      | `c8a766f`            |
-| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | In progress | `feat/stage-6d-semantic-search`     | Pending              |
-| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned     | Pending                             | Pending              |
+| Substage | Deliverable                                                                  | Status   | Submission reference                | Acceptance reference |
+| -------- | ---------------------------------------------------------------------------- | -------- | ----------------------------------- | -------------------- |
+| 6A       | Offline semantic search feasibility evaluation and real-Electron spike       | Complete | `feat/stage-6a-semantic-evaluation` | `155d7bd`            |
+| 6B       | Model provisioning, resumable semantic indexing, and persistent SQLite index | Complete | `feat/stage-6b-semantic-index`      | `0b0c814`            |
+| 6C       | EXIF technical metadata extraction and fact/inference-separated SQL filters  | Complete | `feat/stage-6c-photo-metadata`      | `c8a766f`            |
+| 6D       | Natural-language photo search IPC, ranking, and Photos UI integration        | Complete | `feat/stage-6d-semantic-search`     | `1f07012`            |
+| 6E       | End-to-end packaged Electron verification and Stage 6 closeout               | Planned  | Pending                             | Pending              |
 
 ### Stage 6A - Offline semantic search feasibility evaluation and real-Electron spike
 
