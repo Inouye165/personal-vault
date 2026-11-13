@@ -10,7 +10,10 @@ import {
   SearchCancelledError,
   SearchOverloadError
 } from '../../src/main/services/semantic/search-coordinator'
-import { verifyModelDirIntegrity } from '../../src/main/services/semantic/search-worker'
+import {
+  verifyModelDirIntegrity,
+  executeSearchDatabaseQuery
+} from '../../src/main/services/semantic/search-worker'
 import {
   SEMANTIC_EMBEDDING_DIMENSIONS,
   SEMANTIC_MODEL_ID,
@@ -468,6 +471,182 @@ describe('Stage 6D: SemanticSearchCoordinator - Lifecycle, Races, Cancellation',
       expect(res.staleCount).toBe(1)
     } finally {
       await customCoord.shutdown()
+    }
+  })
+
+  it('binds scored identity to the exact ranking snapshot across concurrent writer updates in both heap and disk-backed deep paging', async () => {
+    const { DatabaseSync } = await import('node:sqlite')
+    const manifestSha = computeManifestSha256(REQUIRED_MODEL_ARTIFACTS)
+
+    const v1 = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+    v1[0] = 1.0 // exact match with query [1, 0, ...] -> score 1.0
+    const v2 = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+    v2[1] = 1.0 // orthogonal to query [1, 0, ...] -> score 0.0
+
+    const hash1 = 'a'.repeat(64)
+    const hash2 = 'b'.repeat(64)
+    const photoId = addPhoto('raced_photo.jpg', v1)
+    const obs1 = catalog.getFileLocationById(photoId)!
+    const obs1Id = obs1.discoveryObservationId
+
+    const queryVec = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+    queryVec[0] = 1.0
+
+    const publishObservation2 = (writer: InstanceType<typeof DatabaseSync>): number => {
+      writer.exec('BEGIN IMMEDIATE;')
+      try {
+        writer
+          .prepare('UPDATE discovery_observations SET is_current = 0 WHERE file_location_id = ?;')
+          .run(photoId)
+        const dRes = writer
+          .prepare(
+            `INSERT INTO discovery_observations (
+              file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+              observed_at_ms, last_seen_at_ms, is_current
+            ) VALUES (?, 4096, 1700000000000, 1700000005000, 1700000005000, 1700000005000, 1);`
+          )
+          .run(photoId)
+        const obs2Id = Number(dRes.lastInsertRowid)
+        writer
+          .prepare('UPDATE hash_observations SET is_active = 0 WHERE file_location_id = ?;')
+          .run(photoId)
+        writer
+          .prepare(
+            `INSERT INTO hash_observations (
+              file_location_id, discovery_observation_id, sha256,
+              observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+            ) VALUES (?, ?, ?, 4096, 1700000005000, 1700000005000, 1);`
+          )
+          .run(photoId, obs2Id, hash2)
+        writer
+          .prepare(
+            'UPDATE photo_semantic_embeddings SET is_current = 0 WHERE file_location_id = ?;'
+          )
+          .run(photoId)
+        const rev2 = `semrev:${obs2Id}:4096:1700000005000:${hash2}`
+        writer
+          .prepare(
+            `INSERT INTO photo_semantic_embeddings (
+              file_id, file_location_id, discovery_observation_id,
+              content_sha256, content_revision, source_path, observed_byte_size, observed_mtime_ms,
+              model_id, model_commit, model_manifest_sha256, preprocessing_version,
+              embedding_dimensions, embedding_blob, is_current, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, 4096, 1700000005000, ?, ?, ?, ?, 512, ?, 1, 1700000005000);`
+          )
+          .run(
+            photoId,
+            photoId,
+            obs2Id,
+            hash2,
+            rev2,
+            obs1.originalPath,
+            SEMANTIC_MODEL_ID,
+            SEMANTIC_MODEL_COMMIT,
+            manifestSha,
+            SEMANTIC_PREPROCESSING_VERSION,
+            Buffer.from(v2.buffer, v2.byteOffset, v2.byteLength)
+          )
+        writer.exec('COMMIT;')
+        return obs2Id
+      } catch (err) {
+        writer.exec('ROLLBACK;')
+        throw err
+      }
+    }
+
+    // 1. Ordinary heap-backed search: second writer commits obs2 right after ranking
+    const writer1 = new DatabaseSync(catalogPath)
+    let obs2Id = 0
+    try {
+      const res1 = executeSearchDatabaseQuery({
+        catalogPath,
+        queryVector: queryVec,
+        limit: 10,
+        offset: 0,
+        minScore: -1,
+        onAfterRanking: () => {
+          obs2Id = publishObservation2(writer1)
+        }
+      })
+
+      expect(obs2Id).toBeGreaterThan(obs1Id)
+      expect(res1.rankedItems.length).toBe(1)
+      expect(res1.rankedItems[0]?.score).toBeCloseTo(1.0, 5)
+      // Must retain the exact scored identity (obs1 / hash1), NEVER obs2 / hash2
+      expect(res1.rankedItems[0]?.discoveryObservationId).toBe(obs1Id)
+      expect(res1.rankedItems[0]?.contentSha256).toBe(hash1)
+
+      // Verify no read transaction leaked: writer can checkpoint WAL cleanly
+      const chk = writer1.prepare('PRAGMA wal_checkpoint(TRUNCATE);').get() as {
+        busy: number
+      }
+      expect(chk.busy).toBe(0)
+    } finally {
+      writer1.close()
+    }
+
+    // 2. End-to-end hydration + retry against updated catalog returns obs2 with score 0.0
+    const resAfterMutation = executeSearchDatabaseQuery({
+      catalogPath,
+      queryVector: queryVec,
+      limit: 10,
+      offset: 0,
+      minScore: -1
+    })
+    expect(resAfterMutation.rankedItems.length).toBe(1)
+    expect(resAfterMutation.rankedItems[0]?.discoveryObservationId).toBe(obs2Id)
+    expect(resAfterMutation.rankedItems[0]?.contentSha256).toBe(hash2)
+    expect(resAfterMutation.rankedItems[0]?.score).toBeCloseTo(0.0, 5)
+
+    // 3. Disk-backed deep pagination (> 1,000) with concurrent writer mutation & error cleanup
+    const highVec = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+    highVec[0] = 1.0
+    for (let i = 0; i < 1010; i++) {
+      addPhoto(`deep_${i}.jpg`, highVec)
+    }
+    // Lower photoId (obs2) currently has score 0, while 1,010 deep photos have score 1.0.
+    // Set photoId back to v1 and mutate it to v2 after deep ranking.
+    const writer2 = new DatabaseSync(catalogPath)
+    let obs3Id = 0
+    try {
+      // First verify error cleanup (invalid query vector throws inside rankCandidatesWithBoundedPaging)
+      expect(() =>
+        executeSearchDatabaseQuery({
+          catalogPath,
+          queryVector: new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS), // zero norm -> throws
+          limit: 10,
+          offset: 1005,
+          minScore: -1
+        })
+      ).toThrow()
+
+      // Writer must not be blocked after error
+      const chkAfterErr = writer2.prepare('PRAGMA wal_checkpoint(TRUNCATE);').get() as {
+        busy: number
+      }
+      expect(chkAfterErr.busy).toBe(0)
+
+      // Make obs2 the lowest-scoring item at offset 1010? Even simpler: give all 1010 deep items
+      // score 0.9 and obs2 score 0.5, so obs2 lands at index 1010 (offset 1010, limit 5).
+      // Actually with v2=[0,1,...] (score 0.0) and deep items having [1,0,...] (score 1.0),
+      // obs2 is already at index 1010 (offset 1010, limit 5)!
+      const deepRes = executeSearchDatabaseQuery({
+        catalogPath,
+        queryVector: queryVec,
+        limit: 5,
+        offset: 1010,
+        minScore: -1,
+        onAfterRanking: () => {
+          obs3Id = publishObservation2(writer2)
+        }
+      })
+      expect(obs3Id).toBeGreaterThan(obs2Id)
+      expect(deepRes.rankedItems.length).toBe(1)
+      expect(deepRes.rankedItems[0]?.fileLocationId).toBe(photoId)
+      expect(deepRes.rankedItems[0]?.discoveryObservationId).toBe(obs2Id)
+      expect(deepRes.rankedItems[0]?.contentSha256).toBe(hash2)
+    } finally {
+      writer2.close()
     }
   })
 })

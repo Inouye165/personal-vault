@@ -15,9 +15,18 @@ export const RANKING_LIMITS = {
   MAX_RETAINED_K: 10_100
 } as const
 
+export interface ScoredEmbeddingIdentity {
+  readonly discoveryObservationId: number
+  readonly contentSha256: string
+  readonly contentRevision: string
+  readonly observedByteSize: number
+  readonly observedMtimeMs: number | null
+}
+
 export interface RankCandidate {
   readonly fileLocationId: number
   readonly vector: Float32Array
+  readonly identity?: ScoredEmbeddingIdentity
 }
 
 export interface RankOptions {
@@ -29,6 +38,7 @@ export interface RankOptions {
 export interface RankedItem {
   readonly fileLocationId: number
   readonly score: number
+  readonly identity?: ScoredEmbeddingIdentity
 }
 
 export interface RankResult {
@@ -137,6 +147,7 @@ function isWorse(aScore: number, aId: number, bScore: number, bId: number): bool
 interface HeapNode {
   readonly fileLocationId: number
   readonly score: number
+  readonly identity?: ScoredEmbeddingIdentity
 }
 
 /**
@@ -157,11 +168,13 @@ export class TopKMinHeap {
     return this.items.length
   }
 
-  public push(fileLocationId: number, score: number): void {
+  public push(fileLocationId: number, score: number, identity?: ScoredEmbeddingIdentity): void {
     if (this.capacity <= 0) return
 
     if (this.items.length < this.capacity) {
-      this.items.push({ fileLocationId, score })
+      this.items.push(
+        identity !== undefined ? { fileLocationId, score, identity } : { fileLocationId, score }
+      )
       this.siftUp(this.items.length - 1)
       return
     }
@@ -169,7 +182,8 @@ export class TopKMinHeap {
     // Capacity is full. Root is the worst item in top K.
     const root = this.items[0]!
     if (isWorse(root.score, root.fileLocationId, score, fileLocationId)) {
-      this.items[0] = { fileLocationId, score }
+      this.items[0] =
+        identity !== undefined ? { fileLocationId, score, identity } : { fileLocationId, score }
       this.siftDown(0)
     }
   }
@@ -273,7 +287,7 @@ export function rankCandidates(
     }
 
     totalMatched++
-    heap.push(candidate.fileLocationId, score)
+    heap.push(candidate.fileLocationId, score, candidate.identity)
   }
 
   const sorted = heap.toSortedArray()
@@ -324,12 +338,20 @@ export function rankCandidatesWithBoundedPaging(
       PRAGMA journal_mode = OFF;
       CREATE TABLE ranked_candidates (
         file_location_id INTEGER NOT NULL,
-        score REAL NOT NULL
+        score REAL NOT NULL,
+        discovery_observation_id INTEGER,
+        content_sha256 TEXT,
+        content_revision TEXT,
+        observed_byte_size INTEGER,
+        observed_mtime_ms REAL
       );
     `)
 
     const insertStmt = scratchDb.prepare(
-      'INSERT INTO ranked_candidates (file_location_id, score) VALUES (?, ?);'
+      `INSERT INTO ranked_candidates (
+        file_location_id, score, discovery_observation_id, content_sha256,
+        content_revision, observed_byte_size, observed_mtime_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?);`
     )
     let totalMatched = 0
 
@@ -341,7 +363,16 @@ export function rankCandidatesWithBoundedPaging(
           continue
         }
         totalMatched++
-        insertStmt.run(candidate.fileLocationId, score)
+        const id = candidate.identity
+        insertStmt.run(
+          candidate.fileLocationId,
+          score,
+          id?.discoveryObservationId ?? null,
+          id?.contentSha256 ?? null,
+          id?.contentRevision ?? null,
+          id?.observedByteSize ?? null,
+          id?.observedMtimeMs ?? null
+        )
       }
       scratchDb.exec('COMMIT;')
     } catch (err) {
@@ -359,14 +390,47 @@ export function rankCandidatesWithBoundedPaging(
 
     const rows = scratchDb
       .prepare(
-        'SELECT file_location_id, score FROM ranked_candidates ORDER BY score DESC, file_location_id ASC LIMIT ? OFFSET ?;'
+        `SELECT
+          file_location_id, score, discovery_observation_id, content_sha256,
+          content_revision, observed_byte_size, observed_mtime_ms
+         FROM ranked_candidates
+         ORDER BY score DESC, file_location_id ASC
+         LIMIT ? OFFSET ?;`
       )
-      .all(limit, offset) as Array<{ file_location_id: number; score: number }>
+      .all(limit, offset) as Array<{
+      file_location_id: number
+      score: number
+      discovery_observation_id: number | null
+      content_sha256: string | null
+      content_revision: string | null
+      observed_byte_size: number | null
+      observed_mtime_ms: number | null
+    }>
 
-    const items: RankedItem[] = rows.map((r) => ({
-      fileLocationId: r.file_location_id,
-      score: r.score
-    }))
+    const items: RankedItem[] = rows.map((r) => {
+      if (
+        r.discovery_observation_id !== null &&
+        r.content_sha256 !== null &&
+        r.content_revision !== null &&
+        r.observed_byte_size !== null
+      ) {
+        return {
+          fileLocationId: r.file_location_id,
+          score: r.score,
+          identity: {
+            discoveryObservationId: r.discovery_observation_id,
+            contentSha256: r.content_sha256,
+            contentRevision: r.content_revision,
+            observedByteSize: r.observed_byte_size,
+            observedMtimeMs: r.observed_mtime_ms
+          }
+        }
+      }
+      return {
+        fileLocationId: r.file_location_id,
+        score: r.score
+      }
+    })
     const hasMore = offset + items.length < totalMatched
 
     return {
