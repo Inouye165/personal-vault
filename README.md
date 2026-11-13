@@ -111,3 +111,27 @@ The output executable is generated at:
 - **Process Isolation**: Electron main process handles OS APIs; preload uses `contextBridge` to expose a narrowly-scoped `window.api`; renderer runs sandboxed React with zero Node.js access.
 - **Runtime Validation**: All IPC channels and payloads crossing process boundaries are verified using Zod schemas.
 - **Content Security Policy**: Scripts are limited to `'self'` (no remote code); the development server additionally allows its own inline preamble by hash.
+
+---
+
+## Supported Offline Photo-Search Workflow & Known Limitations
+
+### End-to-End Offline User Workflow
+
+1. **Discover & Hash Originals (`Sources & Scan`)**: Select one or more read-only source folders and run a scan job to catalog original filenames, paths, byte sizes, filesystem timestamps, and verified SHA-256 digests.
+2. **Provision Offline Semantic Model (`Photos` -> `Semantic Index`)**: Explicitly import a local model folder (`semantic:import-model-folder`) or run an explicit one-time checksum-verified download (`semantic:download-model`) of the pinned `Xenova/clip-vit-base-patch32` INT8 ONNX model (`6b7c523703ae26e39be4b03774966f8571c7f523`, 7 files, `155,851,918` bytes / `148.63 MiB`) into `<userData>/models/`. No automatic startup or inference-time downloads ever occur.
+3. **Extract Technical Metadata & Build Semantic Index (`Photos`)**:
+   - Run **Extract Metadata** (works without a semantic model) to parse read-only EXIF/header capture dates (`DateTimeOriginal`, or `DateTimeDigitized` fallback when absent), camera/lens names, orientation-adjusted display dimensions, and container formats.
+   - Run **Index Photos** to compute 512-dimensional L2-normalized CLIP image embeddings (`clip_vit_b32_224_bicubic_center_rgb_v1`) in background worker threads. Jobs support pause, cancel, resume, and crash-restart recovery with exact snapshotted scope.
+4. **Search & Filter (`Photos` Toolbar)**:
+   - Enter a natural-language query ($\le 500$ characters) in the Photos search bar and optionally combine it with rating, flag, collection, capture date range, camera, lens, minimum display resolution, file-type (`detected_format` or `filename_extension`), and `Unknown` filters.
+   - SQL filters prune candidates before cosine similarity ranking (`TopKMinHeap` for `offset + limit <= 1,000`; bounded disk-backed temporary SQLite ranker for `offset + limit > 1,000`).
+   - Clear the search bar at any time to restore ordinary browsing.
+
+### Known Limitations & Honesty Disclosures
+
+- **Machine Inferences vs. Recorded Facts**: Semantic similarity badges (`xx% match`) are uncalibrated cosine similarity inferences from CLIP embeddings, not factual object labels or ground-truth classifications. Absent capture dates, cameras, lenses, or dimensions remain explicit `Unknown` (`null`) and are never fabricated from filesystem timestamps or filenames.
+- **77-Token CLIP Context Window**: Queries exceeding 77 BPE tokens are truncated at 77 tokens and explicitly disclosed in the UI (`truncated: true`, `tokenCount: 77`).
+- **Supported Image Formats**: JPEG, PNG, WebP, GIF (frame 0), AVIF, and TIFF are supported for thumbnail decoding, EXIF/header extraction, and CLIP indexing. Apple HEIC/HEIF (which require patent-encumbered HEVC codecs not bundled in prebuilt `libvips`) and camera RAW formats (`.cr2`, `.nef`, `.arw`, `.dng`, `.orf`, `.rw2`, `.raf`) are reported honestly as `unsupported`.
+- **OS Read-Access Timestamps (`atime`)**: Source files are opened strictly read-only (`open(path, 'r')`), preserving exact bytes, SHA-256 digests, sizes, creation times (`birthtimeMs`), and modification times (`mtimeMs`). Depending on OS/mount settings, read-only opens may update the filesystem access timestamp (`atime`).
+- **Stage 6 Scope Boundaries**: Face recognition, GPS map views/reverse geocoding, video indexing, document OCR/unified search (Stage 7), and cloud sync are outside Stage 6 scope.

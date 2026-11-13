@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   cosineSimilarity,
   rankCandidates,
+  rankCandidatesWithBoundedPaging,
   validateQueryVector,
   type RankCandidate
 } from '../../src/main/services/semantic/ranking'
@@ -317,6 +318,49 @@ describe('Stage 6D: Semantic Search Ranking & Bounded Heap', () => {
       // Items should start at fileLocationId 10,001 through 10,050
       expect(result.items[0]?.fileLocationId).toBe(10_001)
       expect(result.items[49]?.fileLocationId).toBe(10_050)
+      expect(result.hasMore).toBe(true)
+    })
+
+    it('ranks beyond offset 10,000 via rankCandidatesWithBoundedPaging with deterministic tie-breaking', () => {
+      const queryVec = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+      queryVec[0] = 1.0
+
+      // Stream 10,200 candidates in reverse ID order with tied score pairs to test disk-backed tie-breaking
+      function* generateDeepCandidates(): Generator<RankCandidate> {
+        for (let i = 10_200; i >= 1; i--) {
+          const v = new Float32Array(SEMANTIC_EMBEDDING_DIMENSIONS)
+          // Pair up (1,2), (3,4), ... with identical scores so tie-breaking by fileLocationId ASC is exercised
+          const pairIndex = Math.floor((i - 1) / 2)
+          const score = 0.99 - pairIndex * 0.0001
+          v[0] = score
+          v[1] = Math.sqrt(Math.max(0, 1 - score * score))
+          yield {
+            fileLocationId: i,
+            vector: v,
+            identity: {
+              discoveryObservationId: i * 10,
+              contentSha256: 'a'.repeat(64),
+              contentRevision: `rev:${i * 10}:2048:1700000000000:${'a'.repeat(64)}`,
+              observedByteSize: 2048,
+              observedMtimeMs: 1700000000000
+            }
+          }
+        }
+      }
+
+      const result = rankCandidatesWithBoundedPaging(queryVec, generateDeepCandidates(), {
+        offset: 10_050,
+        limit: 50
+      })
+
+      expect(result.totalMatched).toBe(10_200)
+      expect(result.items.length).toBe(50)
+      // Because candidates were yielded in reverse ID order (10,200 down to 1) with tied pairs,
+      // deterministic tie-breaking (score DESC, fileLocationId ASC) must order 10,051 before 10,052
+      expect(result.items[0]?.fileLocationId).toBe(10_051)
+      expect(result.items[1]?.fileLocationId).toBe(10_052)
+      expect(result.items[49]?.fileLocationId).toBe(10_100)
+      expect(result.items[0]?.identity?.discoveryObservationId).toBe(100_510)
       expect(result.hasMore).toBe(true)
     })
   })

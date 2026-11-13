@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os'
 import { IPC_CHANNELS } from '../../src/shared/contracts/channels'
 import { CatalogDatabase } from '../../src/main/services/catalog/database'
 import { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
+import { SemanticModelManager } from '../../src/main/services/semantic/model-manager'
+import { SemanticSearchCoordinator } from '../../src/main/services/semantic/search-coordinator'
 import { registerIpcHandlers } from '../../src/main/ipc/handlers'
 
 type IpcHandler = (...args: unknown[]) => unknown
@@ -116,5 +118,50 @@ describe('Photos IPC Handlers', () => {
     }
     expect(result.status).toBe('missing')
     expect(result.locationId).toBe(9999)
+  })
+
+  it('includes semantic search worker diagnostics and totalAppLiveWorkers in PHOTOS_GET_DIAGNOSTICS', async () => {
+    const validateSender = vi.fn().mockReturnValue(true)
+    const modelManager = new SemanticModelManager({
+      modelsRootDir: join(tempDir, 'models'),
+      getApprovedRoots: () => [],
+      getVaultRoot: () => null
+    })
+    const semanticSearchCoordinator = new SemanticSearchCoordinator({
+      catalog,
+      modelManager
+    })
+
+    registerIpcHandlers({
+      validateSender,
+      catalog,
+      thumbnailCoordinator,
+      semanticSearchCoordinator
+    })
+
+    const diagHandler = ipcHandlers.get(IPC_CHANNELS.PHOTOS_GET_DIAGNOSTICS)
+    expect(diagHandler).toBeDefined()
+
+    const diag = (await diagHandler!({} as never)) as {
+      activeWorkers: number
+      liveWorkers?: number
+      searchActiveWorkers?: number
+      searchTerminatingWorkers?: number
+      searchLiveWorkers?: number
+      searchPendingRequests?: number
+      searchActiveCalls?: number
+      searchMaxPendingRequests?: number
+      totalAppLiveWorkers?: number
+    }
+
+    expect(diag.searchActiveWorkers).toBe(0)
+    expect(diag.searchTerminatingWorkers).toBe(0)
+    expect(diag.searchLiveWorkers).toBe(0)
+    expect(diag.searchPendingRequests).toBe(0)
+    expect(diag.searchActiveCalls).toBe(0)
+    expect(diag.searchMaxPendingRequests).toBe(16)
+    expect(diag.totalAppLiveWorkers).toBe(0)
+
+    await semanticSearchCoordinator.shutdown()
   })
 })

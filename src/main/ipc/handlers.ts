@@ -805,7 +805,22 @@ export function registerIpcHandlers({
       return { activeWorkers: 0, queuedJobs: 0, totalDecodes: 0, cacheHits: 0, cacheMisses: 0 }
     }
     const diag = thumbnailCoordinator.getDiagnostics()
-    const validated = validatePayload(PhotosDiagnosticsResponseSchema, diag)
+    const searchDiag = semanticSearchCoordinator?.getDiagnostics()
+    const combinedDiag = {
+      ...diag,
+      ...(searchDiag
+        ? {
+            searchActiveWorkers: searchDiag.activeWorkers,
+            searchTerminatingWorkers: searchDiag.terminatingWorkers,
+            searchLiveWorkers: searchDiag.liveWorkers,
+            searchPendingRequests: searchDiag.pendingRequests,
+            searchActiveCalls: searchDiag.activeSearchCalls,
+            searchMaxPendingRequests: searchDiag.maxPendingRequests,
+            totalAppLiveWorkers: (diag.liveWorkers ?? diag.activeWorkers) + searchDiag.liveWorkers
+          }
+        : {})
+    }
+    const validated = validatePayload(PhotosDiagnosticsResponseSchema, combinedDiag)
     if (!validated.success) {
       throw new Error(`Invalid outgoing PhotosDiagnosticsResponse: ${validated.error}`)
     }

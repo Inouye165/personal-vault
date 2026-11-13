@@ -250,13 +250,20 @@ describe('Stage 6D: usePhotos Semantic Search & Retained Memory Integration', ()
       PHOTO_BOUNDS.MAX_PAGES * PHOTO_BOUNDS.PAGE_SIZE
     )
 
-    // Now return to Page 0
+    // Now return to Page 0 (which will evict Page 1 since LRU had 1..40)
     await act(async () => {
       result.current.ensureRangeLoaded(0, 10)
     })
 
     // Page 0 should be reloaded and Photo 10000 restored!
     expect(result.current.searchScores.has(10_000)).toBe(true)
+    // Still-cached pages (e.g. Page 40 -> Photo 10040, Page 20 -> Photo 10020) MUST retain their scores!
+    expect(result.current.searchScores.has(10_040)).toBe(true)
+    expect(result.current.searchScores.has(10_020)).toBe(true)
+    // Total retained searchScores remains bounded
+    expect(result.current.searchScores.size).toBeLessThanOrEqual(
+      PHOTO_BOUNDS.MAX_PAGES * PHOTO_BOUNDS.PAGE_SIZE
+    )
   })
 
   it('supports deep jumps beyond offset 10,000 and propagates corruptCount honestly', async () => {

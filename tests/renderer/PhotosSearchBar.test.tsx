@@ -116,4 +116,56 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     // Truncation notice
     expect(screen.getByText(/query truncated to 77 tokens/i)).toBeInTheDocument()
   })
+
+  it('displays clear recovery guidance when the model status is corrupt or error', () => {
+    const { rerender } = render(
+      <PhotosSearchBar
+        query="mountain"
+        isSearching={false}
+        modelStatus="corrupt"
+        onSearch={vi.fn()}
+        onClear={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText(/offline search model is invalid or damaged/i)).toBeInTheDocument()
+    expect(screen.getByText(/re-download or re-import the verified model/i)).toBeInTheDocument()
+
+    rerender(
+      <PhotosSearchBar
+        query="mountain"
+        isSearching={false}
+        modelStatus="error"
+        onSearch={vi.fn()}
+        onClear={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText(/offline search model is invalid or damaged/i)).toBeInTheDocument()
+  })
+
+  it('displays corrupt candidate warning with reindex guidance when corruptCount > 0', () => {
+    render(
+      <PhotosSearchBar
+        query="sunset"
+        isSearching={false}
+        modelStatus="ready"
+        searchResult={{
+          totalMatched: 4,
+          eligibleCount: 10,
+          unindexedCount: 0,
+          staleCount: 0,
+          corruptCount: 2,
+          truncated: false,
+          tokenCount: 2,
+          queryLatencyMs: 9
+        }}
+        onSearch={vi.fn()}
+        onClear={vi.fn()}
+      />
+    )
+
+    const warning = screen.getByTestId('search-corrupt-warning')
+    expect(warning).toHaveTextContent(/2 damaged \(reindex recommended\)/i)
+  })
 })

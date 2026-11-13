@@ -570,7 +570,14 @@ export const PhotosDiagnosticsResponseSchema = z.object({
   mainProcessHeapUsedBytes: z.number().int().nonnegative().optional(),
   workerIsolatePeakHeapUsedBytes: z.number().int().nonnegative().optional(),
   workerIsolateLastHeapUsedBytes: z.number().int().nonnegative().optional(),
-  workerIsolatePeakExternalBytes: z.number().int().nonnegative().optional()
+  workerIsolatePeakExternalBytes: z.number().int().nonnegative().optional(),
+  searchActiveWorkers: z.number().int().nonnegative().optional(),
+  searchTerminatingWorkers: z.number().int().nonnegative().optional(),
+  searchLiveWorkers: z.number().int().nonnegative().optional(),
+  searchPendingRequests: z.number().int().nonnegative().optional(),
+  searchActiveCalls: z.number().int().nonnegative().optional(),
+  searchMaxPendingRequests: z.number().int().nonnegative().optional(),
+  totalAppLiveWorkers: z.number().int().nonnegative().optional()
 })
 export type PhotosDiagnosticsResponse = z.infer<typeof PhotosDiagnosticsResponseSchema>
 

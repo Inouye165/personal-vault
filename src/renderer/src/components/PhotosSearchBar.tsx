@@ -63,6 +63,7 @@ export function PhotosSearchBar({
   }
 
   const isModelMissing = modelStatus === 'unprovisioned' || modelStatus === 'missing'
+  const isModelCorrupt = modelStatus === 'corrupt' || modelStatus === 'error'
 
   return (
     <div className="photos-search-bar-container" data-testid="photos-search-bar">
@@ -106,7 +107,11 @@ export function PhotosSearchBar({
       </form>
 
       {isModelMissing && (
-        <div className="search-model-notice search-warning-banner" role="status">
+        <div
+          className="search-model-notice search-warning-banner"
+          role="status"
+          data-testid="search-model-missing-notice"
+        >
           <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
           <span>
             Offline search model is not installed. Download or import model in the Semantic Index
@@ -115,7 +120,21 @@ export function PhotosSearchBar({
         </div>
       )}
 
-      {searchResult && !isModelMissing && (
+      {isModelCorrupt && (
+        <div
+          className="search-model-notice search-warning-banner"
+          role="alert"
+          data-testid="search-model-corrupt-notice"
+        >
+          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
+          <span>
+            Offline search model is invalid or damaged. Re-download or re-import the verified model
+            in the Semantic Index panel to restore natural-language search.
+          </span>
+        </div>
+      )}
+
+      {searchResult && !isModelMissing && !isModelCorrupt && (
         <div className="photos-search-feedback">
           <div className="search-meta-row">
             <span className="search-match-badge" data-testid="search-match-badge">

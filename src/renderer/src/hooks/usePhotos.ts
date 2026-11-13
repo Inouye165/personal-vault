@@ -202,6 +202,8 @@ export function usePhotos(): UsePhotosResult {
   const generationRef = useRef<number>(1)
   // Page LRU tracking
   const pageLruRef = useRef<number[]>([])
+  // Page photo IDs tracking for pure LRU eviction
+  const pagePhotoIdsRef = useRef<Map<number, number[]>>(new Map())
   // In-flight page requests: pageNumber -> generation
   const inFlightPagesRef = useRef<Map<number, number>>(new Map())
   // In-flight thumbnail requests: locationId -> InFlightThumbRequest
@@ -283,36 +285,42 @@ export function usePhotos(): UsePhotosResult {
           })
 
           const pageItems = res.items.map((i) => i.photo)
+          pagePhotoIdsRef.current.set(
+            pageIndex,
+            pageItems.map((p) => p.id)
+          )
+
+          const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+          lru.push(pageIndex)
+          const evictedPages: number[] = []
           const evictedPhotoIds: number[] = []
+
+          while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+            const evictedPage = lru.shift()
+            if (evictedPage !== undefined) {
+              evictedPages.push(evictedPage)
+              const idsToEvict = pagePhotoIdsRef.current.get(evictedPage)
+              if (idsToEvict) {
+                for (const id of idsToEvict) {
+                  evictedPhotoIds.push(id)
+                }
+                pagePhotoIdsRef.current.delete(evictedPage)
+              }
+            }
+          }
+          pageLruRef.current = lru
 
           setPages((prev) => {
             const next = new Map(prev)
             next.set(pageIndex, pageItems)
-
-            // Update LRU tracking
-            const lru = pageLruRef.current.filter((p) => p !== pageIndex)
-            lru.push(pageIndex)
-
-            // Evict oldest pages if exceeding MAX_PAGES
-            while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
-              const evictedPage = lru.shift()
-              if (evictedPage !== undefined) {
-                const itemsToEvict = next.get(evictedPage)
-                if (itemsToEvict) {
-                  for (const p of itemsToEvict) {
-                    evictedPhotoIds.push(p.id)
-                  }
-                }
-                next.delete(evictedPage)
-              }
+            for (const evictedPage of evictedPages) {
+              next.delete(evictedPage)
             }
-            pageLruRef.current = lru
-
             return next
           })
 
           setSearchScores((prev) => {
-            const next = new Map(pageIndex === 0 ? [] : prev)
+            const next = new Map(prev)
             for (const item of res.items) {
               next.set(item.photo.id, item.score)
             }
@@ -359,23 +367,28 @@ export function usePhotos(): UsePhotosResult {
           inFlightPagesRef.current.delete(pageIndex)
           setTotalCount(res.totalCount)
 
+          pagePhotoIdsRef.current.set(
+            pageIndex,
+            res.items.map((p) => p.id)
+          )
+          const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+          lru.push(pageIndex)
+          const evictedPages: number[] = []
+          while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+            const evictedPage = lru.shift()
+            if (evictedPage !== undefined) {
+              evictedPages.push(evictedPage)
+              pagePhotoIdsRef.current.delete(evictedPage)
+            }
+          }
+          pageLruRef.current = lru
+
           setPages((prev) => {
             const next = new Map(prev)
             next.set(pageIndex, res.items)
-
-            // Update LRU tracking
-            const lru = pageLruRef.current.filter((p) => p !== pageIndex)
-            lru.push(pageIndex)
-
-            // Evict oldest pages if exceeding MAX_PAGES
-            while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
-              const evictedPage = lru.shift()
-              if (evictedPage !== undefined) {
-                next.delete(evictedPage)
-              }
+            for (const evictedPage of evictedPages) {
+              next.delete(evictedPage)
             }
-            pageLruRef.current = lru
-
             return next
           })
         }
@@ -410,9 +423,11 @@ export function usePhotos(): UsePhotosResult {
     ) => {
       const nextGen = ++generationRef.current
       pageLruRef.current = []
+      pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
       inFlightThumbsRef.current.clear()
       setPages(new Map())
+      setSearchScores(new Map())
       setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(Boolean(searchQueryRef.current))
@@ -436,9 +451,11 @@ export function usePhotos(): UsePhotosResult {
       setSearchQueryState(trimmed)
       const nextGen = ++generationRef.current
       pageLruRef.current = []
+      pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
       inFlightThumbsRef.current.clear()
       setPages(new Map())
+      setSearchScores(new Map())
       setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(Boolean(trimmed))
@@ -463,6 +480,7 @@ export function usePhotos(): UsePhotosResult {
     void window.api?.cancelPhotosSemanticSearch?.()
     const nextGen = ++generationRef.current
     pageLruRef.current = []
+    pagePhotoIdsRef.current.clear()
     inFlightPagesRef.current.clear()
     inFlightThumbsRef.current.clear()
     setPages(new Map())
@@ -593,9 +611,11 @@ export function usePhotos(): UsePhotosResult {
   const refresh = useCallback(async () => {
     const nextGen = ++generationRef.current
     pageLruRef.current = []
+    pagePhotoIdsRef.current.clear()
     inFlightPagesRef.current.clear()
     inFlightThumbsRef.current.clear()
     setPages(new Map())
+    setSearchScores(new Map())
     setThumbnails(new Map())
     setIsLoading(true)
     setError(null)

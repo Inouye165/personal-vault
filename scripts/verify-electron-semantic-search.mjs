@@ -201,6 +201,7 @@ function snapshotDirectoryFiles(dirPath) {
           size: st.size,
           birthtimeMs: st.birthtimeMs,
           mtimeMs: st.mtimeMs,
+          atimeMs: st.atimeMs,
           sha
         })
       }
@@ -217,6 +218,7 @@ function assertDirectoryUnchanged(dirPath, baselineMap, label) {
       `[${label}] File count changed in ${dirPath}: expected ${baselineMap.size}, got ${currentMap.size}`
     )
   }
+  let atimeUpdatedCount = 0
   for (const [filePath, base] of baselineMap.entries()) {
     const cur = currentMap.get(filePath)
     if (!cur) {
@@ -238,7 +240,96 @@ function assertDirectoryUnchanged(dirPath, baselineMap, label) {
         `[${label}] birthtimeMs changed for ${filePath}: ${base.birthtimeMs} -> ${cur.birthtimeMs}`
       )
     }
+    if (Math.abs(cur.atimeMs - base.atimeMs) > 0.5) {
+      atimeUpdatedCount++
+    }
   }
+  return { totalFiles: baselineMap.size, atimeUpdatedCount }
+}
+
+const EXIF_TAG = {
+  Make: 0x010f,
+  Model: 0x0110,
+  ExifIFDPointer: 0x8769,
+  DateTimeOriginal: 0x9003,
+  OffsetTimeOriginal: 0x9011,
+  LensModel: 0xa434
+}
+
+function injectJpegApp1Exif(jpegBuf, { ifd0Tags = [], exifTags = [] }) {
+  const hasExif = exifTags.length > 0
+  const sortedIfd0 = [
+    ...ifd0Tags,
+    ...(hasExif ? [{ tagId: EXIF_TAG.ExifIFDPointer, type: 'long', value: 0 }] : [])
+  ].sort((a, b) => a.tagId - b.tagId)
+  const sortedExif = [...exifTags].sort((a, b) => a.tagId - b.tagId)
+
+  const ifd0Offset = 8
+  const ifd0Len = 2 + sortedIfd0.length * 12 + 4
+  const exifOffset = hasExif ? ifd0Offset + ifd0Len : 0
+  const exifLen = hasExif ? 2 + sortedExif.length * 12 + 4 : 0
+  let heapCursor = ifd0Offset + ifd0Len + exifLen
+  const heapChunks = []
+
+  const encodeDir = (entries, ptrOverride) => {
+    const dir = Buffer.alloc(2 + entries.length * 12 + 4)
+    dir.writeUInt16LE(entries.length, 0)
+    entries.forEach((e, idx) => {
+      const off = 2 + idx * 12
+      dir.writeUInt16LE(e.tagId, off)
+      if (e.type === 'long') {
+        const val =
+          e.tagId === EXIF_TAG.ExifIFDPointer && ptrOverride !== undefined
+            ? ptrOverride
+            : Number(e.value)
+        dir.writeUInt16LE(4, off + 2)
+        dir.writeUInt32LE(1, off + 4)
+        dir.writeUInt32LE(val >>> 0, off + 8)
+      } else {
+        const strBytes = Buffer.from(`${String(e.value)}\0`, 'latin1')
+        dir.writeUInt16LE(2, off + 2)
+        dir.writeUInt32LE(strBytes.length, off + 4)
+        if (strBytes.length <= 4) {
+          strBytes.copy(dir, off + 8)
+        } else {
+          dir.writeUInt32LE(heapCursor, off + 8)
+          const padded =
+            strBytes.length % 2 === 1 ? Buffer.concat([strBytes, Buffer.from([0])]) : strBytes
+          heapChunks.push(padded)
+          heapCursor += padded.length
+        }
+      }
+    })
+    dir.writeUInt32LE(0, 2 + entries.length * 12)
+    return dir
+  }
+
+  const ifd0Buf = encodeDir(sortedIfd0, exifOffset)
+  const exifBuf = hasExif ? encodeDir(sortedExif) : Buffer.alloc(0)
+  const hdr = Buffer.alloc(8)
+  hdr.write('II', 0, 'ascii')
+  hdr.writeUInt16LE(0x002a, 2)
+  hdr.writeUInt32LE(ifd0Offset, 4)
+  const tiff = Buffer.concat([hdr, ifd0Buf, exifBuf, ...heapChunks])
+  const exifHdr = Buffer.from('Exif\0\0', 'ascii')
+  const app1 = Buffer.alloc(4)
+  app1[0] = 0xff
+  app1[1] = 0xe1
+  app1.writeUInt16BE(2 + exifHdr.length + tiff.length, 2)
+  return Buffer.concat([jpegBuf.subarray(0, 2), app1, exifHdr, tiff, jpegBuf.subarray(2)])
+}
+
+async function waitForMetadataJob(cdp, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const p = await evaluate(cdp, `window.api.getPhotoMetadataProgress()`)
+    if (p.status === 'completed') return p
+    if (p.status === 'failed') {
+      throw new Error(`Metadata extraction failed: ${p.lastError ?? 'unknown error'}`)
+    }
+    await sleep(150)
+  }
+  throw new Error('Metadata extraction timed out')
 }
 
 async function waitForScanJob(cdp, jobId) {
@@ -300,7 +391,13 @@ async function main() {
     if (!existsSync(ortBinding)) {
       throw new Error(`Expected unpacked ONNX Runtime native binding at ${ortBinding}`)
     }
-    pass('Unpacked ONNX Runtime native binary correctly installed in app.asar.unpacked')
+    const unpackedSpikesDir = join(unpackedRoot, 'resources', 'app.asar.unpacked', 'spikes')
+    if (existsSync(unpackedSpikesDir)) {
+      throw new Error(`Unexpected spikes directory bundled in unpacked app: ${unpackedSpikesDir}`)
+    }
+    pass(
+      'Unpacked ONNX Runtime native binary installed in app.asar.unpacked with zero bundled spikes/'
+    )
   }
 
   // 2. Sandboxed preload hygiene check: ensure out/preload/index.js requires only electron
@@ -439,6 +536,20 @@ async function main() {
     if (f.format === 'png') buf = await pipeline.png().toBuffer()
     else if (f.format === 'webp') buf = await pipeline.webp().toBuffer()
     else buf = await pipeline.jpeg({ quality: 90 }).toBuffer()
+
+    if (f.fileName === 'red_sports_car.jpg') {
+      buf = injectJpegApp1Exif(buf, {
+        ifd0Tags: [
+          { tagId: EXIF_TAG.Make, type: 'ascii', value: 'Canon' },
+          { tagId: EXIF_TAG.Model, type: 'ascii', value: 'Canon EOS R5' }
+        ],
+        exifTags: [
+          { tagId: EXIF_TAG.DateTimeOriginal, type: 'ascii', value: '2025:07:04 14:30:00' },
+          { tagId: EXIF_TAG.OffsetTimeOriginal, type: 'ascii', value: '+02:00' },
+          { tagId: EXIF_TAG.LensModel, type: 'ascii', value: 'RF 24-70mm F2.8L' }
+        ]
+      })
+    }
     writeFileSync(join(photosDir, f.fileName), buf)
   }
 
@@ -468,27 +579,8 @@ async function main() {
     app = await launchApp(userDataDir, port, { PV_TEST_MODEL_IMPORT_DIR: offlineModelFixtureDir })
     pass('Electron application launched and window.api connected')
 
-    // 5. Test unprovisioned search behavior
-    console.log('[Phase 3] Testing search behavior prior to model provisioning...')
-    const unprovSearch = await evaluate(
-      app.cdp,
-      `window.api.searchPhotosSemantic({ queryText: 'sunset sky' })`
-    )
-    if (unprovSearch.modelStatus !== 'unprovisioned' || unprovSearch.items.length !== 0) {
-      throw new Error(`Expected unprovisioned status, got: ${JSON.stringify(unprovSearch)}`)
-    }
-    pass('Search returns honest unprovisioned status and empty results when model is missing')
-
-    // 6. Import verified model folder
-    console.log('[Phase 4] Importing verified offline CLIP model folder...')
-    const modelImportRes = await evaluate(app.cdp, `window.api.importSemanticModelFromFolder()`)
-    if (modelImportRes.state !== 'ready') {
-      throw new Error(`Model import did not reach ready state: ${JSON.stringify(modelImportRes)}`)
-    }
-    pass('Offline model folder verified and imported to ready state')
-
-    // 7. Scan photos directory
-    console.log('[Phase 5] Scanning photograph source root...')
+    // 5. Scan photos directory first so PhotosPanel mounts with discovered source root
+    console.log('[Phase 3] Scanning photograph source root...')
     const scanAction = await evaluate(
       app.cdp,
       `window.api.startScan({ roots: [${JSON.stringify(photosDir)}] })`
@@ -505,8 +597,97 @@ async function main() {
     }
     pass(`Discovered and scanned ${completedScan.discoveredCount} photos`)
 
-    // 8. Run semantic indexing on discovered photos
-    console.log('[Phase 6] Running semantic indexing with vision ONNX inference...')
+    // 5b. Test unprovisioned search behavior & invalid/corrupt model recovery
+    console.log('[Phase 4] Testing search behavior prior to model provisioning...')
+    const unprovSearch = await evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'sunset sky' })`
+    )
+    if (unprovSearch.modelStatus !== 'unprovisioned' || unprovSearch.items.length !== 0) {
+      throw new Error(`Expected unprovisioned status, got: ${JSON.stringify(unprovSearch)}`)
+    }
+    pass('Search returns honest unprovisioned status and empty results when model is missing')
+
+    // 5c. Test invalid/corrupt model import rejection and UI recovery banner
+    console.log('[Phase 4b] Testing invalid/corrupt model import rejection and recovery...')
+    // Navigate to Photos view so PhotosSearchBar is mounted and listening to onSemanticModelStatus
+    for (let i = 0; i < 40; i++) {
+      const mounted = await evaluate(
+        app.cdp,
+        `(() => {
+          if (document.querySelector('.photos-search-input')) return true
+          const btn = Array.from(document.querySelectorAll('.nav-item, button')).find((b) =>
+            b.textContent && b.textContent.includes('Photos')
+          )
+          if (btn) btn.click()
+          return Boolean(document.querySelector('.photos-search-input'))
+        })()`
+      )
+      if (mounted) break
+      await sleep(100)
+    }
+
+    // Verify missing model notice is displayed before any model is installed
+    let missingBannerText = ''
+    for (let i = 0; i < 30; i++) {
+      missingBannerText = await evaluate(
+        app.cdp,
+        `document.querySelector('[data-testid="search-model-missing-notice"]')?.textContent ?? ''`
+      )
+      if (missingBannerText.includes('not installed')) break
+      await sleep(100)
+    }
+    if (!missingBannerText.includes('not installed')) {
+      throw new Error(
+        `Expected missing model banner in PhotosSearchBar, got: '${missingBannerText}'`
+      )
+    }
+
+    writeFileSync(join(offlineModelFixtureDir, 'config.json'), '{"corrupt":true}', 'utf8')
+    const corruptImportRes = await evaluate(app.cdp, `window.api.importSemanticModelFromFolder()`)
+    if (corruptImportRes.state !== 'error' || !corruptImportRes.error) {
+      throw new Error(
+        `Expected corrupt model import to fail with state='error', got: ${JSON.stringify(corruptImportRes)}`
+      )
+    }
+    let corruptBannerText = ''
+    for (let i = 0; i < 40; i++) {
+      corruptBannerText = await evaluate(
+        app.cdp,
+        `document.querySelector('[data-testid="search-model-corrupt-notice"]')?.textContent ?? ''`
+      )
+      if (corruptBannerText.includes('invalid or damaged')) break
+      await sleep(100)
+    }
+    if (!corruptBannerText.includes('invalid or damaged')) {
+      throw new Error(
+        `Expected PhotosSearchBar corrupt model recovery banner, got: '${corruptBannerText}'`
+      )
+    }
+    // Restore valid config.json and refresh baseline snapshot
+    copyFileSync(
+      join(cachedModelSource, 'config.json'),
+      join(offlineModelFixtureDir, 'config.json')
+    )
+    const restoredModelBaselines = snapshotDirectoryFiles(offlineModelFixtureDir)
+    offlineModelBaselines.clear()
+    for (const [k, v] of restoredModelBaselines.entries()) {
+      offlineModelBaselines.set(k, v)
+    }
+    pass(
+      'Invalid/corrupt model folder rejected with error state and clear UI recovery guidance banner'
+    )
+
+    // 6. Import verified model folder
+    console.log('[Phase 5] Importing verified offline CLIP model folder...')
+    const modelImportRes = await evaluate(app.cdp, `window.api.importSemanticModelFromFolder()`)
+    if (modelImportRes.state !== 'ready') {
+      throw new Error(`Model import did not reach ready state: ${JSON.stringify(modelImportRes)}`)
+    }
+    pass('Offline model folder verified and imported to ready state')
+
+    // 8. Run semantic indexing and technical metadata extraction on discovered photos
+    console.log('[Phase 6] Running semantic indexing and technical metadata extraction...')
     await evaluate(app.cdp, `window.api.startSemanticIndexing()`)
     const completedIndex = await waitForSemanticIndexJob(app.cdp, 60000)
     if (completedIndex.processedPhotos !== initialPhotoBaselines.size) {
@@ -516,6 +697,17 @@ async function main() {
     }
     pass(
       `Indexed ${completedIndex.processedPhotos} photos with real ONNX CLIP ViT-B/32 vision embeddings`
+    )
+
+    await evaluate(app.cdp, `window.api.startPhotoMetadataExtraction()`)
+    const completedMeta = await waitForMetadataJob(app.cdp, 45000)
+    if (completedMeta.processedPhotos !== initialPhotoBaselines.size) {
+      throw new Error(
+        `Expected ${initialPhotoBaselines.size} metadata-extracted photos, got ${completedMeta.processedPhotos}`
+      )
+    }
+    pass(
+      `Extracted EXIF/container metadata for ${completedMeta.processedPhotos} photos (extracted=${completedMeta.extractedPhotos}, absentMetadata=${completedMeta.absentMetadataPhotos})`
     )
 
     // 9. Natural-language semantic queries with real text ONNX embedding
@@ -621,6 +813,108 @@ async function main() {
     pass(
       'Filter-before-ranking verified: 1-star sunset photo pruned prior to ranking (only 5-star candidates eligible)'
     )
+
+    // 10b. Combined Stage 5B (rating, flag, collection) + Stage 6C (date, camera, lens, resolution, file-type, Unknown) filter-before-ranking
+    const carPhoto = carRes.items[0].photo
+    const carRev = `rev:${carPhoto.discoveryObservationId}:${carPhoto.byteSize}:${carPhoto.filesystemMtimeMs}:${carPhoto.activeHash}`
+    await evaluate(
+      app.cdp,
+      `window.api.setPhotoAnnotation({
+        fileLocationId: ${carPhoto.id},
+        rating: 5,
+        flag: 'pick',
+        expectedRevision: ${JSON.stringify(carRev)},
+        expectedVersion: 0
+      })`
+    )
+    const favCol = await evaluate(
+      app.cdp,
+      `window.api.createCollection({ name: 'Stage 6E Favorites' })`
+    )
+    const favColId = favCol.collection.id
+    await evaluate(
+      app.cdp,
+      `window.api.addCollectionMember({
+        collectionId: ${favColId},
+        fileLocationId: ${carPhoto.id},
+        expectedRevision: ${JSON.stringify(carRev)}
+      })`
+    )
+
+    const combinedFilterRes = await evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({
+        queryText: 'bright red sports car automobile',
+        ratingFilter: '5',
+        flagFilter: 'pick',
+        collectionId: ${favColId},
+        captureDateFrom: '2025-07-01',
+        captureDateTo: '2025-07-10',
+        cameraNormalized: 'canon eos r5',
+        lensNormalized: 'rf 24-70mm f2.8l',
+        minWidthPx: 600,
+        minHeightPx: 400,
+        fileTypeBasis: 'detected_format',
+        fileTypeValue: 'jpeg'
+      })`
+    )
+    if (
+      combinedFilterRes.totalMatched !== 1 ||
+      combinedFilterRes.items[0]?.photo?.id !== carPhoto.id
+    ) {
+      throw new Error(
+        `Combined Stage 5B + Stage 6C filter search expected only red_sports_car, got: ${JSON.stringify(combinedFilterRes)}`
+      )
+    }
+
+    // Verify Unknown filters (onlyUnknownCamera, onlyUnknownLens, includeUnknownCaptureDate) exclude known-camera car photo and include unknown-camera forest photo
+    const unknownFilterRes = await evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({
+        queryText: 'lush green pine trees evergreen forest canopy',
+        onlyUnknownCamera: true,
+        onlyUnknownLens: true,
+        includeUnknownCaptureDate: true,
+        minWidthPx: 600,
+        minHeightPx: 400,
+        fileTypeBasis: 'detected_format',
+        fileTypeValue: 'png'
+      })`
+    )
+    if (
+      unknownFilterRes.totalMatched !== 1 ||
+      unknownFilterRes.items[0]?.photo?.id !== forestPhoto.id
+    ) {
+      throw new Error(
+        `Unknown metadata filter search expected only evergreen_forest.png, got: ${JSON.stringify(unknownFilterRes)}`
+      )
+    }
+    pass(
+      'Combined rating, flag, collection, capture date, camera, lens, resolution, file-type, and Unknown filters verified before ranking'
+    )
+
+    // 10c. Query boundary validation (empty/whitespace and >500 chars rejected)
+    let emptyRejected = false
+    try {
+      await evaluate(app.cdp, `window.api.searchPhotosSemantic({ queryText: '   ' })`)
+    } catch {
+      emptyRejected = true
+    }
+    let overLenRejected = false
+    try {
+      await evaluate(
+        app.cdp,
+        `window.api.searchPhotosSemantic({ queryText: ${JSON.stringify('x'.repeat(501))} })`
+      )
+    } catch {
+      overLenRejected = true
+    }
+    if (!emptyRejected || !overLenRejected) {
+      throw new Error(
+        `Expected empty (${emptyRejected}) and >500-char (${overLenRejected}) queries to be rejected`
+      )
+    }
+    pass('Query input bounds enforced: empty/whitespace and >500-character inputs rejected')
 
     // 11. Long-Query Truncation Notice
     console.log('[Phase 9] Verifying honest long-query truncation to 77 tokens...')
@@ -734,6 +1028,83 @@ async function main() {
     }
     pass(
       `Main process event loop remained responsive during search worker execution (heartbeat: ${heartbeatLatency}ms)`
+    )
+
+    // 12e. Queue saturation (> 16 concurrent pending requests) with explicit overload handling & recovery
+    const saturationOutcomes = await evaluate(
+      app.cdp,
+      `(async () => {
+        const reqs = []
+        for (let i = 0; i < 22; i++) {
+          reqs.push(
+            window.api.searchPhotosSemantic({
+              queryText: 'saturated queue test query',
+              offset: i,
+              limit: 1
+            })
+          )
+        }
+        const settled = await Promise.allSettled(reqs)
+        const fulfilled = settled.filter((s) => s.status === 'fulfilled').length
+        const overloaded = settled.filter(
+          (s) =>
+            s.status === 'rejected' &&
+            String(s.reason?.message ?? s.reason).toLowerCase().includes('overload')
+        ).length
+        return { fulfilled, overloaded, total: settled.length }
+      })()`
+    )
+    if (saturationOutcomes.overloaded === 0 || saturationOutcomes.fulfilled === 0) {
+      throw new Error(
+        `Expected queue saturation (>16 requests) to trigger SearchOverloadError while completing bounded requests, got: ${JSON.stringify(saturationOutcomes)}`
+      )
+    }
+    pass(
+      `Queue saturation handled explicitly (${saturationOutcomes.fulfilled} fulfilled, ${saturationOutcomes.overloaded} rejected with SearchOverloadError out of ${saturationOutcomes.total} concurrent requests)`
+    )
+
+    // 12f. Concurrent indexing, metadata extraction, thumbnail decode, and semantic search
+    const concurrentMultiWorkload = await evaluate(
+      app.cdp,
+      `(async () => {
+        const [thumbRes, metaRes, indexRes, searchRes, diagDuring] = await Promise.all([
+          window.api.getThumbnail({
+            locationId: ${forestPhoto.id},
+            expectedByteSize: ${forestPhoto.byteSize},
+            expectedMtimeMs: ${forestPhoto.filesystemMtimeMs},
+            priority: 'high'
+          }),
+          window.api.startPhotoMetadataExtraction({ retryFailed: false }),
+          window.api.startSemanticIndexing(),
+          window.api.searchPhotosSemantic({
+            queryText: 'lush green evergreen pine trees',
+            offset: 0,
+            limit: 5
+          }),
+          window.api.getPhotosDiagnostics()
+        ])
+        return {
+          thumbStatus: thumbRes.status,
+          metaStatus: metaRes.status,
+          indexStatus: indexRes.status,
+          searchTop: searchRes.items[0]?.photo?.fileName,
+          diagDuring
+        }
+      })()`
+    )
+    await waitForMetadataJob(app.cdp, 30000)
+    await waitForSemanticIndexJob(app.cdp, 30000)
+    if (
+      concurrentMultiWorkload.thumbStatus !== 'ready' ||
+      !concurrentMultiWorkload.searchTop?.includes('forest') ||
+      (concurrentMultiWorkload.diagDuring.totalAppLiveWorkers ?? 0) > 3
+    ) {
+      throw new Error(
+        `Concurrent indexing + metadata + thumbnail + search failed: ${JSON.stringify(concurrentMultiWorkload)}`
+      )
+    }
+    pass(
+      `Concurrent indexing, metadata extraction, thumbnail decode ('${concurrentMultiWorkload.thumbStatus}'), and search ('${concurrentMultiWorkload.searchTop}') completed within worker bounds (totalAppLiveWorkers=${concurrentMultiWorkload.diagDuring.totalAppLiveWorkers ?? 0}<=3)`
     )
 
     // 13. UI Navigation & Search Bar Controls
@@ -990,20 +1361,275 @@ async function main() {
         `Expected totalMatched >= 10200 and corruptCount === 1, got totalMatched=${deepRes.totalMatched}, corruptCount=${deepRes.corruptCount}`
       )
     }
+    // Verify deterministic tie-breaking (score DESC, fileLocationId ASC) across tied synthetic items
+    for (let k = 0; k < deepRes.items.length - 1; k++) {
+      const a = deepRes.items[k]
+      const b = deepRes.items[k + 1]
+      if (a.score === b.score && a.photo.id >= b.photo.id) {
+        throw new Error(
+          `Deterministic tie-breaking violation at deep offset 10050: id ${a.photo.id} before ${b.photo.id} with equal score ${a.score}`
+        )
+      }
+    }
     pass(
-      `Large-catalog deep search (offset=10,050 across ${deepRes.totalMatched} matches, corruptCount=${deepRes.corruptCount}) succeeded with responsive main heartbeat (${largeHbLatency}ms)`
+      `Large-catalog deep search (offset=10,050 across ${deepRes.totalMatched} matches, corruptCount=${deepRes.corruptCount}, deterministic tie-breaking verified) succeeded with responsive main heartbeat (${largeHbLatency}ms)`
+    )
+
+    // 14c. Real Renderer Virtual Grid Deep Pagination (>10,000), LRU Eviction Return, Corrupt Warning DOM, and Continuous Frame/Worker Diagnostics
+    console.log(
+      '[Phase 12c] Exercising real renderer virtual grid deep pagination (>10,000), >40-page LRU eviction return, and continuous rAF/worker diagnostics...'
+    )
+    // Start continuous rAF frame-interval sampler in renderer
+    await evaluate(
+      app.cdp,
+      `(() => {
+        window.__stage6eRafDeltas = []
+        window.__stage6eRafRunning = true
+        let last = performance.now()
+        const tick = (now) => {
+          if (!window.__stage6eRafRunning) return
+          window.__stage6eRafDeltas.push(now - last)
+          last = now
+          requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      })()`
+    )
+
+    // Submit query in Photos UI search bar over the 10,200+ catalog
+    await evaluate(
+      app.cdp,
+      `(() => {
+        const input = document.querySelector('.photos-search-input')
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value'
+        )?.set
+        if (setter) {
+          setter.call(input, 'golden orange sunset')
+        } else {
+          input.value = 'golden orange sunset'
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })()`
+    )
+    await sleep(100)
+    await evaluate(
+      app.cdp,
+      `(() => {
+        const submitBtn = document.querySelector('.photos-search-submit-btn')
+        if (submitBtn) submitBtn.click()
+      })()`
+    )
+
+    // Wait for 10,210 matches and corruptCount warning badge in DOM
+    let largeMatchBadge = ''
+    let corruptDomWarning = ''
+    for (let i = 0; i < 60; i++) {
+      const domState = await evaluate(
+        app.cdp,
+        `({
+          badge: document.querySelector('[data-testid="search-match-badge"]')?.textContent ?? '',
+          corrupt: document.querySelector('[data-testid="search-corrupt-warning"]')?.textContent ?? ''
+        })`
+      )
+      largeMatchBadge = domState.badge
+      corruptDomWarning = domState.corrupt
+      if (largeMatchBadge.includes('10210') && corruptDomWarning.includes('1 damaged')) {
+        break
+      }
+      await sleep(150)
+    }
+    if (!largeMatchBadge.includes('10210') || !corruptDomWarning.includes('1 damaged')) {
+      throw new Error(
+        `Expected DOM badge '10210 semantic matches' and '1 damaged' warning, got badge='${largeMatchBadge}', corrupt='${corruptDomWarning}'`
+      )
+    }
+    pass(
+      `Photos UI rendered large-catalog match badge ('${largeMatchBadge}') and corrupt vector warning ('${corruptDomWarning}')`
+    )
+
+    // Scroll virtual grid to bottom (beyond offset 10,000) and verify deep cards mount with similarity badges and bounded DOM cells (<= 200)
+    await evaluate(
+      app.cdp,
+      `(() => {
+        const grid = document.querySelector('.photos-grid-container')
+        if (grid) {
+          grid.scrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+          grid.dispatchEvent(new Event('scroll', { bubbles: true }))
+        }
+      })()`
+    )
+
+    let deepGridState = null
+    for (let i = 0; i < 60; i++) {
+      deepGridState = await evaluate(
+        app.cdp,
+        `(() => {
+          const cards = Array.from(document.querySelectorAll('.photo-card'))
+          const names = cards.map((c) => c.querySelector('.photo-filename')?.textContent ?? '')
+          const badges = cards.filter((c) => c.querySelector('.badge-similarity-score')).length
+          const deepNames = names.filter((n) => n.startsWith('synthetic_scale_10'))
+          return {
+            mountedCells: cards.length,
+            hasDeepSynthetic: deepNames.length >= 6 && !names.some((n) => n.includes('Loading')),
+            badges,
+            sampleNames: deepNames.slice(-3)
+          }
+        })()`
+      )
+      if (deepGridState.hasDeepSynthetic && deepGridState.badges > 0) break
+      await sleep(150)
+    }
+    if (
+      !deepGridState ||
+      !deepGridState.hasDeepSynthetic ||
+      deepGridState.badges === 0 ||
+      deepGridState.mountedCells > 200
+    ) {
+      throw new Error(
+        `Real renderer deep scroll (>10,000) failed or exceeded cell bounds: ${JSON.stringify(deepGridState)}`
+      )
+    }
+    pass(
+      `Real renderer virtual grid scrolled beyond offset 10,000 (${deepGridState.sampleNames.join(', ')}) with ${deepGridState.badges} similarity badges and ${deepGridState.mountedCells} mounted DOM cells (<= 200 bound)`
+    )
+
+    // Traverse > 40 distinct pages in the virtual grid to evict page 0 from the 40-page (2,000-photo) LRU cache, then return to page 0 (scrollTop = 0)
+    await evaluate(
+      app.cdp,
+      `(async () => {
+        const grid = document.querySelector('.photos-grid-container')
+        if (!grid) return
+        const totalScroll = Math.max(1, grid.scrollHeight - grid.clientHeight)
+        for (let p = 1; p <= 44; p++) {
+          grid.scrollTop = Math.floor((p / 200) * totalScroll)
+          grid.dispatchEvent(new Event('scroll', { bubbles: true }))
+          await new Promise((r) => setTimeout(r, 20))
+        }
+        // Return to evicted Page 0
+        grid.scrollTop = 0
+        grid.dispatchEvent(new Event('scroll', { bubbles: true }))
+      })()`
+    )
+
+    let returnedPage0State = null
+    for (let i = 0; i < 60; i++) {
+      returnedPage0State = await evaluate(
+        app.cdp,
+        `(() => {
+          const cards = Array.from(document.querySelectorAll('.photo-card'))
+          const topCard = cards[0]
+          const topName = topCard?.querySelector('.photo-filename')?.textContent ?? ''
+          const topBadge = topCard?.querySelector('.badge-similarity-score')?.textContent ?? ''
+          return {
+            mountedCells: cards.length,
+            topName,
+            topBadge
+          }
+        })()`
+      )
+      if (
+        returnedPage0State.topName.includes('sunset_beach.jpg') &&
+        returnedPage0State.topBadge.includes('% match')
+      ) {
+        break
+      }
+      await sleep(150)
+    }
+    if (
+      !returnedPage0State ||
+      !returnedPage0State.topName.includes('sunset_beach.jpg') ||
+      !returnedPage0State.topBadge.includes('% match') ||
+      returnedPage0State.mountedCells > 200
+    ) {
+      throw new Error(
+        `Return to evicted Page 0 after >40-page traversal failed: ${JSON.stringify(returnedPage0State)}`
+      )
+    }
+
+    // Stop continuous rAF sampler and inspect frame interval p95 + worker/memory diagnostics
+    const perfAndDiag = await evaluate(
+      app.cdp,
+      `(async () => {
+        window.__stage6eRafRunning = false
+        const deltas = (window.__stage6eRafDeltas ?? []).slice().sort((a, b) => a - b)
+        const p95Idx = Math.min(deltas.length - 1, Math.floor(deltas.length * 0.95))
+        const rafP95Ms = deltas.length > 0 ? deltas[p95Idx] : 0
+        const diag = await window.api.getPhotosDiagnostics()
+        return { rafSamples: deltas.length, rafP95Ms, diag }
+      })()`
+    )
+    const { rafSamples, rafP95Ms, diag } = perfAndDiag
+    if (
+      (diag.liveWorkers ?? 0) > 2 ||
+      (diag.searchLiveWorkers ?? 0) > 1 ||
+      (diag.totalAppLiveWorkers ?? 0) > 3 ||
+      (diag.searchPendingRequests ?? 0) > 16 ||
+      (diag.mainEventLoopDelayP95Ms ?? 0) >= 100
+    ) {
+      throw new Error(`Resource or event-loop bounds exceeded: ${JSON.stringify(diag)}`)
+    }
+    pass(
+      `Return to evicted Page 0 restored '${returnedPage0State.topName}' (${returnedPage0State.topBadge}); bounds verified (liveWorkers=${diag.liveWorkers ?? 0}<=2, searchLiveWorkers=${diag.searchLiveWorkers ?? 0}<=1, totalAppLiveWorkers=${diag.totalAppLiveWorkers ?? 0}<=3, mainLoopP95=${(diag.mainEventLoopDelayP95Ms ?? 0).toFixed(1)}ms<100ms, rAF p95=${rafP95Ms.toFixed(1)}ms across ${rafSamples} frames, mainRSS=${((diag.mainProcessRssBytes ?? 0) / (1024 * 1024)).toFixed(1)}MiB)`
+    )
+
+    // 14d. Restart persistence verification: relaunch app against persisted catalog & model without regenerating
+    console.log(
+      '[Phase 12d] Restarting Electron application to verify persisted catalog & model search without regeneration...'
+    )
+    killTree(app.child)
+    app = null
+    await sleep(1200)
+
+    const portRestart = await getFreePort()
+    app = await launchApp(userDataDir, portRestart)
+    const restartModelStatus = await evaluate(app.cdp, `window.api.getSemanticModelStatus()`)
+    if (restartModelStatus.state !== 'ready') {
+      throw new Error(
+        `Expected persisted model status 'ready' after restart, got: ${JSON.stringify(restartModelStatus)}`
+      )
+    }
+    const restartSearchRes = await evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'golden orange sunset over ocean horizon', offset: 0, limit: 5 })`
+    )
+    const restartDeepRes = await evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'golden orange sunset over ocean horizon', offset: 10050, limit: 10, minScore: -1.0 })`
+    )
+    if (
+      restartSearchRes.items[0]?.photo?.fileName !== 'sunset_beach.jpg' ||
+      restartDeepRes.totalMatched < 10_200 ||
+      restartDeepRes.corruptCount !== 1 ||
+      restartDeepRes.items.length !== 10
+    ) {
+      throw new Error(
+        `Post-restart persisted search failed: top=${restartSearchRes.items[0]?.photo?.fileName}, deepTotal=${restartDeepRes.totalMatched}`
+      )
+    }
+    pass(
+      `Post-restart search immediately served top match '${restartSearchRes.items[0].photo.fileName}' and deep offset 10,050 across ${restartDeepRes.totalMatched} persisted embeddings with zero re-indexing`
     )
 
     // 15. Source File Preservation Invariance
     console.log('[Phase 13] Verifying source file bitwise preservation invariance...')
-    assertDirectoryUnchanged(photosDir, initialPhotoBaselines, 'photos-source')
-    assertDirectoryUnchanged(offlineModelFixtureDir, offlineModelBaselines, 'offline-model-source')
+    const photosPreservation = assertDirectoryUnchanged(
+      photosDir,
+      initialPhotoBaselines,
+      'photos-source'
+    )
+    const modelPreservation = assertDirectoryUnchanged(
+      offlineModelFixtureDir,
+      offlineModelBaselines,
+      'offline-model-source'
+    )
     pass(
-      'Source preservation verified: 100% byte size, SHA-256, birthtime, and mtime invariance across all files'
+      `Source preservation verified: 100% byte size, SHA-256, birthtime, and mtime invariance across ${photosPreservation.totalFiles} photos (OS read atime updated on ${photosPreservation.atimeUpdatedCount}) and ${modelPreservation.totalFiles} model files (OS read atime updated on ${modelPreservation.atimeUpdatedCount})`
     )
 
     console.log(
-      `\n=== STAGE 6D REAL ELECTRON VERIFICATION PASSED (${passCount}/${passCount} CHECKS) ===\n`
+      `\n=== STAGE 6D/6E REAL ELECTRON VERIFICATION PASSED (${passCount}/${passCount} CHECKS) ===\n`
     )
   } catch (err) {
     console.error('\n[Verification Failure Inside Test]:', err)

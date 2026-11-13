@@ -89,12 +89,16 @@ src/
 │       │   ├── worker.ts     # Node worker_threads entry (thumbnails, dHash, ONNX CLIP, EXIF metadata, off-main SHA-256)
 │       │   ├── cache.ts      # Disposable WebP disk cache
 │       │   └── types.ts      # Worker request/response discriminated unions
-│       ├── semantic/      # Stage 6B: offline CLIP model provisioning & resumable semantic index coordinator
+│       ├── semantic/      # Stage 6B/6D/6E: offline CLIP model provisioning, resumable index & natural-language search
 │       │   ├── manifest.ts   # Pinned model identity, 7 artifact digests/sizes, recipe, approved CDN hosts
 │       │   ├── vector.ts     # 512-d Float32Array validation, L2 normalization, and blob conversion
 │       │   ├── model-manager.ts # SemanticModelManager (download, offline import, staging, off-main verification)
 │       │   ├── coordinator.ts # SemanticIndexCoordinator (resumable job execution, reuse verification, yielding)
-│       │   ├── types.ts      # Model status, job progress, and coordinator interfaces
+│       │   ├── text-embedder.ts # Worker-safe CLIP text tokenizer & ONNX text encoder with 77-token truncation
+│       │   ├── ranking.ts    # TopKMinHeap (<=1,000) & disk-backed SQLite ranker (>1,000) with ScoredEmbeddingIdentity
+│       │   ├── search-worker.ts # Dedicated search worker (off-main model check, text embedding, WAL snapshot ranking)
+│       │   ├── search-coordinator.ts # SemanticSearchCoordinator (<=1 live worker, <=16 pending queue, hydration revalidation)
+│       │   ├── types.ts      # Model status, job progress, search, and coordinator interfaces
 │       │   └── index.ts      # Public semantic exports
 │       └── metadata/      # Stage 6C: read-only EXIF technical metadata extraction & normalization
 │           ├── types.ts      # Technical metadata, date interpretation, facet, and job contracts
@@ -500,7 +504,7 @@ src/
       - `PhotoMetadataCoordinator` snapshots exact authorized catalog scope in `photo_metadata_job_items` in bounded 500-item batches (no permanent collection-size cap); resume processes only originally snapshotted `pending` items; unchanged content reuse requires live off-main source SHA-256 verification (`verify_source`); commits revalidate catalog `content_revision` transactionally (`REVISION_MISMATCH`).
       - Narrow typed IPC (`metadata:start-extraction`, `metadata:pause-extraction`, `metadata:resume-extraction`, `metadata:cancel-extraction`, `metadata:get-progress`, `metadata:progress-event`, `metadata:get-photo-detail`, `metadata:get-facets`, plus expanded `photos:get-page`) with bidirectional Zod schemas, top-level sender validation, and renderer monotonic sequence/generation guards (`usePhotos.ts`, `usePhotoMetadata.ts`, `PhotoMetadataFilterPanel.tsx`, `PhotosPanel.tsx`).
 
-17. **Natural-Language Photo Search, Ranking & Photos UI Integration (Stage 6D)**:
+17. **Natural-Language Photo Search, Ranking & Photos UI Integration (Stage 6D & Stage 6E)**:
     - **Inviolable Principles & Machine Inference Separation**:
       - Semantic match scores are cosine similarities in $[-1.0, 1.0]$ derived from multimodal CLIP embeddings, rendered in UI as percentage match badges. They are machine inferences, not factual object labels, ground-truth classification, or probabilistic confidence.
       - Source preservation: source files are strictly read-only and 100% untouched.
@@ -508,6 +512,7 @@ src/
     - **Dedicated Search Worker Lifecycle & Bounds (`search_worker.ts`, `search-coordinator.ts`)**:
       - Dedicated worker thread (`out/main/search_worker.js`) executing outside Electron main and renderer for tokenizer evaluation (`@huggingface/tokenizers@0.2.0`), ONNX text inference (`text_model_quantized.onnx`), candidate traversal, vector decoding, and ranking.
       - Worker capacity: $\le 1$ live search worker (`ensureWorker` waits on `terminatingWorkers` and `spawningWorkerPromise` so live workers never exceed 1), $\le 2$ image workers, and $\le 3$ total live workers across the application (counting terminating workers until process `'exit'`), plus bounded pending request capacity (`maxPendingRequests = 16`, throwing `SearchOverloadError`).
+      - Aggregate worker diagnostics (`PHOTOS_GET_DIAGNOSTICS`): reports `searchActiveWorkers`, `searchTerminatingWorkers`, `searchLiveWorkers`, `searchPendingRequests`, `searchActiveCalls`, `searchMaxPendingRequests`, and `totalAppLiveWorkers` alongside `ThumbnailCoordinator` diagnostics so runtime bounds can be inspected continuously across IPC.
       - Pre-load model directory integrity revalidation (`verifyModelDirIntegrity`) off main before every load/search without a directory `mtimeMs` shortcut (verifying `realpathSync` containment, non-symlink `lstatSync`, and SHA-256 of all 7 artifacts, releasing cached ONNX text session/tokenizer via `releaseTextSession()` on failure or installation change); duplicate concurrent session loads prevented via retry-safe in-flight promise caching (`getOrEmbedQuery`).
       - Active worker cancellation, query supersession (checking `hadOlderActiveWork` before clearing old `activeRequests` so busy workers are terminated), execution timeouts (15,000 ms), shutdown cleanup, and capacity recovery.
       - Text input bound: $\le 500$ characters, trimmed, non-empty. Honestly truncates queries exceeding CLIP's 77-token context window with `truncated: true` and reported `tokenCount`.
@@ -525,13 +530,14 @@ src/
       - Streaming candidate vector traversal via SQLite `stmt.iterate()` with `rankCandidatesWithBoundedPaging`: uses `TopKMinHeap` in JS memory for `offset + limit <= 1,000` ($O(\log K)$ sift operations, $O(1)$ rejection) and a private disk-backed temporary SQLite database (`new DatabaseSync('')` with `PRAGMA temp_store = FILE; PRAGMA cache_size = -2000;` — 2 MiB cache cap) for `offset + limit > 1,000`, keeping all offsets reachable without whole-catalog JS vector index materialization or an unapproved collection/offset cap. Tested and verified over >50,000 synthetic embeddings and beyond offset 10,000.
       - Coverage counters report `eligibleCount` (compatible non-corrupt searchable embeddings), `unindexedCount`, `staleCount`, and `corruptCount`.
       - Stable deterministic ordering: `score DESC, fileLocationId ASC`.
-      - Pagination bounds: `limit <= 100`, `offset >= 0` (unbounded non-negative integer). Renderer `searchScores` map evicted alongside LRU page cache records.
+      - Pagination bounds: `limit <= 100`, `offset >= 0` (unbounded non-negative integer). Renderer `usePhotos` tracks per-page photo IDs in `pagePhotoIdsRef` outside pure React state updaters, evicting only `evictedPhotoIds` from `searchScores` when pages are evicted from the 40-page LRU cache (`MAX_PAGES = 40`) and preserving cached scores when returning to evicted Page 0.
     - **Typed IPC & Sandboxed Preload**:
       - Narrow IPC channels: `SEMANTIC_SEARCH_PHOTOS` (`'semantic:search-photos'`), `SEMANTIC_SEARCH_CANCEL` (`'semantic:search-cancel'`).
       - Bidirectional Zod schema validation (`SemanticSearchRequestSchema`, `SemanticSearchResponseSchema`, `SemanticSearchCancelRequestSchema`, `SemanticSearchCancelResponseSchema`). Sender validation enforced.
       - Sandboxed preload bundle verified to require only `electron`.
     - **Photos View UI Integration (`PhotosSearchBar.tsx`, `usePhotos.ts`, `PhotosPanel.tsx`)**:
-      - Compact natural-language search bar in the Photos toolbar with query input, clear button, loading spinner, match count badge, latency/token badge, unindexed/stale coverage warnings, and prominent non-factual AI inference disclaimer.
+      - Compact natural-language search bar in the Photos toolbar with query input, clear button, loading spinner, match count badge, latency/token badge, unindexed/stale/corrupt coverage warnings (`[data-testid="search-corrupt-warning"]`), and prominent non-factual AI inference disclaimer.
+      - Model setup & recovery guidance: displays `[data-testid="search-model-missing-notice"]` when `modelStatus` is `'unprovisioned'` or `'missing'`, and an accessible alert banner `[data-testid="search-model-corrupt-notice"]` (`role="alert"`) when `modelStatus` is `'corrupt'` or `'error'`, directing the user to re-download or re-import the verified CLIP ViT-B/32 model in the Semantic Index panel.
       - Seamlessly combines with rating, flag, collection, and Stage 6C technical metadata filters.
       - Clearing search restores ordinary browsing without reload or state corruption.
       - Photo cards display similarity percentage badges for machine inference matches.
