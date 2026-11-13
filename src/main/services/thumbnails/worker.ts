@@ -205,6 +205,10 @@ if (parentPort) {
           return
         }
 
+        const workerThumbDelay = Number(process.env.PV_TEST_WORKER_THUMBNAIL_DELAY_MS ?? 0)
+        if (Number.isFinite(workerThumbDelay) && workerThumbDelay > 0) {
+          await new Promise((r) => setTimeout(r, workerThumbDelay))
+        }
         const result = await decodeThumbnail(message.params!)
         parentPort!.postMessage({ id: message.id, ...result })
       } catch (err: unknown) {

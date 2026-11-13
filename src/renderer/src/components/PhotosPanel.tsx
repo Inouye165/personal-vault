@@ -262,6 +262,7 @@ function PhotoCardCell({
 export function PhotosPanel() {
   const {
     photos,
+    cachedPageIndices,
     totalCount,
     isLoading,
     error,
@@ -746,6 +747,9 @@ export function PhotosPanel() {
                 tabIndex={-1}
                 role="region"
                 aria-label="Photographs Grid"
+                data-cached-page-count={cachedPageIndices.length}
+                data-cached-pages={cachedPageIndices.join(',')}
+                data-search-score-count={searchScores.size}
               >
                 <div
                   className="photos-virtual-height-holder photos-virtual-container"

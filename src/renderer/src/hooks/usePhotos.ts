@@ -7,7 +7,7 @@
  * filter refill on out-of-filter edits, and selection state.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   PhotoFileTypeBasis,
   PhotoFlagFilter,
@@ -100,6 +100,7 @@ interface InFlightThumbRequest {
 
 export interface UsePhotosResult {
   readonly photos: readonly PhotoItem[]
+  readonly cachedPageIndices: readonly number[]
   readonly totalCount: number
   readonly isLoading: boolean
   readonly error: string | null
@@ -785,8 +786,11 @@ export function usePhotos(): UsePhotosResult {
     setSelectedId(id)
   }, [])
 
+  const cachedPageIndices = useMemo(() => Array.from(pages.keys()).sort((a, b) => a - b), [pages])
+
   return {
     photos,
+    cachedPageIndices,
     totalCount,
     isLoading,
     error,

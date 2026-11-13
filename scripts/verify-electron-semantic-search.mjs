@@ -23,6 +23,11 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import {
+  assertSearchPerformanceAndResourceBounds,
+  assertConcurrentWorkloadOverlap,
+  assertLruEvictionAndReload
+} from './verify-semantic-search-bounds.mjs'
+import {
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -1030,6 +1035,22 @@ async function main() {
       `Main process event loop remained responsive during search worker execution (heartbeat: ${heartbeatLatency}ms)`
     )
 
+    // 12e & 12f: Controlled test-delay launch for deterministic queue saturation and 4-way concurrent workload overlap
+    console.log(
+      '[Phase 10b] Relaunching with isolated test delays (PV_TEST_SEARCH_DELAY_MS=250, PV_TEST_WORKER_*_DELAY_MS=120) for queue saturation & overlap proof...'
+    )
+    killTree(app.child)
+    app = null
+    await sleep(800)
+
+    const portDelayed = await getFreePort()
+    app = await launchApp(userDataDir, portDelayed, {
+      PV_TEST_SEARCH_DELAY_MS: '250',
+      PV_TEST_WORKER_METADATA_DELAY_MS: '120',
+      PV_TEST_WORKER_SEMANTIC_DELAY_MS: '120',
+      PV_TEST_WORKER_THUMBNAIL_DELAY_MS: '120'
+    })
+
     // 12e. Queue saturation (> 16 concurrent pending requests) with explicit overload handling & recovery
     const saturationOutcomes = await evaluate(
       app.cdp,
@@ -1063,49 +1084,132 @@ async function main() {
       `Queue saturation handled explicitly (${saturationOutcomes.fulfilled} fulfilled, ${saturationOutcomes.overloaded} rejected with SearchOverloadError out of ${saturationOutcomes.total} concurrent requests)`
     )
 
-    // 12f. Concurrent indexing, metadata extraction, thumbnail decode, and semantic search
-    const concurrentMultiWorkload = await evaluate(
+    // 12f. Prove genuine concurrent workload overlap on fresh uncached, unindexed, un-extracted fixtures
+    const overlapPhotosDir = join(tempBase, 'overlap_photos')
+    mkdirSync(overlapPhotosDir, { recursive: true })
+    for (let i = 1; i <= 4; i++) {
+      await sharp({
+        create: {
+          width: 400,
+          height: 300,
+          channels: 3,
+          background: { r: 25 * i, g: 140, b: 60 + 20 * i }
+        }
+      })
+        .jpeg({ quality: 88 })
+        .toFile(join(overlapPhotosDir, `overlap_${i}.jpg`))
+    }
+    const overlapScanRes = await evaluate(
+      app.cdp,
+      `window.api.startScan({ roots: [${JSON.stringify(overlapPhotosDir)}] })`
+    )
+    const overlapScanJobId = overlapScanRes?.job?.jobId ?? overlapScanRes?.jobId
+    if (!overlapScanRes?.success || typeof overlapScanJobId !== 'number') {
+      throw new Error(`Failed to start overlap scan job: ${JSON.stringify(overlapScanRes)}`)
+    }
+    await waitForScanJob(app.cdp, overlapScanJobId)
+
+    const allPhotosAfterOverlapScan = await evaluate(
+      app.cdp,
+      `window.api.getPhotosPage({ offset: 0, limit: 50 })`
+    )
+    const overlapItems = allPhotosAfterOverlapScan.items.filter((p) =>
+      p.fileName.startsWith('overlap_')
+    )
+    if (overlapItems.length !== 4) {
+      throw new Error(`Expected 4 fresh overlap photos, found ${overlapItems.length}`)
+    }
+
+    const diagBeforeOverlap = await evaluate(app.cdp, `window.api.getPhotosDiagnostics()`)
+
+    // Fire uncached thumbnail decodes, metadata extraction, semantic indexing, and semantic search together
+    const overlapStartEval = evaluate(
       app.cdp,
       `(async () => {
-        const [thumbRes, metaRes, indexRes, searchRes, diagDuring] = await Promise.all([
-          window.api.getThumbnail({
-            locationId: ${forestPhoto.id},
-            expectedByteSize: ${forestPhoto.byteSize},
-            expectedMtimeMs: ${forestPhoto.filesystemMtimeMs},
-            priority: 'high'
-          }),
+        const items = ${JSON.stringify(
+          overlapItems.map((p) => ({
+            id: p.id,
+            byteSize: p.byteSize,
+            filesystemMtimeMs: p.filesystemMtimeMs
+          }))
+        )}
+        const [thumbs, metaJob, indexJob, searchRes] = await Promise.all([
+          Promise.all(
+            items.map((item) =>
+              window.api.getThumbnail({
+                locationId: item.id,
+                expectedByteSize: item.byteSize,
+                expectedMtimeMs: item.filesystemMtimeMs,
+                priority: 'high'
+              })
+            )
+          ),
           window.api.startPhotoMetadataExtraction({ retryFailed: false }),
           window.api.startSemanticIndexing(),
           window.api.searchPhotosSemantic({
             queryText: 'lush green evergreen pine trees',
             offset: 0,
             limit: 5
-          }),
-          window.api.getPhotosDiagnostics()
+          })
         ])
         return {
-          thumbStatus: thumbRes.status,
-          metaStatus: metaRes.status,
-          indexStatus: indexRes.status,
-          searchTop: searchRes.items[0]?.photo?.fileName,
-          diagDuring
+          thumbStatuses: thumbs.map((t) => t.status),
+          metaStatus: metaJob.status,
+          indexStatus: indexJob.status,
+          searchTop: searchRes.items[0]?.photo?.fileName
         }
       })()`
     )
-    await waitForMetadataJob(app.cdp, 30000)
-    await waitForSemanticIndexJob(app.cdp, 30000)
+
+    const overlapSamples = []
+    const overlapDeadline = Date.now() + 30000
+    while (Date.now() < overlapDeadline) {
+      const [diag, metaProg, semProg] = await Promise.all([
+        evaluate(app.cdp, `window.api.getPhotosDiagnostics()`),
+        evaluate(app.cdp, `window.api.getPhotoMetadataProgress()`),
+        evaluate(app.cdp, `window.api.getSemanticIndexProgress()`)
+      ])
+      overlapSamples.push({
+        diag,
+        metadataJobStatus: metaProg.status,
+        semanticJobStatus: semProg.status
+      })
+      if (
+        (metaProg.status === 'completed' || metaProg.status === 'failed') &&
+        (semProg.status === 'completed' || semProg.status === 'failed')
+      ) {
+        break
+      }
+      await sleep(30)
+    }
+
+    const overlapWorkRes = await overlapStartEval
+    const diagAfterOverlap = await evaluate(app.cdp, `window.api.getPhotosDiagnostics()`)
+    const overlapSummary = assertConcurrentWorkloadOverlap({
+      samples: overlapSamples,
+      deltaTotalDecodes:
+        (diagAfterOverlap.totalDecodes ?? 0) - (diagBeforeOverlap.totalDecodes ?? 0),
+      deltaCacheMisses: (diagAfterOverlap.cacheMisses ?? 0) - (diagBeforeOverlap.cacheMisses ?? 0)
+    })
     if (
-      concurrentMultiWorkload.thumbStatus !== 'ready' ||
-      !concurrentMultiWorkload.searchTop?.includes('forest') ||
-      (concurrentMultiWorkload.diagDuring.totalAppLiveWorkers ?? 0) > 3
+      overlapWorkRes.thumbStatuses.some((s) => s !== 'ready') ||
+      !overlapWorkRes.searchTop?.includes('forest')
     ) {
-      throw new Error(
-        `Concurrent indexing + metadata + thumbnail + search failed: ${JSON.stringify(concurrentMultiWorkload)}`
-      )
+      throw new Error(`Overlap workload results invalid: ${JSON.stringify(overlapWorkRes)}`)
     }
     pass(
-      `Concurrent indexing, metadata extraction, thumbnail decode ('${concurrentMultiWorkload.thumbStatus}'), and search ('${concurrentMultiWorkload.searchTop}') completed within worker bounds (totalAppLiveWorkers=${concurrentMultiWorkload.diagDuring.totalAppLiveWorkers ?? 0}<=3)`
+      `Proven simultaneous overlap across ${overlapSummary.sampleCount} polls (decodes=${overlapSummary.deltaTotalDecodes}, misses=${overlapSummary.deltaCacheMisses}, peakActiveMeta=${overlapSummary.peakActiveMetadataTasks}, peakActiveSem=${overlapSummary.peakActiveSemanticTasks}, peakSearchActive=${overlapSummary.peakSearchActiveCalls}, peakTotalAppLiveWorkers=${overlapSummary.peakTotalAppLiveWorkers}<=3)`
     )
+
+    // Relaunch without artificial test delays for uncontaminated production UI, scale & restart timings
+    console.log(
+      '[Phase 10c] Relaunching without test delays for production UI & scale verification...'
+    )
+    killTree(app.child)
+    app = null
+    await sleep(800)
+    const portClean = await getFreePort()
+    app = await launchApp(userDataDir, portClean)
 
     // 13. UI Navigation & Search Bar Controls
     console.log('[Phase 11] Verifying Photos view search bar DOM controls and state integration...')
@@ -1219,24 +1323,23 @@ async function main() {
       })()`
     )
 
+    const totalRealPhotosCount = initialPhotoBaselines.size + 4
     let totalCountText = ''
     for (let i = 0; i < 40; i++) {
       totalCountText = await evaluate(
         app.cdp,
         `document.querySelector('.photos-count-info .count-badge')?.textContent ?? ''`
       )
-      if (totalCountText.includes(`${initialPhotoBaselines.size} photos`)) break
+      if (totalCountText.includes(`${totalRealPhotosCount} photos`)) break
       await sleep(150)
     }
 
-    if (!totalCountText.includes(`${initialPhotoBaselines.size} photos`)) {
+    if (!totalCountText.includes(`${totalRealPhotosCount} photos`)) {
       throw new Error(
-        `Expected all ${initialPhotoBaselines.size} photos after clear, got '${totalCountText}'`
+        `Expected all ${totalRealPhotosCount} photos after clear, got '${totalCountText}'`
       )
     }
-    pass(
-      `Clearing search restored ordinary browsing with all ${initialPhotoBaselines.size} photographs`
-    )
+    pass(`Clearing search restored ordinary browsing with all ${totalRealPhotosCount} photographs`)
 
     // 14. Responsive Event-Loop Latency Check
     console.log('[Phase 12] Measuring main process responsiveness during query execution...')
@@ -1422,9 +1525,22 @@ async function main() {
       })()`
     )
 
-    // Wait for 10,210 matches and corruptCount warning badge in DOM
+    const expectedLargeMatchCount = totalRealPhotosCount + 10_200
+    // Wait for expectedLargeMatchCount matches and corruptCount warning badge in DOM
     let largeMatchBadge = ''
     let corruptDomWarning = ''
+    const largeDiagSamples = []
+    let peakLargeMountedCells = 0
+
+    const collectLargeDiagSample = async () => {
+      const [diag, mountedCells] = await Promise.all([
+        evaluate(app.cdp, `window.api.getPhotosDiagnostics()`),
+        evaluate(app.cdp, `document.querySelectorAll('.photo-card').length`)
+      ])
+      largeDiagSamples.push(diag)
+      peakLargeMountedCells = Math.max(peakLargeMountedCells, mountedCells)
+    }
+
     for (let i = 0; i < 60; i++) {
       const domState = await evaluate(
         app.cdp,
@@ -1435,14 +1551,23 @@ async function main() {
       )
       largeMatchBadge = domState.badge
       corruptDomWarning = domState.corrupt
-      if (largeMatchBadge.includes('10210') && corruptDomWarning.includes('1 damaged')) {
+      if (i % 2 === 0) {
+        await collectLargeDiagSample()
+      }
+      if (
+        largeMatchBadge.includes(String(expectedLargeMatchCount)) &&
+        corruptDomWarning.includes('1 damaged')
+      ) {
         break
       }
       await sleep(150)
     }
-    if (!largeMatchBadge.includes('10210') || !corruptDomWarning.includes('1 damaged')) {
+    if (
+      !largeMatchBadge.includes(String(expectedLargeMatchCount)) ||
+      !corruptDomWarning.includes('1 damaged')
+    ) {
       throw new Error(
-        `Expected DOM badge '10210 semantic matches' and '1 damaged' warning, got badge='${largeMatchBadge}', corrupt='${corruptDomWarning}'`
+        `Expected DOM badge '${expectedLargeMatchCount} semantic matches' and '1 damaged' warning, got badge='${largeMatchBadge}', corrupt='${corruptDomWarning}'`
       )
     }
     pass(
@@ -1478,6 +1603,7 @@ async function main() {
           }
         })()`
       )
+      await collectLargeDiagSample()
       if (deepGridState.hasDeepSynthetic && deepGridState.badges > 0) break
       await sleep(150)
     }
@@ -1495,21 +1621,86 @@ async function main() {
       `Real renderer virtual grid scrolled beyond offset 10,000 (${deepGridState.sampleNames.join(', ')}) with ${deepGridState.badges} similarity badges and ${deepGridState.mountedCells} mounted DOM cells (<= 200 bound)`
     )
 
-    // Traverse > 40 distinct pages in the virtual grid to evict page 0 from the 40-page (2,000-photo) LRU cache, then return to page 0 (scrollTop = 0)
+    // Deterministically traverse > 40 distinct pages (1..44), waiting for each completed page load in cache,
+    // verify Page 0 eviction, then return to scrollTop = 0 and verify Page 0 reload + retained page scores.
+    const observedPagesSet = new Set([0])
+    const totalScrollRange = await evaluate(
+      app.cdp,
+      `(() => {
+        const grid = document.querySelector('.photos-grid-container')
+        return grid ? Math.max(1, grid.scrollHeight - grid.clientHeight) : 1
+      })()`
+    )
+    for (let p = 1; p <= 44; p++) {
+      const targetScroll = Math.floor(((p * 50) / expectedLargeMatchCount) * totalScrollRange)
+      await evaluate(
+        app.cdp,
+        `(() => {
+          const grid = document.querySelector('.photos-grid-container')
+          if (grid) {
+            grid.scrollTop = ${targetScroll}
+            grid.dispatchEvent(new Event('scroll', { bubbles: true }))
+          }
+        })()`
+      )
+
+      let pageLoaded = false
+      for (let w = 0; w < 40; w++) {
+        const cacheAttr = await evaluate(
+          app.cdp,
+          `document.querySelector('.photos-grid-container')?.getAttribute('data-cached-pages') ?? ''`
+        )
+        const cachedList = cacheAttr
+          .split(',')
+          .filter(Boolean)
+          .map((n) => Number(n))
+        for (const cp of cachedList) observedPagesSet.add(cp)
+        if (cachedList.includes(p)) {
+          pageLoaded = true
+          break
+        }
+        await sleep(30)
+      }
+      if (!pageLoaded) {
+        throw new Error(
+          `Page ${p} did not complete loading into renderer cache during LRU traversal`
+        )
+      }
+      if (p % 10 === 0) {
+        await collectLargeDiagSample()
+      }
+    }
+
+    const afterTraversalCache = await evaluate(
+      app.cdp,
+      `(() => {
+        const grid = document.querySelector('.photos-grid-container')
+        const rawPages = grid?.getAttribute('data-cached-pages') ?? ''
+        const cachedPages = rawPages.split(',').filter(Boolean).map((n) => Number(n))
+        return {
+          cachedPageCount: Number(grid?.getAttribute('data-cached-page-count') ?? 0),
+          cachedPages,
+          searchScoreCount: Number(grid?.getAttribute('data-search-score-count') ?? 0)
+        }
+      })()`
+    )
+    const afterTraversal = {
+      distinctPagesObserved: observedPagesSet.size,
+      cachedPageCount: afterTraversalCache.cachedPageCount,
+      cachedPages: afterTraversalCache.cachedPages,
+      retainedSamplePage: 44,
+      searchScoreCount: afterTraversalCache.searchScoreCount
+    }
+
+    // Return to evicted Page 0 (scrollTop = 0) and wait for reload
     await evaluate(
       app.cdp,
-      `(async () => {
+      `(() => {
         const grid = document.querySelector('.photos-grid-container')
-        if (!grid) return
-        const totalScroll = Math.max(1, grid.scrollHeight - grid.clientHeight)
-        for (let p = 1; p <= 44; p++) {
-          grid.scrollTop = Math.floor((p / 200) * totalScroll)
+        if (grid) {
+          grid.scrollTop = 0
           grid.dispatchEvent(new Event('scroll', { bubbles: true }))
-          await new Promise((r) => setTimeout(r, 20))
         }
-        // Return to evicted Page 0
-        grid.scrollTop = 0
-        grid.dispatchEvent(new Event('scroll', { bubbles: true }))
       })()`
     )
 
@@ -1518,6 +1709,9 @@ async function main() {
       returnedPage0State = await evaluate(
         app.cdp,
         `(() => {
+          const grid = document.querySelector('.photos-grid-container')
+          const rawPages = grid?.getAttribute('data-cached-pages') ?? ''
+          const cachedPages = rawPages.split(',').filter(Boolean).map((n) => Number(n))
           const cards = Array.from(document.querySelectorAll('.photo-card'))
           const topCard = cards[0]
           const topName = topCard?.querySelector('.photo-filename')?.textContent ?? ''
@@ -1525,11 +1719,16 @@ async function main() {
           return {
             mountedCells: cards.length,
             topName,
-            topBadge
+            topBadge,
+            cachedPageCount: Number(grid?.getAttribute('data-cached-page-count') ?? 0),
+            cachedPages,
+            searchScoreCount: Number(grid?.getAttribute('data-search-score-count') ?? 0)
           }
         })()`
       )
+      await collectLargeDiagSample()
       if (
+        returnedPage0State.cachedPages.includes(0) &&
         returnedPage0State.topName.includes('sunset_beach.jpg') &&
         returnedPage0State.topBadge.includes('% match')
       ) {
@@ -1540,38 +1739,42 @@ async function main() {
     if (
       !returnedPage0State ||
       !returnedPage0State.topName.includes('sunset_beach.jpg') ||
-      !returnedPage0State.topBadge.includes('% match') ||
-      returnedPage0State.mountedCells > 200
+      !returnedPage0State.topBadge.includes('% match')
     ) {
       throw new Error(
         `Return to evicted Page 0 after >40-page traversal failed: ${JSON.stringify(returnedPage0State)}`
       )
     }
 
-    // Stop continuous rAF sampler and inspect frame interval p95 + worker/memory diagnostics
-    const perfAndDiag = await evaluate(
+    assertLruEvictionAndReload({
+      afterTraversal,
+      afterReload: {
+        cachedPageCount: returnedPage0State.cachedPageCount,
+        cachedPages: returnedPage0State.cachedPages,
+        searchScoreCount: returnedPage0State.searchScoreCount,
+        mountedCells: returnedPage0State.mountedCells
+      }
+    })
+
+    // Stop continuous rAF sampler and run fail-closed performance & resource assertions across all polled samples
+    const rafSummary = await evaluate(
       app.cdp,
-      `(async () => {
+      `(() => {
         window.__stage6eRafRunning = false
         const deltas = (window.__stage6eRafDeltas ?? []).slice().sort((a, b) => a - b)
         const p95Idx = Math.min(deltas.length - 1, Math.floor(deltas.length * 0.95))
         const rafP95Ms = deltas.length > 0 ? deltas[p95Idx] : 0
-        const diag = await window.api.getPhotosDiagnostics()
-        return { rafSamples: deltas.length, rafP95Ms, diag }
+        return { rafSamples: deltas.length, rafP95Ms }
       })()`
     )
-    const { rafSamples, rafP95Ms, diag } = perfAndDiag
-    if (
-      (diag.liveWorkers ?? 0) > 2 ||
-      (diag.searchLiveWorkers ?? 0) > 1 ||
-      (diag.totalAppLiveWorkers ?? 0) > 3 ||
-      (diag.searchPendingRequests ?? 0) > 16 ||
-      (diag.mainEventLoopDelayP95Ms ?? 0) >= 100
-    ) {
-      throw new Error(`Resource or event-loop bounds exceeded: ${JSON.stringify(diag)}`)
-    }
+    const boundsSummary = assertSearchPerformanceAndResourceBounds({
+      rafSamples: rafSummary.rafSamples,
+      rafP95Ms: rafSummary.rafP95Ms,
+      peakMountedCells: peakLargeMountedCells,
+      diagSamples: largeDiagSamples
+    })
     pass(
-      `Return to evicted Page 0 restored '${returnedPage0State.topName}' (${returnedPage0State.topBadge}); bounds verified (liveWorkers=${diag.liveWorkers ?? 0}<=2, searchLiveWorkers=${diag.searchLiveWorkers ?? 0}<=1, totalAppLiveWorkers=${diag.totalAppLiveWorkers ?? 0}<=3, mainLoopP95=${(diag.mainEventLoopDelayP95Ms ?? 0).toFixed(1)}ms<100ms, rAF p95=${rafP95Ms.toFixed(1)}ms across ${rafSamples} frames, mainRSS=${((diag.mainProcessRssBytes ?? 0) / (1024 * 1024)).toFixed(1)}MiB)`
+      `LRU eviction (observed ${afterTraversal.distinctPagesObserved} pages, Page 0 evicted then reloaded while preserving ${returnedPage0State.searchScoreCount} scores) & fail-closed bounds verified across ${boundsSummary.diagSampleCount} polls (peakLiveWorkers=${boundsSummary.peakLiveWorkers}<=2, peakSearchLiveWorkers=${boundsSummary.peakSearchLiveWorkers}<=1, peakTotalAppLiveWorkers=${boundsSummary.peakTotalAppLiveWorkers}<=3, mainLoopP95=${boundsSummary.peakMainEventLoopDelayP95Ms.toFixed(1)}ms<100ms, mainLoopMax=${boundsSummary.peakMainEventLoopDelayMaxMs.toFixed(1)}ms<200ms, rAF p95=${boundsSummary.rafP95Ms.toFixed(1)}ms<=33ms across ${boundsSummary.rafSamples} frames, peakMountedCells=${boundsSummary.peakMountedCells}<=200, peakMainRSS=${(boundsSummary.peakMainRssBytes / (1024 * 1024)).toFixed(1)}MiB)`
     )
 
     // 14d. Restart persistence verification: relaunch app against persisted catalog & model without regenerating

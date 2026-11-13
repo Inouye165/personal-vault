@@ -669,6 +669,10 @@ if (parentPort) {
 
         if (message.action === 'search_database' || message.action === 'search') {
           const t0 = performance.now()
+          const testSearchDelayMs = Number(process.env.PV_TEST_SEARCH_DELAY_MS ?? 0)
+          if (Number.isFinite(testSearchDelayMs) && testSearchDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, testSearchDelayMs))
+          }
           const {
             catalogPath,
             filters = {},
