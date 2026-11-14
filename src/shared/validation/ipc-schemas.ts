@@ -1338,6 +1338,8 @@ export const SemanticSearchCancelResponseSchema = z.object({
 })
 export type SemanticSearchCancelResponse = z.infer<typeof SemanticSearchCancelResponseSchema>
 
+export * from './document-schemas'
+
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,
   data: unknown

@@ -28,6 +28,7 @@ export {
   InvalidPreferredLocationError
 } from './errors'
 export { CURRENT_SCHEMA_VERSION, checkSchemaCompatibility, runMigrations } from './migrations'
+export { DocumentRepository } from './document-repository'
 export {
   normalizePathForLookup,
   isSameOrDescendantPath,

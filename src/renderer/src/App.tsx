@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DuplicateReviewPanel } from './components/DuplicateReviewPanel'
+import { DocumentsPanel } from './components/DocumentsPanel'
 import { EmptyState } from './components/EmptyState'
 import { Header } from './components/Header'
 import { PhotosPanel } from './components/PhotosPanel'
@@ -101,6 +102,9 @@ export function App() {
             currentTab === 'photos' && <PhotosPanel />}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
+            currentTab === 'documents' && <DocumentsPanel />}
+          {state.phase === 'ready' &&
+            state.vaultStatus.sourceCount > 0 &&
             currentTab === 'duplicates' && <DuplicateReviewPanel />}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
@@ -108,6 +112,7 @@ export function App() {
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
             currentTab !== 'photos' &&
+            currentTab !== 'documents' &&
             currentTab !== 'duplicates' &&
             currentTab !== 'review' && (
               <div className="catalog-populated-view">

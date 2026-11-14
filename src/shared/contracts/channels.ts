@@ -67,7 +67,10 @@ export const IPC_CHANNELS = {
   METADATA_GET_PHOTO_DETAIL: 'metadata:get-photo-detail',
   METADATA_GET_FACETS: 'metadata:get-facets',
   SEMANTIC_SEARCH_PHOTOS: 'semantic:search-photos',
-  SEMANTIC_SEARCH_CANCEL: 'semantic:search-cancel'
+  SEMANTIC_SEARCH_CANCEL: 'semantic:search-cancel',
+  DOCUMENTS_GET_PAGE: 'documents:get-page',
+  DOCUMENTS_GET_DETAIL: 'documents:get-detail',
+  DOCUMENTS_GET_EXTENSION_FACETS: 'documents:get-extension-facets'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

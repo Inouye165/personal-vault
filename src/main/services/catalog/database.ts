@@ -15,6 +15,14 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { checkSchemaCompatibility, runMigrations } from './migrations'
 import { normalizePathForLookup } from './path-normalization'
+import { DocumentRepository } from './document-repository'
+import type {
+  DocumentDetailItem,
+  GetDocumentExtensionFacetsRequest,
+  GetDocumentExtensionFacetsResponse,
+  GetDocumentsPageRequest,
+  GetDocumentsPageResponse
+} from '../../../shared/validation/document-schemas'
 import {
   DatabaseClosedError,
   FileLocationNotFoundError,
@@ -383,6 +391,7 @@ export class CatalogDatabase {
   public readonly catalogPath: string
   private closed = false
   private readonly semanticSearchRepository: SemanticSearchRepository
+  private readonly documentRepository: DocumentRepository
 
   private constructor(
     db: DatabaseSync,
@@ -396,6 +405,9 @@ export class CatalogDatabase {
       getDb: () => this.getRawDb(),
       getFileLocationById: (id) => this.getFileLocationById(id)
     })
+    this.documentRepository = new DocumentRepository({
+      getDb: () => this.getRawDb()
+    })
   }
 
   public getCatalogPath(): string {
@@ -405,6 +417,20 @@ export class CatalogDatabase {
   public getRawDb(): DatabaseSync {
     this.assertOpen()
     return this.db
+  }
+
+  public getDocumentsPage(input: GetDocumentsPageRequest): GetDocumentsPageResponse {
+    return this.documentRepository.getDocumentsPage(input)
+  }
+
+  public getDocumentDetail(fileLocationId: number): DocumentDetailItem | null {
+    return this.documentRepository.getDocumentDetail(fileLocationId)
+  }
+
+  public getDocumentExtensionFacets(
+    input: GetDocumentExtensionFacetsRequest
+  ): GetDocumentExtensionFacetsResponse {
+    return this.documentRepository.getDocumentExtensionFacets(input)
   }
 
   /**

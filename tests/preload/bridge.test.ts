@@ -108,7 +108,10 @@ describe('preload bridge', () => {
         'getPhotoMetadataDetail',
         'getPhotoMetadataFacets',
         'searchPhotosSemantic',
-        'cancelPhotosSemanticSearch'
+        'cancelPhotosSemanticSearch',
+        'getDocumentsPage',
+        'getDocumentDetail',
+        'getDocumentExtensionFacets'
       ].sort()
     )
   })

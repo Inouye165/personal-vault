@@ -3,8 +3,8 @@
 ## Current state
 
 - **Workspace**: `D:\organizer`
-- **Branch**: `feat/heic-support` (branched from accepted Slice A commit `c2a832a3b75916a36157908aa3784ab94f6f5454` on `fix/packaged-worker-resolution`)
-- **Base Commit**: `c2a832a` (`c2a832a3b75916a36157908aa3784ab94f6f5454`, descending from `ec82d69`, accepted Slice 1 `2e6e54c`, and Stage 6E closeout `8a297e1`)
+- **Branch**: `feat/stage-7a-document-browsing` (branched from `6ad5887` on `feat/heic-support`)
+- **Base Commit**: `6ad5887` (checkpoint of reviewed HEIC support, CDN recovery, and responsive Photos UX, descending from `c2a832a`, `ec82d69`, `2e6e54c`, and Stage 6E closeout `8a297e1`)
 - **Accepted Stage 6C Commit**: `c8a766f` (`c8a766f284c7c88b2098651f890c6488d5feae80`)
 - **Accepted Stage 6D Commit**: `1f07012` (`1f07012ff8785344a1bc990b86d70889b9c5c943`, documentation closeout committed at `afd07c6` / `1b552d3` on `feat/stage-6d-semantic-search`)
 - **Accepted Stage 6E Commit**: `e565835` (`e565835a662dd97f884454fbb2a9a76d1ed3a247` on `feat/stage-6e-final-verification`)
@@ -20,7 +20,8 @@
   - **Stage 6D (Natural-language photo search IPC, ranking, and Photos UI integration)**: **Complete** (independently accepted at `1f07012` on `feat/stage-6d-semantic-search`, closeout at `1b552d3`).
   - **Substage 6E (End-to-End Packaged Electron Verification & Stage 6 Closeout)**: **Complete** (independently accepted at `e565835` on `feat/stage-6e-final-verification`).
 - **Pre-Stage-7 modularity maintenance**: **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Complete; independently accepted at `2e6e54c`**; remaining slices **Planned**).
-- **Stages 7–8**: **Planned**.
+- **Stage 7 status**: **In progress** (7A **Complete**; 7B–7F **Planned**).
+- **Stage 8 status**: **Planned**.
 - **Installed Electron Version**: `45.2.3` (`node` `v22.18.0`, `npm` `v10.9.3`)
 - **Evidence Source**:
   - **Independent reviewer on `feat/heic-support` (final responsive & stacked-drawer review — passed)**: Passed independent review of the Responsive Photos UX Redesign and final stacked-drawer correction; ran **44 affected tests**, `npm run typecheck`, `npm run lint`, normal `npm run format:check`, and whitespace (`git diff --check`) — all passed.
@@ -253,7 +254,9 @@ Prior to entering Stage 7 (document extraction, classification, OCR, and unified
 
 Stage 7 is planned in six bounded, independently reviewable slices (dependency and model choices for 7B–7F remain **provisional**):
 
-- **7A — Document Catalog Browsing**: Browse already-cataloged `category = 'document'` items without rescanning (`DocumentRepository`, `document-schemas.ts`, `document-handlers.ts`, `useDocuments.ts`, `DocumentsPanel.tsx`), with pagination, filename/extension filters, recorded provenance, explicit `Unknown` values, and honest `"Not extracted yet"` status.
+- **7A — Document Catalog Browsing (Complete)**: Browse already-cataloged `category = 'document'` items without rescanning (`DocumentRepository`, `document-schemas.ts`, `document-handlers.ts`, `useDocuments.ts`, `DocumentsPanel.tsx`), with pagination, filename/extension filters, recorded provenance, explicit `Unknown` values, and honest `"Not extracted yet"` status.
+  - Independent reviewer acceptance (kept separate from implementation-host checks): final reviewer checks passed 27 focused tests, `typecheck`, `lint`, formatting, and whitespace. Earlier reviewer/runtime limitations preserved: 1,031 passed, 1 skipped, four symlink/junction permission failures; reviewer Electron verification timed out connecting to CDP.
+  - Implementation-host verification (separate): 1,037 passed across 87 files, `typecheck`, `lint`, `format:check`, `git diff --check`, `build`, and 10/10 built + 10/10 unpacked `verify-electron-documents.mjs` checks. Separate verification executable preserved at `D:\organizer\dist-stage-7a-verify\win-unpacked\Personal Vault.exe` alongside existing user profile for Ron's hands-on test.
 - **7B — Supported-Format Previews & Local Text Extraction**: Worker-thread read-only previews and text extraction (`.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.rtf`, plus provisional `.pdf` and `.docx` parsers).
 - **7C — Local Offline OCR**: Worker-thread OCR for scanned PDFs and document images (provisional `tesseract.js` + verified offline traineddata).
 - **7D — Document Semantic Search**: Dedicated offline text-embedding ONNX model (provisional `Xenova/bge-small-en-v1.5` or `Xenova/all-MiniLM-L6-v2`, **not** CLIP), chunked embeddings, and bounded cosine ranking.

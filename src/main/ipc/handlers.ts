@@ -140,6 +140,7 @@ import type {
 } from '../services/semantic'
 import { METADATA_PARSER_RECIPE_VERSION, type PhotoMetadataCoordinator } from '../services/metadata'
 import type { IpcSenderEvent, SenderValidator } from './sender'
+import { registerDocumentIpcHandlers } from './document-handlers'
 
 export interface IpcHandlerOptions {
   readonly validateSender: SenderValidator
@@ -1520,4 +1521,6 @@ export function registerIpcHandlers({
       }
     })
   }
+
+  registerDocumentIpcHandlers({ handle, catalog })
 }

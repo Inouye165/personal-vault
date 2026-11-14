@@ -35,9 +35,9 @@ export function Header({
   onToggleNav,
   navToggleRef
 }: HeaderProps) {
-  const isPhotosTab = currentTab === 'photos'
+  const hideGlobalSearch = currentTab === 'photos' || currentTab === 'documents'
   const searchAvailable =
-    state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && !isPhotosTab
+    state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && !hideGlobalSearch
 
   return (
     <header className="top-bar">
@@ -53,7 +53,7 @@ export function Header({
         <Menu size={20} aria-hidden="true" />
       </button>
 
-      {!isPhotosTab && (
+      {!hideGlobalSearch && (
         <div className="search-box">
           <Search size={16} aria-hidden="true" />
           <input

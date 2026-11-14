@@ -32,6 +32,8 @@
     "verify:semantic-search:unpacked": "node scripts/verify-electron-semantic-search.mjs --mode=unpacked",
     "verify:metadata": "node scripts/verify-electron-metadata.mjs",
     "verify:metadata:unpacked": "node scripts/verify-electron-metadata.mjs --mode=unpacked",
+    "verify:documents": "node scripts/verify-electron-documents.mjs",
+    "verify:documents:unpacked": "node scripts/verify-electron-documents.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

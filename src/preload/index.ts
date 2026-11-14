@@ -81,6 +81,12 @@ import {
   SemanticSearchResponseSchema,
   SemanticSearchCancelRequestSchema,
   SemanticSearchCancelResponseSchema,
+  GetDocumentsPageRequestSchema,
+  GetDocumentsPageResponseSchema,
+  GetDocumentDetailRequestSchema,
+  GetDocumentDetailResponseSchema,
+  GetDocumentExtensionFacetsRequestSchema,
+  GetDocumentExtensionFacetsResponseSchema,
   validatePayload,
   type AppInfo,
   type NavigationTab,
@@ -158,7 +164,13 @@ import {
   type SemanticSearchRequest,
   type SemanticSearchResponse,
   type SemanticSearchCancelRequest,
-  type SemanticSearchCancelResponse
+  type SemanticSearchCancelResponse,
+  type GetDocumentsPageRequest,
+  type GetDocumentsPageResponse,
+  type GetDocumentDetailRequest,
+  type GetDocumentDetailResponse,
+  type GetDocumentExtensionFacetsRequest,
+  type GetDocumentExtensionFacetsResponse
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -986,6 +998,47 @@ const api: VaultApi = {
     const result = validatePayload(SemanticSearchCancelResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid cancelPhotosSemanticSearch response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentsPage(request: GetDocumentsPageRequest): Promise<GetDocumentsPageResponse> {
+    const parsed = validatePayload(GetDocumentsPageRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentsPage request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_GET_PAGE, parsed.data)
+    const result = validatePayload(GetDocumentsPageResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentsPage response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentDetail(request: GetDocumentDetailRequest): Promise<GetDocumentDetailResponse> {
+    const parsed = validatePayload(GetDocumentDetailRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentDetail request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_GET_DETAIL, parsed.data)
+    const result = validatePayload(GetDocumentDetailResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentDetail response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentExtensionFacets(
+    request?: GetDocumentExtensionFacetsRequest
+  ): Promise<GetDocumentExtensionFacetsResponse> {
+    const parsed = validatePayload(GetDocumentExtensionFacetsRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentExtensionFacets request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_GET_EXTENSION_FACETS, parsed.data)
+    const result = validatePayload(GetDocumentExtensionFacetsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentExtensionFacets response from main: ${result.error}`)
     }
     return result.data
   }

@@ -10,6 +10,7 @@ dist-heic-verify/
 dist-model-verify/
 dist-search-ux-verify/
 dist-photos-ux-redesign/
+dist-stage-7a-verify/
 build/
 coverage/
 *.tsbuildinfo

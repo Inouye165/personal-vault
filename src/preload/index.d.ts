@@ -75,7 +75,13 @@ import type {
   SemanticSearchRequest,
   SemanticSearchResponse,
   SemanticSearchCancelRequest,
-  SemanticSearchCancelResponse
+  SemanticSearchCancelResponse,
+  GetDocumentsPageRequest,
+  GetDocumentsPageResponse,
+  GetDocumentDetailRequest,
+  GetDocumentDetailResponse,
+  GetDocumentExtensionFacetsRequest,
+  GetDocumentExtensionFacetsResponse
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -168,6 +174,11 @@ export interface VaultApi {
   cancelPhotosSemanticSearch: (
     request?: SemanticSearchCancelRequest
   ) => Promise<SemanticSearchCancelResponse>
+  getDocumentsPage: (request: GetDocumentsPageRequest) => Promise<GetDocumentsPageResponse>
+  getDocumentDetail: (request: GetDocumentDetailRequest) => Promise<GetDocumentDetailResponse>
+  getDocumentExtensionFacets: (
+    request?: GetDocumentExtensionFacetsRequest
+  ) => Promise<GetDocumentExtensionFacetsResponse>
 }
 
 declare global {
