@@ -52,7 +52,7 @@ export function SemanticIndexPanel({ onClose }: SemanticIndexPanelProps): ReactE
       <div className="semantic-panel-header">
         <div className="semantic-panel-title-row">
           <Cpu size={18} />
-          <h3>Local Semantic Index (Stage 6B)</h3>
+          <h3>Local Semantic Index</h3>
           <span
             className={`semantic-badge semantic-badge-${modelStatus.state}`}
             data-testid="semantic-model-state-badge"
@@ -76,10 +76,9 @@ export function SemanticIndexPanel({ onClose }: SemanticIndexPanelProps): ReactE
 
       <p className="semantic-panel-scope-note" data-testid="semantic-scope-note">
         <strong>About Semantic Indexing:</strong> Local indexing computes 512-dimensional visual
-        embeddings on CPU to prepare <strong>offline semantic search</strong> (natural-language
-        query UI arrives in Stage 6D). Embeddings are derived similarity vectors —{' '}
-        <strong>not factual labels</strong> — and do not identify every object or specific
-        electronic module.
+        embeddings on CPU to enable <strong>offline semantic search</strong>. Embeddings are derived
+        similarity vectors — <strong>not factual labels</strong> — and do not identify every object
+        or specific electronic module.
       </p>
 
       {(actionError ||

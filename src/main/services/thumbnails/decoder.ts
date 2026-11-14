@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto'
 import sharp from 'sharp'
 import { THUMBNAIL_LIMITS } from './types'
 import { extractDHash64FromImageBuffer } from '../similarity/fingerprint'
+import { HeicDecodeError, openSharpFromImageBuffer } from './heic-decoder'
 import {
   CLIP_IMAGE_SIZE,
   CLIP_MEAN,
@@ -64,10 +65,11 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.gif',
   '.avif',
   '.tif',
-  '.tiff'
+  '.tiff',
+  '.heic',
+  '.heif'
 ])
 
-const HEIC_EXTENSIONS = new Set(['.heic', '.heif'])
 const RAW_EXTENSIONS = new Set([
   '.cr2',
   '.cr3',
@@ -172,12 +174,6 @@ export async function readAndVerifySourceFile(
 
   // 2. Format / extension policy
   const ext = extname(sourcePath).toLowerCase()
-  if (HEIC_EXTENSIONS.has(ext)) {
-    return {
-      status: 'unsupported',
-      reason: 'HEIC format decoding requires unsupported external toolchains'
-    }
-  }
   if (RAW_EXTENSIONS.has(ext)) {
     return {
       status: 'unsupported',
@@ -394,13 +390,11 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
     return verified
   }
 
-  // Sharp resize and encode to WebP
+  // Shared bounded decode (Sharp + libheif-js WASM for HEIC) and WebP resize
   try {
-    const image = sharp(verified.fileBuffer, {
-      limitInputPixels: maxInputPixels
-    })
+    const { image } = await openSharpFromImageBuffer(verified.fileBuffer, maxInputPixels)
 
-    const pipeline = image.rotate().resize({
+    const pipeline = image.resize({
       width: maxDimension,
       height: maxDimension,
       fit: 'inside',
@@ -421,7 +415,7 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
   } catch (err: unknown) {
     return {
       status: 'error',
-      code: 'DECODE_FAILED',
+      code: err instanceof HeicDecodeError ? err.code : 'DECODE_FAILED',
       message: err instanceof Error ? err.message : 'Failed to decode image'
     }
   }
@@ -604,24 +598,20 @@ export async function verifyModelArtifactsInWorker(
   }
 }
 
-export async function decodeSemanticEmbedding(
-  params: SemanticDecodeInputParams
-): Promise<SemanticDecodeResult> {
-  const { maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS, modelInstallDir } = params
-
-  const verified = await readAndVerifySourceFile(params)
-  if (verified.status !== 'success') {
-    return verified
-  }
-
-  let rawPixels: Buffer
-  let origWidth: number
-  let origHeight: number
-
+export async function preprocessImageForClip(
+  fileBuffer: Buffer,
+  maxInputPixels: number = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS
+): Promise<
+  | {
+      readonly status: 'ready'
+      readonly data: Buffer
+      readonly width: number
+      readonly height: number
+    }
+  | { readonly status: 'error'; readonly code: string; readonly message: string }
+> {
   try {
-    // Single-pass decode: auto-orient -> sRGB -> removeAlpha -> 224x224 cover center bicubic raw RGB
-    const image = sharp(verified.fileBuffer, { limitInputPixels: maxInputPixels })
-    const meta = await image.metadata()
+    const meta = await sharp(fileBuffer, { limitInputPixels: false }).metadata()
     if (!meta.width || !meta.height) {
       return {
         status: 'error',
@@ -636,11 +626,9 @@ export async function decodeSemanticEmbedding(
         message: `Image dimensions (${meta.width}x${meta.height}) exceed ${maxInputPixels} pixel limit`
       }
     }
-    origWidth = meta.width
-    origHeight = meta.height
 
+    const { image } = await openSharpFromImageBuffer(fileBuffer, maxInputPixels)
     const { data, info } = await image
-      .rotate()
       .toColorspace('srgb')
       .removeAlpha()
       .resize(CLIP_IMAGE_SIZE, CLIP_IMAGE_SIZE, {
@@ -658,14 +646,39 @@ export async function decodeSemanticEmbedding(
         message: `Unexpected preprocessed buffer shape: ${info.width}x${info.height}x${info.channels}`
       }
     }
-    rawPixels = data
+    return {
+      status: 'ready',
+      data,
+      width: meta.width,
+      height: meta.height
+    }
   } catch (err: unknown) {
     return {
       status: 'error',
-      code: 'DECODE_FAILED',
+      code: err instanceof HeicDecodeError ? err.code : 'DECODE_FAILED',
       message: err instanceof Error ? err.message : 'Failed to decode image for semantic embedding'
     }
   }
+}
+
+export async function decodeSemanticEmbedding(
+  params: SemanticDecodeInputParams
+): Promise<SemanticDecodeResult> {
+  const { maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS, modelInstallDir } = params
+
+  const verified = await readAndVerifySourceFile(params)
+  if (verified.status !== 'success') {
+    return verified
+  }
+
+  const prep = await preprocessImageForClip(verified.fileBuffer, maxInputPixels)
+  if (prep.status !== 'ready') {
+    return prep
+  }
+
+  const rawPixels = prep.data
+  const origWidth = prep.width
+  const origHeight = prep.height
 
   try {
     const numPixels = CLIP_IMAGE_SIZE * CLIP_IMAGE_SIZE

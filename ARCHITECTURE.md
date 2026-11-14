@@ -123,7 +123,7 @@ src/
         ├── main.tsx       # React 19 root bootstrap
         ├── App.tsx        # Application shell container
         ├── index.css      # Design tokens, typography, dark theme layout
-        ├── hooks/         # Custom hooks (e.g. useVaultApi)
+        ├── hooks/         # Custom hooks (useVaultApi, useScanJobs, usePhotos, usePhotoMetadata, usePhotoReview, useSimilarityReview, useFocusTrap, useMediaQuery)
         └── components/    # Layout, Sidebar, Header, and EmptyState views
 ```
 
@@ -344,12 +344,12 @@ src/
       - Source files are strictly read-only: opened via read-only descriptors (`open(path, 'r')`).
       - Never modify, touch, overwrite, or delete originals during thumbnail generation or cache maintenance.
       - All original source timestamps, byte sizes, and SHA-256 hashes are verified before decoding and invariant across application execution.
-    - **Decoder & Format Support (Sharp / libvips)**:
-      - Maintained offline decoder: `sharp@0.35.5` with prebuilt `@img/sharp-win32-x64` (libvips 8.18.7), packaged into `app.asar.unpacked`.
+    - **Decoder & Format Support (Sharp / libvips + libheif-js)**:
+      - Maintained offline decoders: `sharp@0.35.5` with prebuilt `@img/sharp-win32-x64` (libvips 8.18.7), packaged into `app.asar.unpacked`, paired with `libheif-js@1.23.5` (`LGPL-3.0`, self-contained WASM+JS HEVC decoder in `src/main/services/thumbnails/heic-decoder.ts`) for offline HEIC/HEIF pixel decoding without OS codecs.
       - Concurrency & event loop isolation: decoding runs in real Node worker threads (`worker_threads.Worker` running `src/main/services/thumbnails/worker.ts`), preventing main process event loop stalls. Worker crashes, timeouts, or cancellations terminate the worker process safely and await termination before reallocating concurrency capacity.
-      - Supported formats: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF.
-      - Orientation preservation: Sharp `.rotate()` automatically applies EXIF orientation metadata to render photographs upright.
-      - Honest placeholders: Apple HEIC/HEIF (libheif in prebuilt libvips only bundles AV1 decoder without patent-encumbered HEVC decoders), camera RAW, SVG, corrupted or oversized files return honest unsupported/error states without crashes or external toolchains.
+      - Supported formats: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF, HEIC/HEIF.
+      - Orientation preservation: Sharp `.rotate()` applies EXIF orientation for JPEG/TIFF/WebP; for HEIC/HEIF, `libheif-js` applies HEIF `irot` container rotation during `display()`, so `openSharpFromImageBuffer` avoids double-rotating HEIC pixels.
+      - Honest placeholders: camera RAW, SVG, corrupted or oversized files return honest unsupported/error states without crashes or external toolchains.
     - **Resource Limits & Bounded Execution**:
       - Thumbnail longest edge: 512 pixels, preserving aspect ratio, encoded as WebP (recipe version: `v1_512_webp`).
       - Maximum active decode jobs: 2 concurrent workers.
@@ -379,7 +379,7 @@ src/
       - Virtual windowing retaining full collection scroll extent (`totalCount`), with absolute cell positions and at most 200 mounted DOM cells.
       - Monotonic generation tokens incremented on refresh and unmount, with revision-bound in-flight request tracking ensuring older delayed completions cannot overwrite newer cells or clear newer request bookkeeping.
       - Selection state and compact metadata details panel reporting recorded facts (filename, absolute source path, byte size, filesystem times, hash provenance) and explicit "Unknown" for absent capture dates/locations.
-      - Header search disabled with clear Stage 6 availability label.
+      - Header global search box is hidden on the Photos tab (`currentTab === 'photos'`), where `PhotosSearchBar` provides the single natural-language search input.
 
 13. **User Review Tools: Ratings, Flags, and Custom Collections (Stage 5B)**:
     - **Inviolable Principle — Source Preservation**:
@@ -487,7 +487,7 @@ src/
       - Works completely offline and without requiring a provisioned semantic model. GPS coordinates, maps, reverse geocoding, metadata editing, and writing EXIF are excluded.
     - **Parser Selection, Licensing & Header-Only Inspection**:
       - Uses `exifreader@4.54.0` (MPL-2.0, zero transitive runtime dependencies, locked exact version; documented in `THIRD_PARTY_NOTICES.md` and bundled into `out/main/thumbnail_worker.js` via `electron.vite.config.ts` `externalizeDepsPlugin({ exclude: ['exifreader'] })` for unpacked ASAR compatibility) alongside `sharp@0.35.5` header inspection (`sharp(buffer).metadata()`), avoiding full raster pixel decoding solely to read technical metadata.
-      - Inspects container magic bytes (`jpeg`, `png`, `webp`, `gif`, `tiff`, `avif`, `heic`, `cr2`, `nef`, `arw`, `dng`, `orf`, `rw2`, `raf`) independently of filename extensions. Apple HEIC/HEIF without patent-encumbered HEVC codecs and camera RAW containers report honest `unsupported` status (`UNSUPPORTED_FORMAT`) rather than masquerading as empty metadata.
+      - Inspects container magic bytes (`jpeg`, `png`, `webp`, `gif`, `tiff`, `avif`, `heic`, `cr2`, `nef`, `arw`, `dng`, `orf`, `rw2`, `raf`) independently of filename extensions. Supported containers (`jpeg`, `png`, `webp`, `gif`, `tiff`, `avif`, `heic`) extract EXIF/dimensions (preserving HEIF `irot` dimensions reported by `sharp(buffer).metadata()` without double-swapping on EXIF `Orientation`), while camera RAW and BMP containers report honest `unsupported` status (`UNSUPPORTED_RAW_CONTAINER` / `UNSUPPORTED_BMP_CONTAINER`) rather than masquerading as empty metadata.
     - **Capture-Date Precedence, Timezone Honesty & Conflict Policy (`date-policy.ts`)**:
       - **Precedence & Conservative Conflict Policy**: Prefers valid EXIF `DateTimeOriginal` (combined with `OffsetTimeOriginal` and `SubSecTimeOriginal`). Falls back to valid EXIF `DateTimeDigitized` (`CreateDate`, combined with `OffsetTimeDigitized` and `SubSecTimeDigitized`) **only when `DateTimeOriginal` is absent**. When `DateTimeOriginal` is present but invalid (e.g. malformed syntax, impossible calendar date, or invalid offset), the system conservatively preserves the capture date as **Unknown** (`capture_calendar_date = NULL`, `capture_local_iso = NULL`), attributing the primary tag (`capture_date_source_tag = 'DateTimeOriginal'`), recording the exact parse error in `capture_date_parse_error`, and logging an explicit conflict note in `capture_date_conflict` (`DateTimeOriginal is invalid while DateTimeDigitized is present; keeping capture date Unknown rather than masking invalid primary tag`), rather than silently falling back to a secondary tag and masking primary tag corruption. Image modification tags (`DateTime` / `ModifyDate`), filesystem `birthtimeMs`/`mtimeMs`, and filenames are **never** used to populate capture dates.
       - **Timezone Honesty**: Timestamps carrying a valid explicit offset (`Z` or `±HH:MM` within `-14:00..+14:00`) record `capture_timezone_kind = 'explicit_offset'`, `capture_offset_minutes`, and `capture_utc_ms`. Timestamps without an offset record `capture_timezone_kind = 'local_wall_clock_unknown_tz'` with `capture_offset_minutes = NULL` and `capture_utc_ms = NULL` — never coerced to the host timezone or UTC.
@@ -496,8 +496,8 @@ src/
       - Preserves `encoded_width_px`, `encoded_height_px`, and EXIF `exif_orientation` (`1..8`), rejecting impossible or excessive dimensions (`< 1`, `> 100,000` px per axis, or `> 100,000,000` pixels). Computes orientation-adjusted `display_width_px` and `display_height_px` (orientations `5..8` swap width and height); SQL minimum width/height filters (`minWidthPx`, `minHeightPx`) apply consistently to `display_width_px` and `display_height_px`.
       - Preserves sanitized original `camera_make_raw`, `camera_model_raw`, and `lens_model_raw` strings (`<= 256` chars, Unicode NFC, control/null bytes stripped) alongside separate lowercase normalized matching keys (`camera_display`, `camera_normalized`, `lens_normalized`), deduplicating redundant Make prefixes in Model strings without inventing model labels.
       - Keeps `recorded_extension` (filesystem suffix) strictly separate from `detected_format` (verified container header) and flags discrepancies via `extension_format_mismatch = 1`. File-type SQL filters explicitly label whether matching uses `detected_format` or `filename_extension`.
-    - **SQLite Migration 10 (`CURRENT_SCHEMA_VERSION = 10`), Bounded Facets & Combined SQL Filters**:
-      - Adds `photo_technical_metadata` (revision-bound with `extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')`, `is_current` partial unique index, content-reuse index, and filter/facet indexes on `capture_calendar_date`, `camera_normalized`, `lens_normalized`, `display_width_px`/`display_height_px`, and `detected_format`), `photo_metadata_jobs`, and `photo_metadata_job_items`.
+    - **SQLite Migrations 10–11 (`CURRENT_SCHEMA_VERSION = 11`), Bounded Facets & Combined SQL Filters**:
+      - Migration 10 adds `photo_technical_metadata` (revision-bound with `extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')`, `is_current` partial unique index, content-reuse index, and filter/facet indexes on `capture_calendar_date`, `camera_normalized`, `lens_normalized`, `display_width_px`/`display_height_px`, and `detected_format`), `photo_metadata_jobs`, and `photo_metadata_job_items`. Migration 11 marks legacy `UNSUPPORTED_HEIC_CONTAINER` rows as `stale` (`is_current = 0`) on upgrade so previously scanned HEIC photos recover cleanly without clearing the catalog or losing user annotations.
       - Effective status distinguishes `unprocessed` (no metadata row yet) and `stale` (`content_revision` or `parser_recipe_version` superseded) from processed terminal rows (`extracted`, `no_metadata`, `unsupported`, `failed`). `Unknown` metadata filters match only processed photos whose target field is `NULL` (`m.id IS NOT NULL`), ensuring incomplete extraction coverage never masquerades as exhaustive `Unknown` results.
       - Combines capture date range (`+ includeUnknownCaptureDate`), camera (`+ onlyUnknownCamera`), lens (`+ onlyUnknownLens`), minimum display width/height (`+ includeUnknownDimensions`), and file type (`detected_format` or `filename_extension` `+ onlyUnknownDetectedFormat`) with Stage 5B rating, flag, and collection filters using SQL `AND` before `LIMIT ? OFFSET ?` pagination.
       - Camera, lens, and file-type option lists use bounded searchable/paginated SQL facet queries (`getPhotoMetadataFacet`, `LIMIT <= 100`, `OFFSET >= 0`) with accurate `unknownCount` and `unextractedCount`, avoiding whole-catalog materialization.

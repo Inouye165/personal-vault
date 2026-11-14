@@ -66,7 +66,8 @@ export const APPROVED_DOWNLOAD_HOSTS: readonly string[] = [
   'cdn-lfs.hf.co',
   'cdn-lfs-us-1.hf.co',
   'cdn-lfs-eu-1.hf.co',
-  'cas-bridge.xethub.hf.co'
+  'cas-bridge.xethub.hf.co',
+  'us.aws.cdn.hf.co'
 ] as const
 
 export function computeManifestSha256(

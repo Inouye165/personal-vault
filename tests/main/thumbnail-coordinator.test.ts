@@ -119,22 +119,23 @@ describe('ThumbnailCoordinator', () => {
     }
   })
 
-  it('returns unsupported status for HEIC, RAW, or SVG formats without crashing', async () => {
-    const heicPath = join(sourceRoot, 'photo.heic')
-    writeFileSync(heicPath, 'SIMULATED_HEIC_FILE_BYTES')
-    const heicStat = statSync(heicPath)
+  it('returns unsupported status for RAW or SVG formats without crashing', async () => {
+    const rawPath = join(sourceRoot, 'photo.cr2')
+    const rawBytes = Buffer.from('II*\0\x10\0\0\0CR\x02\0', 'latin1')
+    writeFileSync(rawPath, rawBytes)
+    const rawStat = statSync(rawPath)
 
-    const heicResult = await coordinator.requestThumbnail({
+    const rawResult = await coordinator.requestThumbnail({
       locationId: 3,
-      sourcePath: heicPath,
-      expectedByteSize: heicStat.size,
-      expectedMtimeMs: Math.round(heicStat.mtimeMs),
-      expectedSha256: createHash('sha256').update('SIMULATED_HEIC_FILE_BYTES').digest('hex')
+      sourcePath: rawPath,
+      expectedByteSize: rawStat.size,
+      expectedMtimeMs: Math.round(rawStat.mtimeMs),
+      expectedSha256: createHash('sha256').update(rawBytes).digest('hex')
     })
 
-    expect(heicResult.status).toBe('unsupported')
-    if (heicResult.status === 'unsupported') {
-      expect(heicResult.reason).toContain('HEIC')
+    expect(rawResult.status).toBe('unsupported')
+    if (rawResult.status === 'unsupported') {
+      expect(rawResult.reason).toContain('RAW')
     }
 
     const svgPath = join(sourceRoot, 'vector.svg')

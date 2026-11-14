@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildAdobeDngHeader,
   buildCanonCr2Header,
-  buildIsoBmffHeader,
   createCraftedPngWithDimensions,
   createJpegFixture,
   createPngFixture,
@@ -413,15 +412,15 @@ describe('Stage 6C — Photo Metadata Parser, Provenance & Normalization', () =>
     expect(jpgAsHeicRes.detectedFormat).toBe('jpeg')
     expect(jpgAsHeicRes.extensionFormatMismatch).toBe(true)
 
-    // 3. Real HEIC container (`ftypheic`) -> unsupported with detectedFormat = 'heic'
+    // 3. Real HEIC container (`portrait_exif6.heic`) -> extracted with detectedFormat = 'heic'
     const heicPath = join(tempDir, 'iphone.heic')
-    writeFileSync(heicPath, buildIsoBmffHeader('heic'))
+    writeFileSync(heicPath, readFileSync(join(__dirname, '../fixtures/heic/portrait_exif6.heic')))
     const heicRes = await extractPhotoMetadataFromFile({
       sourcePath: heicPath,
       recordedExtension: '.heic',
       approvedRoots: [tempDir]
     })
-    expect(heicRes.extractionStatus).toBe('unsupported')
+    expect(heicRes.extractionStatus).toBe('extracted')
     expect(heicRes.detectedFormat).toBe('heic')
 
     // 4. Real Canon CR2 & Adobe DNG RAW containers -> unsupported

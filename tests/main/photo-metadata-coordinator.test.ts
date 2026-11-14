@@ -13,7 +13,6 @@ import {
 } from '../../src/main/services/metadata'
 import {
   buildCanonCr2Header,
-  buildIsoBmffHeader,
   createJpegFixture,
   createPngFixture,
   EXIF_TAG_IDS
@@ -133,7 +132,7 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
     writeFileSync(disguisedPngPath, await createPngFixture({ width: 320, height: 200 }))
 
     const heicPath = join(rootDir, 'iphone_capture.heic')
-    writeFileSync(heicPath, buildIsoBmffHeader('heic'))
+    writeFileSync(heicPath, await readFile(join(__dirname, '../fixtures/heic/portrait_exif6.heic')))
 
     const cr2Path = join(rootDir, 'studio_raw.cr2')
     writeFileSync(cr2Path, buildCanonCr2Header())
@@ -169,11 +168,11 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
 
     expect(finalStatus.status).toBe('completed')
     expect(finalStatus.totalPhotos).toBe(6)
-    expect(finalStatus.extractedPhotos).toBe(1)
+    expect(finalStatus.extractedPhotos).toBe(2)
     expect(finalStatus.absentMetadataPhotos).toBe(2)
-    expect(finalStatus.processedPhotos).toBe(3)
+    expect(finalStatus.processedPhotos).toBe(4)
     expect(finalStatus.reusedPhotos).toBe(0)
-    expect(finalStatus.unsupportedPhotos).toBe(2)
+    expect(finalStatus.unsupportedPhotos).toBe(1)
     expect(finalStatus.failedPhotos).toBe(1)
     expect(finalStatus.pendingPhotos).toBe(0)
     expect(events.length).toBeGreaterThanOrEqual(2)
@@ -181,9 +180,9 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
     expect(finalStatus.coverage).toEqual({
       parserRecipeVersion: METADATA_PARSER_RECIPE_VERSION,
       totalPhotos: 6,
-      extractedCount: 1,
+      extractedCount: 2,
       noMetadataCount: 2,
-      unsupportedCount: 2,
+      unsupportedCount: 1,
       failedCount: 1,
       staleCount: 0,
       unprocessedCount: 0
@@ -206,7 +205,7 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
     expect(disguisedDetail.currentMetadata?.extensionFormatMismatch).toBe(true)
 
     const heicDetail = catalog.getPhotoTechnicalMetadataDetail(ids.get(heicPath)!)!
-    expect(heicDetail.effectiveStatus).toBe('unsupported')
+    expect(heicDetail.effectiveStatus).toBe('extracted')
     expect(heicDetail.currentMetadata?.detectedFormat).toBe('heic')
 
     const corruptDetail = catalog.getPhotoTechnicalMetadataDetail(ids.get(corruptPath)!)!

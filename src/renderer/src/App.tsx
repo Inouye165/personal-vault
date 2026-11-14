@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { DuplicateReviewPanel } from './components/DuplicateReviewPanel'
 import { EmptyState } from './components/EmptyState'
 import { Header } from './components/Header'
@@ -7,19 +7,37 @@ import { ScanJobsPanel } from './components/ScanJobsPanel'
 import { Sidebar } from './components/Sidebar'
 import { VaultImportPanel } from './components/VaultImportPanel'
 import { useScanJobs } from './hooks/useScanJobs'
+import { useMediaQuery } from './hooks/useMediaQuery'
 import { useVaultApi } from './hooks/useVaultApi'
 import type { NavigationTab } from '../../shared/validation/ipc-schemas'
 
 export function App() {
   const [currentTab, setCurrentTab] = useState<NavigationTab>('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false)
+  const isMobileViewport = useMediaQuery('(max-width: 767px)')
+  const mobileNavTriggerRef = useRef<HTMLButtonElement>(null)
   const { state, notifyTab, refreshStatus } = useVaultApi()
   const scanJobs = useScanJobs()
 
+  const closeMobileNav = useCallback(() => {
+    setIsMobileNavOpen(false)
+  }, [])
+
   const selectTab = (tab: NavigationTab) => {
     setCurrentTab(tab)
+    setIsMobileNavOpen(false)
     void notifyTab(tab)
   }
+
+  // Close mobile drawer only when viewport transitions from mobile to desktop
+  const prevMobileRef = useRef(isMobileViewport)
+  useEffect(() => {
+    if (prevMobileRef.current && !isMobileViewport && isMobileNavOpen) {
+      setIsMobileNavOpen(false)
+    }
+    prevMobileRef.current = isMobileViewport
+  }, [isMobileViewport, isMobileNavOpen])
 
   // When a scan completes, refresh vault status counts
   useEffect(() => {
@@ -48,6 +66,10 @@ export function App() {
         currentTab={currentTab}
         onSelectTab={selectTab}
         appVersion={state.phase === 'ready' ? state.appInfo.version : undefined}
+        isOpen={isMobileNavOpen}
+        isMobileViewport={isMobileViewport}
+        onClose={closeMobileNav}
+        restoreFocusTo={() => mobileNavTriggerRef.current}
       />
       <main className="main-wrapper">
         <Header
@@ -55,6 +77,9 @@ export function App() {
           onSearchChange={setSearchQuery}
           state={state}
           currentTab={currentTab}
+          isNavOpen={isMobileNavOpen}
+          onToggleNav={() => setIsMobileNavOpen((prev) => !prev)}
+          navToggleRef={mobileNavTriggerRef}
         />
         <div className="content-area">
           {state.phase === 'loading' && (

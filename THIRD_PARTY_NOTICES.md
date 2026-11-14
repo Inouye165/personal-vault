@@ -92,3 +92,13 @@ SOFTWARE.
 - **Copyright**: Copyright (c) Mattias Wallander.
 
 Licensed under the Mozilla Public License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at `https://mozilla.org/MPL/2.0/` and in `node_modules/exifreader/LICENSE`. Unmodified `exifreader` source is bundled into the Personal Vault worker without modification.
+
+---
+
+## 6. libheif-js (`libheif-js`)
+
+- **Version**: `1.23.5`
+- **License**: GNU Lesser General Public License, Version 3.0 (LGPL-3.0)
+- **Upstream Projects**: `libheif-js` (`https://github.com/catdad-experiments/libheif-js`), `libheif` (`https://github.com/strukturag/libheif`), and `libde265` (LGPL-3.0 HEVC decoder compiled to WebAssembly)
+
+Unmodified `libheif-js` (`libheif-wasm/libheif-bundle.js`) is bundled for offline local HEIC/HEIF decoding in worker threads without uploading personal files or requiring external OS codecs. The installed package includes full license texts in `node_modules/libheif-js/LICENSE` (LGPL-3.0) and `node_modules/libheif-js/libheif-wasm/LICENSE` (`libheif` LGPL-3.0 and bundled component notices; `https://www.gnu.org/licenses/lgpl-3.0.html`). The npm tarball (`libheif-js@1.23.5`) distributes only the compiled JS/WASM artifacts, TypeScript declarations, `README.md`, `package.json`, and `LICENSE` files; corresponding source code resides in the upstream `catdad-experiments/libheif-js` and `strukturag/libheif` repositories (and any public binary distribution of Personal Vault must accompany or offer the matching Corresponding Source under LGPL-3.0 Section 4).

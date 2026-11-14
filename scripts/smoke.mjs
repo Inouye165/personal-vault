@@ -72,7 +72,8 @@ function launchCommand(port, userDataDir) {
     }
     return { command: electronPath, argv: ['.', ...common] }
   }
-  const exe = join(root, 'dist', 'win-unpacked', 'Personal Vault.exe')
+  const unpackedDir = process.env.PV_UNPACKED_DIR || join(root, 'dist', 'win-unpacked')
+  const exe = join(unpackedDir, 'Personal Vault.exe')
   if (!existsSync(exe)) throw new Error(`${exe} is missing. Run \`npm run build:unpack\` first.`)
   return { command: exe, argv: common }
 }

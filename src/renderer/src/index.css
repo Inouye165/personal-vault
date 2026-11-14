@@ -4,6 +4,7 @@
 
   --bg-app: #0f1115;
   --bg-sidebar: #16181f;
+  --bg-surface: #16181f;
   --bg-card: #1c1e27;
   --bg-input: #1a1d26;
   --bg-hover: #222633;
@@ -11,6 +12,7 @@
 
   --border-subtle: #272b38;
   --border-strong: #383e50;
+  --border-hover: #475066;
   --border-focus: #4f6bff;
 
   --text-main: #f0f3f8;
@@ -162,6 +164,35 @@ input:focus-visible {
   background-color: var(--bg-app);
 }
 
+.mobile-nav-toggle-btn,
+.sidebar-close-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-card);
+  color: var(--text-main);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.mobile-nav-toggle-btn:hover,
+.sidebar-close-btn:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.sidebar-backdrop,
+.details-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(5, 7, 11, 0.72);
+  z-index: 40;
+}
+
 .top-bar {
   height: 58px;
   border-bottom: 1px solid var(--border-subtle);
@@ -202,6 +233,7 @@ input:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
   font-size: 13px;
   color: var(--text-dim);
 }
@@ -1438,18 +1470,28 @@ input:focus-visible {
 
 .photos-toolbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--border-subtle);
   background-color: var(--bg-surface);
   flex-shrink: 0;
 }
 
+.photos-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .photos-count-info {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
 }
 
 .photos-count-info h2 {
@@ -1463,6 +1505,28 @@ input:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photos-search-row {
+  width: 100%;
+  min-width: 0;
+}
+
+.photos-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.photos-mode-toggle,
+.photos-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .photos-grid-scroll-container {
@@ -1593,8 +1657,41 @@ input:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  gap: 10px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.details-back-btn {
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-card);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.btn-icon:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-main);
 }
 
 .details-header h3 {
@@ -2688,7 +2785,7 @@ input:focus-visible {
   flex-direction: column;
   gap: 8px;
   width: 100%;
-  margin-bottom: 8px;
+  min-width: 0;
 }
 
 .photos-search-form {
@@ -2696,66 +2793,90 @@ input:focus-visible {
   align-items: center;
   gap: 8px;
   width: 100%;
+  min-width: 0;
 }
 
 .photos-search-input-wrapper {
-  position: relative;
   display: flex;
   align-items: center;
-  flex: 1;
-  max-width: 560px;
+  gap: 8px;
+  flex: 1 1 200px;
+  min-width: 0;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 0 8px 0 12px;
+  min-height: 40px;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.photos-search-input-wrapper:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: var(--focus-ring);
 }
 
 .photos-search-input-wrapper .search-icon {
-  position: absolute;
-  left: 10px;
   color: var(--text-muted);
+  flex-shrink: 0;
   pointer-events: none;
 }
 
 .photos-search-input {
+  flex: 1 1 0;
+  min-width: 120px;
   width: 100%;
-  background-color: var(--bg-input);
+  background: transparent;
   color: var(--text-main);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 6px 85px 6px 32px;
-  font-size: 13px;
+  border: none;
+  padding: 8px 2px;
+  font-size: 14px;
+  line-height: 1.4;
   outline: none;
+  caret-color: var(--text-main);
 }
 
-.photos-search-input:focus {
-  border-color: var(--accent-primary);
+.photos-search-input:focus,
+.photos-search-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.photos-search-input::placeholder {
+  color: var(--text-muted);
 }
 
 .photos-search-input-wrapper .search-loading-icon {
-  position: absolute;
-  right: 10px;
-  color: var(--accent-primary);
+  color: var(--accent-primary-hover);
+  flex-shrink: 0;
 }
 
 .photos-search-clear-btn {
-  position: absolute;
-  right: 6px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
-  font-size: 11px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .photos-search-clear-btn:hover {
   color: var(--text-main);
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: var(--bg-hover);
+  border-color: var(--border-subtle);
 }
 
 .photos-search-submit-btn {
   flex-shrink: 0;
+  min-height: 40px;
+  padding: 0 16px;
 }
 
 .search-warning-banner {
@@ -2768,6 +2889,11 @@ input:focus-visible {
   border: 1px solid rgba(245, 158, 11, 0.3);
   color: #fbbf24;
   font-size: 12px;
+  line-height: 1.35;
+}
+
+.search-warning-banner .notice-icon {
+  flex-shrink: 0;
 }
 
 .photos-search-feedback {
@@ -2822,4 +2948,253 @@ input:focus-visible {
   background-color: rgba(96, 165, 250, 0.15);
   border-radius: 3px;
   white-space: nowrap;
+}
+
+/* ==========================================================================
+   Responsive Navigation, Filters, Details Drawer & Mobile Support
+   ========================================================================== */
+
+.app-container,
+.main-wrapper,
+.content-area,
+.photos-layout,
+.photos-main {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.photos-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px;
+  background-color: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.photos-filter-bar .filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+  flex: 1 1 160px;
+}
+
+.photos-filter-bar .filter-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.photos-filter-bar .filter-select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  background-color: var(--bg-input);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.photos-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.55);
+  z-index: 54;
+}
+
+.photos-side-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(400px, 100vw);
+  max-width: 100vw;
+  z-index: 55;
+  background-color: var(--bg-surface);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.55);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.photos-side-drawer .metadata-filter-panel,
+.photos-side-drawer .semantic-index-panel {
+  max-height: none;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  flex: 1 0 auto;
+  overflow-y: visible;
+}
+
+/* Narrow desktop / tablet (< 960px): Details becomes a modal slide-over drawer */
+@media (max-width: 959px) {
+  .sidebar {
+    width: 210px;
+    min-width: 190px;
+  }
+
+  .photo-details-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, 100vw);
+    min-width: 0;
+    max-width: 100vw;
+    z-index: 50;
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.55);
+  }
+
+  .details-back-btn {
+    display: inline-flex;
+  }
+}
+
+/* Mobile / narrow window (< 768px): Collapsible navigation drawer & full-width details */
+@media (max-width: 767px) {
+  .mobile-nav-toggle-btn {
+    display: inline-flex;
+  }
+
+  .top-bar {
+    padding: 8px 12px;
+    height: auto;
+    min-height: 56px;
+    gap: 10px;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(280px, 85vw);
+    min-width: 0;
+    max-width: 85vw;
+    z-index: 50;
+    transform: translateX(-100%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 180ms ease-out;
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.55);
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .sidebar-close-btn {
+    display: inline-flex;
+    margin-left: auto;
+  }
+
+  .nav-item {
+    min-height: 44px;
+    padding: 10px 12px;
+  }
+
+  .photos-toolbar {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .photos-grid-scroll-container {
+    padding: 12px;
+  }
+
+  .photo-details-panel {
+    width: 100vw;
+    border-left: none;
+  }
+
+  /* 44px touch targets on narrow/mobile viewports */
+  .photos-toolbar button,
+  .photos-search-submit-btn,
+  .photos-search-clear-btn,
+  .photos-search-input-wrapper,
+  .photos-filter-bar .filter-select,
+  .details-header button,
+  .review-control-row button {
+    min-height: 44px;
+  }
+
+  .photos-search-clear-btn {
+    min-width: 44px;
+  }
+
+  .photos-side-drawer {
+    width: 100vw;
+    border-left: none;
+  }
+
+  .photos-side-drawer .metadata-filter-panel,
+  .photos-side-drawer .semantic-index-panel {
+    padding: 12px;
+  }
+
+  .photos-side-drawer button,
+  .photos-side-drawer select {
+    min-height: 44px;
+  }
+}
+
+/* Very narrow mobile (< 480px): keep search on one compact row and tighten button padding */
+@media (max-width: 479px) {
+  .photos-toolbar {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+
+  .photos-toolbar .btn-sm,
+  .photos-controls-row .btn-sm {
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  .photos-search-input-wrapper {
+    flex: 1 1 140px;
+    padding: 0 4px 0 10px;
+  }
+
+  .photos-search-input {
+    min-width: 80px;
+    font-size: 13px;
+  }
+
+  .photos-search-submit-btn {
+    padding: 0 12px;
+  }
+
+  .search-warning-banner {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+}
+
+/* Short viewports (<= 640px height): preserve photo grid viewport space */
+@media (max-height: 640px) {
+  .top-bar {
+    min-height: 48px;
+    padding: 4px 12px;
+  }
+
+  .photos-toolbar {
+    padding: 6px 12px;
+    gap: 6px;
+  }
+
+  .photos-grid-scroll-container {
+    min-height: 180px;
+  }
+
+  .details-preview {
+    height: 150px;
+  }
 }

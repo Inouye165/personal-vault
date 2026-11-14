@@ -22,6 +22,13 @@ export interface PhotosSearchBarResultMeta {
 
 export type PhotosSearchModelStatus = SemanticModelProvisionState | 'unprovisioned' | 'corrupt'
 
+function formatCompactSearchTime(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 100) {
+    return '<0.1s'
+  }
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
 export interface PhotosSearchBarProps {
   readonly query: string
   readonly isSearching: boolean
@@ -63,7 +70,8 @@ export function PhotosSearchBar({
   }
 
   const isModelMissing = modelStatus === 'unprovisioned' || modelStatus === 'missing'
-  const isModelCorrupt = modelStatus === 'corrupt' || modelStatus === 'error'
+  const isModelCorrupt = modelStatus === 'corrupt'
+  const isModelError = modelStatus === 'error'
 
   return (
     <div className="photos-search-bar-container" data-testid="photos-search-bar">
@@ -91,8 +99,7 @@ export function PhotosSearchBar({
               aria-label="Clear search"
               title="Clear search and restore ordinary browsing"
             >
-              <X size={14} aria-hidden="true" />
-              <span>Clear search</span>
+              <X size={16} aria-hidden="true" />
             </button>
           )}
         </div>
@@ -134,7 +141,21 @@ export function PhotosSearchBar({
         </div>
       )}
 
-      {searchResult && !isModelMissing && !isModelCorrupt && (
+      {isModelError && (
+        <div
+          className="search-model-notice search-warning-banner"
+          role="alert"
+          data-testid="search-model-error-notice"
+        >
+          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
+          <span>
+            Offline search model download or setup failed. Open the Semantic Index tab to retry
+            downloading or import a verified model.
+          </span>
+        </div>
+      )}
+
+      {searchResult && !isModelMissing && !isModelCorrupt && !isModelError && (
         <div className="photos-search-feedback">
           <div className="search-meta-row">
             <span className="search-match-badge" data-testid="search-match-badge">
@@ -142,7 +163,7 @@ export function PhotosSearchBar({
               {searchResult.totalMatched === 1 ? '' : 'es'}
             </span>
             <span className="search-latency-badge">
-              ({searchResult.queryLatencyMs}ms, {searchResult.tokenCount} tokens)
+              · {formatCompactSearchTime(searchResult.queryLatencyMs)}
             </span>
             {searchResult.unindexedCount > 0 && (
               <span className="search-coverage-warning">

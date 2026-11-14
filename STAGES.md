@@ -1,12 +1,12 @@
 # Personal Vault - Development and Public Release Tracker
 
-Updated: November 13, 2026.
+Updated: November 14, 2026.
 
 This tracker covers all development through public release. Detailed tasks belong in [TODO.md](TODO.md); verification evidence and limitations belong in [HANDOFF.md](HANDOFF.md).
 
 ## Current position
 
-Stages 1-6 are complete (Stages 1-5 independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`; Stage 6 via substages 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`, 6D `1f07012`, and 6E `e565835` on `feat/stage-6e-final-verification`, closeout `8a297e1`). Pre-Stage-7 modularity maintenance is **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Complete; independently accepted at `2e6e54c`**; remaining slices **Planned**). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
+Stages 1-6 are complete (Stages 1-5 independently accepted at `070e3cb`, `71e1af7`, `79bbf44`, `1a1fb69`, and Stage 5 via substages 5A `951fd25`, 5B `4071948`, and 5C `543135a`; Stage 6 via substages 6A `155d7bd`, 6B `0b0c814`, 6C `c8a766f`, 6D `1f07012`, and 6E `e565835` on `feat/stage-6e-final-verification`, closeout `8a297e1`). Pre-Stage-7 modularity maintenance is **In progress** (Slice 1: catalog semantic photo search extraction on `refactor/pre-stage-7-catalog-search`, **Complete; independently accepted at `2e6e54c`**; Packaged Worker Resolution Slice A **Complete; independently accepted at `c2a832a`**; HEIC/HEIF support, model-download CDN recovery, single search input, and Responsive Photos UX Redesign with final stacked-drawer correction on `feat/heic-support` **Reviewed — ready for closeout commit**; remaining modularization slices **Planned**). Stages 7-8 are Planned. Public release has not occurred and has no scheduled date.
 
 ## All stages
 
@@ -309,14 +309,14 @@ Exit: users can run local perceptual analysis, browse similar candidates side by
 - [x] **Supported Offline Photo-Search User Workflow & Known Limitations Documented**:
   - Documented across `HANDOFF.md`, `ARCHITECTURE.md`, and `README.md`.
 
-### Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Complete / accepted at `2e6e54c`)
+### Pre-Stage-7 Modularity Maintenance (In progress — Slice 1 Complete / accepted at `2e6e54c`; nonblocking refactors explicitly deferred and retained as Planned)
 
 Before implementing Stage 7 document extraction and unified search, execute a bounded sequence of behavior-preserving modularity maintenance slices:
 
-1. **Catalog Repositories — Slice 1: Semantic Photo Search (`refactor/pre-stage-7-catalog-search`, Complete — independently accepted at `2e6e54c945bc1da33e23a7525057129aad4234df`)**: Extracted `searchPhotosSemantic` into `src/main/services/catalog/semantic-search-repository.ts` (`SemanticSearchRepository`) and shared SQL filter construction into `src/main/services/catalog/photo-filter-sql.ts` (`buildPhotoFilterClauses`), while preserving `CatalogDatabase`'s public API, connection lifecycle, and transaction ownership via delegation. Remaining catalog repository extractions (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`) remain **Planned**.
-2. **Domain IPC Registration (Planned)**: Split monolithic IPC registration in `src/main/index.ts` and handler files into domain-scoped routers with isolated sender validation and channel subscriptions.
-3. **Shared Contracts, Schemas & Preload Organization (Planned)**: Modularize `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain contracts (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`).
-4. **Photos UI & Hooks Decomposition (Planned)**: Decompose `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks (toolbar, filter bar, search controls, virtual grid, provenance sidebar).
+1. **Catalog Repositories — Slice 1: Semantic Photo Search (`refactor/pre-stage-7-catalog-search`, Complete — independently accepted at `2e6e54c945bc1da33e23a7525057129aad4234df`)**: Extracted `searchPhotosSemantic` into `src/main/services/catalog/semantic-search-repository.ts` (`SemanticSearchRepository`) and shared SQL filter construction into `src/main/services/catalog/photo-filter-sql.ts` (`buildPhotoFilterClauses`), while preserving `CatalogDatabase`'s public API, connection lifecycle, and transaction ownership via delegation. Remaining catalog repository extractions (`SourceRepository`, `ScanRepository`, `DuplicateRepository`, `VaultRepository`, `PhotoMetadataRepository`, `SemanticIndexRepository`) remain **Planned** (explicitly deferred as nonblocking for Stage 7A–7D; Stage 7 must add new domain code in dedicated modules such as `DocumentRepository` rather than appending to `database.ts`).
+2. **Domain IPC Registration (Planned — nonblocking deferral)**: Split monolithic IPC registration in `src/main/index.ts` and `src/main/ipc/handlers.ts` into domain-scoped routers with isolated sender validation and channel subscriptions. Stage 7 adds dedicated `src/main/ipc/document-handlers.ts`.
+3. **Shared Contracts, Schemas & Preload Organization (Planned — nonblocking deferral)**: Modularize `src/preload/index.ts` and `src/shared/validation/ipc-schemas.ts` into domain contracts (`photos`, `metadata`, `semantic`, `vault`, `duplicates`, `scan`). Stage 7 adds dedicated `src/shared/validation/document-schemas.ts`.
+4. **Photos UI & Hooks Decomposition (Planned — nonblocking deferral)**: Decompose `PhotosPanel.tsx` and `usePhotos.ts` into focused sub-components and domain hooks (toolbar, filter bar, search controls, virtual grid, provenance sidebar). Stage 7 adds dedicated `DocumentsPanel.tsx` and `useDocuments.ts`.
 
 ### Stage 6 Checklist
 
@@ -329,13 +329,23 @@ Exit: users can find photos by content and available metadata using the supporte
 
 ## Stage 7 - Documents and unified search
 
-**Planned.**
+**Planned.** Divided into bounded, independently reviewable slices (dependency and model choices for 7B–7F remain **provisional** until evaluated and accepted in their respective slices):
 
-- [ ] Extract text from supported document formats.
-- [ ] Add local OCR for scanned documents and document images.
-- [ ] Classify documents with explicit inference provenance.
-- [ ] Filter software clutter without excluding valuable personal notes.
-- [ ] Provide unified search across photos and documents.
+| Substage | Deliverable                                                                                            | Status  | Acceptance |
+| -------- | ------------------------------------------------------------------------------------------------------ | ------- | ---------- |
+| 7A       | Browse already-cataloged documents without rescanning (recorded facts, filters, provenance)            | Planned | Pending    |
+| 7B       | Supported-format previews and local read-only text extraction (`.txt`, `.md`, `.csv`, `.pdf`, `.docx`) | Planned | Pending    |
+| 7C       | Local offline OCR for scanned PDFs and document images                                                 | Planned | Pending    |
+| 7D       | Document semantic search (dedicated offline text-embedding ONNX model, not CLIP)                       | Planned | Pending    |
+| 7E       | Document classification with inference provenance and software-artifact filtering                      | Planned | Pending    |
+| 7F       | Unified photo and document search across modalities                                                    | Planned | Pending    |
+
+- [ ] **7A (Planned)**: Browse already-cataloged `category = 'document'` files without rescanning; paginated list, filename and extension filters (with paginated/validated extension facets if provided), recorded file details, paths, timestamps, hashes, observation provenance, explicit `Unknown` values, and honest `"Not extracted yet"` status.
+- [ ] **7B (Planned)**: Worker-thread read-only previews and text extraction for `.txt`/`.md`/`.markdown`/`.csv`/`.tsv`/`.rtf` (built-in streaming) plus provisional `.pdf` (`pdfjs-dist` / `unpdf`) and `.docx` (`mammoth` / `jszip` + `fast-xml-parser`) dependencies; honest `unsupported_format` for legacy binary formats.
+- [ ] **7C (Planned)**: Local offline OCR for scanned PDFs and document images (provisional `tesseract.js` with SHA-256-verified offline traineddata) with explicit inference provenance.
+- [ ] **7D (Planned)**: Document semantic search using a dedicated offline text-embedding ONNX model (provisional `Xenova/bge-small-en-v1.5` or `Xenova/all-MiniLM-L6-v2` via `onnxruntime-node`, explicitly **not** CLIP), chunked SQLite index, and bounded ranking.
+- [ ] **7E (Planned)**: Classify documents with explicit inference provenance and filter software clutter without deleting or excluding valuable personal notes.
+- [ ] **7F (Planned)**: Provide unified search across photos and documents with explicit per-modality score/provenance labels.
 
 Exit: supported documents can be found and reviewed alongside photos without uploading private content by default.
 

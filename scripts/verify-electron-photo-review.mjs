@@ -185,7 +185,8 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv }
   let child
   if (mode === 'unpacked') {
-    const exePath = join(rootDir, 'dist', 'win-unpacked', 'Personal Vault.exe')
+    const unpackedDir = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
+    const exePath = join(unpackedDir, 'Personal Vault.exe')
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
@@ -717,6 +718,16 @@ async function main() {
 
     // 6. Filtering via DOM Dropdowns & Out-of-filter Eviction/Refill
     console.log('[Phase 5] Verifying combined SQL filters and out-of-filter eviction in DOM...')
+    // Open expandable Filters panel if collapsed
+    await evaluate(
+      cdp,
+      `(() => {
+      if (!document.querySelector('select[aria-label="Filter by Rating"]')) {
+        document.querySelector('[data-testid="photos-toggle-metadata-filters"]')?.click();
+      }
+    })()`
+    )
+    await sleep(200)
     // Filter by Rating: 4+ Stars
     await evaluate(
       cdp,
@@ -740,6 +751,16 @@ async function main() {
     }
 
     // Filter by Flag: Pick
+    await evaluate(
+      cdp,
+      `(() => {
+      const filterToggle = document.querySelector('[data-testid="photos-toggle-metadata-filters"]');
+      if (filterToggle && filterToggle.getAttribute('aria-expanded') !== 'true') {
+        filterToggle.click();
+      }
+    })()`
+    )
+    await sleep(150)
     await evaluate(
       cdp,
       `(() => {
@@ -968,7 +989,14 @@ async function main() {
         if (btn) btn.click()
       })()`
     )
-    await sleep(300)
+    for (let i = 0; i < 30; i++) {
+      const ready = await evaluate(
+        cdp,
+        `document.querySelectorAll('.photo-cell:not(.photo-skeleton)').length >= 5`
+      )
+      if (ready) break
+      await sleep(100)
+    }
 
     await evaluate(
       cdp,
@@ -1137,6 +1165,16 @@ async function main() {
     await evaluate(
       cdp,
       `(() => {
+      const filterToggle = document.querySelector('[data-testid="photos-toggle-metadata-filters"]');
+      if (filterToggle && filterToggle.getAttribute('aria-expanded') !== 'true') {
+        filterToggle.click();
+      }
+    })()`
+    )
+    await sleep(150)
+    await evaluate(
+      cdp,
+      `(() => {
       const flagSel = document.querySelector('select[aria-label="Filter by Flag"]');
       if (flagSel) {
         flagSel.value = 'pick';
@@ -1248,12 +1286,15 @@ async function main() {
     }
 
     // Cold scroll forward past 2,000 photos in the filtered virtual grid
-    for (let pos = 5000; pos <= 120000; pos += 15000) {
+    for (const frac of [0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 0.94]) {
       await evaluate(
         cdp,
         `(() => {
           const el = document.querySelector('.photos-grid-container');
-          if (el) { el.scrollTop = ${pos}; el.dispatchEvent(new Event('scroll')); }
+          if (el) {
+            el.scrollTop = Math.floor(Math.max(0, el.scrollHeight - el.clientHeight) * ${frac});
+            el.dispatchEvent(new Event('scroll'));
+          }
         })()`
       )
       await sleep(35)
@@ -1267,7 +1308,10 @@ async function main() {
       cdp,
       `(() => {
         const el = document.querySelector('.photos-grid-container');
-        if (el) { el.scrollTop = 125000; el.dispatchEvent(new Event('scroll')); }
+        if (el) {
+          el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+          el.dispatchEvent(new Event('scroll'));
+        }
       })()`
     )
     await sleep(200)

@@ -43,6 +43,7 @@
   "dependencies": {
     "@huggingface/tokenizers": "0.2.0",
     "exifreader": "4.54.0",
+    "libheif-js": "1.23.5",
     "lucide-react": "^1.16.0",
     "onnxruntime-node": "1.31.1",
     "react": "^19.0.0",

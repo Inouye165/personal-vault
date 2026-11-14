@@ -25,6 +25,7 @@ import {
   SEMANTIC_EMBEDDING_DIMENSIONS,
   SEMANTIC_MODEL_TOTAL_BYTES,
   REQUIRED_MODEL_ARTIFACTS,
+  APPROVED_DOWNLOAD_HOSTS,
   computeManifestSha256,
   type SemanticModelArtifactSpec
 } from '../../src/main/services/semantic/manifest'
@@ -389,5 +390,105 @@ describe('Stage 6B — SemanticModelManager & Pinned Manifest', () => {
     const verifiedAfterTamper = await manager.revalidateForLoading()
     expect(verifiedAfterTamper.ok).toBe(false)
     expect(manager.getStatus().state).toBe('error')
+  })
+
+  it('permits exact us.aws.cdn.hf.co CDN hostname while rejecting lookalikes, HTTP downgrades, and bad hashes, and recovers on retry', async () => {
+    expect(APPROVED_DOWNLOAD_HOSTS).toContain('us.aws.cdn.hf.co')
+    expect(APPROVED_DOWNLOAD_HOSTS.every((h) => !h.includes('*') && !h.startsWith('.'))).toBe(true)
+
+    const defaultManager = new SemanticModelManager({
+      modelsRootDir,
+      getApprovedRoots: () => [sourceRootDir],
+      getVaultRoot: () => vaultRootDir,
+      artifacts: synthetic.specs
+    })
+    const validateUrl = (
+      defaultManager as unknown as { validateDownloadUrl: (raw: string) => URL }
+    ).validateDownloadUrl.bind(defaultManager)
+
+    expect(
+      validateUrl('https://us.aws.cdn.hf.co/repos/example/clip-vit-base-patch32/config.json')
+        .hostname
+    ).toBe('us.aws.cdn.hf.co')
+    expect(() => validateUrl('http://us.aws.cdn.hf.co/config.json')).toThrow(
+      /Disallowed download protocol/
+    )
+    expect(() => validateUrl('http://huggingface.co/config.json')).toThrow(
+      /Disallowed download protocol/
+    )
+    expect(() => validateUrl('https://us.aws.cdn.hf.co.evil.com/config.json')).toThrow(
+      /Disallowed download host/
+    )
+    expect(() => validateUrl('https://evil-us.aws.cdn.hf.co/config.json')).toThrow(
+      /Disallowed download host/
+    )
+    expect(() => validateUrl('https://cdn.hf.co/config.json')).toThrow(/Disallowed download host/)
+    expect(() => validateUrl('https://example.com/config.json')).toThrow(/Disallowed download host/)
+
+    // Exercise actual redirect failure -> retry recovery via approved redirect -> bad hash rejection
+    let mode: 'blocked_redirect' | 'approved_redirect' | 'bad_hash' = 'blocked_redirect'
+    server = createServer((req, res) => {
+      const reqUrl = req.url ?? '/'
+      if (mode === 'blocked_redirect' && !reqUrl.startsWith('/cdn-hop/')) {
+        res.writeHead(302, { Location: 'https://us.aws.cdn.hf.co.evil.com/config.json' })
+        res.end()
+        return
+      }
+      if (reqUrl.startsWith('/cdn-hop/')) {
+        const rel = reqUrl.slice('/cdn-hop/'.length)
+        const buf = synthetic.files.get(rel)
+        if (!buf) {
+          res.writeHead(404)
+          res.end()
+          return
+        }
+        if (mode === 'bad_hash' && rel === 'config.json') {
+          const corrupted = Buffer.alloc(buf.byteLength, 0x58)
+          res.writeHead(200, { 'Content-Length': String(corrupted.byteLength) })
+          res.end(corrupted)
+          return
+        }
+        res.writeHead(200, { 'Content-Length': String(buf.byteLength) })
+        res.end(buf)
+        return
+      }
+      const rel = reqUrl.replace(/^\/+/, '')
+      res.writeHead(302, { Location: `http://127.0.0.1:${port}/cdn-hop/${rel}` })
+      res.end()
+    })
+
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()))
+    const addr = server.address()
+    const port = typeof addr === 'object' && addr ? addr.port : 0
+
+    const retryManager = new SemanticModelManager({
+      modelsRootDir,
+      getApprovedRoots: () => [sourceRootDir],
+      getVaultRoot: () => vaultRootDir,
+      artifacts: synthetic.specs,
+      baseDownloadUrl: `http://127.0.0.1:${port}`,
+      allowedHosts: ['127.0.0.1'],
+      allowLoopbackHttpForTests: true
+    })
+    await retryManager.initialize()
+
+    // 1. Blocked redirect fails cleanly with error state and no leftover staging
+    const failed = await retryManager.downloadModel()
+    expect(failed.state).toBe('error')
+    expect(failed.error).toMatch(/Disallowed download host or redirect destination/)
+    const entriesAfterFail = existsSync(modelsRootDir) ? readdirSync(modelsRootDir) : []
+    expect(entriesAfterFail.filter((e) => e.startsWith('.model_staging_'))).toHaveLength(0)
+
+    // 2. Bad hash on redirected payload fails cleanly
+    mode = 'bad_hash'
+    const badHash = await retryManager.downloadModel()
+    expect(badHash.state).toBe('error')
+    expect(badHash.error).toMatch(/sha256|mismatch|digest/i)
+
+    // 3. Retry recovery succeeds through approved redirect hop
+    mode = 'approved_redirect'
+    const recovered = await retryManager.downloadModel()
+    expect(recovered.state).toBe('ready')
+    expect(retryManager.getActiveModelInstallDir()).not.toBeNull()
   })
 })

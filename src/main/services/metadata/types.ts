@@ -29,21 +29,11 @@ export type CaptureDateSourceTag = 'DateTimeOriginal' | 'DateTimeDigitized'
 export type CaptureTimezoneStatus =
   'offset_present' | 'local_wall_clock_unknown_tz' | 'invalid_offset' | 'unknown'
 
-export type SupportedMetadataContainerFormat = 'jpeg' | 'png' | 'webp' | 'gif' | 'avif' | 'tiff'
+export type SupportedMetadataContainerFormat =
+  'jpeg' | 'png' | 'webp' | 'gif' | 'avif' | 'tiff' | 'heic'
 
 export type UnsupportedContainerFormat =
-  | 'heic'
-  | 'cr2'
-  | 'cr3'
-  | 'dng'
-  | 'nef'
-  | 'arw'
-  | 'orf'
-  | 'rw2'
-  | 'raf'
-  | 'pef'
-  | 'bmp'
-  | 'raw_tiff'
+  'cr2' | 'cr3' | 'dng' | 'nef' | 'arw' | 'orf' | 'rw2' | 'raf' | 'pef' | 'bmp' | 'raw_tiff'
 
 export type DetectedContainerFormat = SupportedMetadataContainerFormat | UnsupportedContainerFormat
 

@@ -6,6 +6,10 @@ node_modules/
 # Build artifacts and outputs
 out/
 dist/
+dist-heic-verify/
+dist-model-verify/
+dist-search-ux-verify/
+dist-photos-ux-redesign/
 build/
 coverage/
 *.tsbuildinfo

@@ -446,7 +446,8 @@ function isSupportedMetadataFormat(
     fmt === 'webp' ||
     fmt === 'gif' ||
     fmt === 'avif' ||
-    fmt === 'tiff'
+    fmt === 'tiff' ||
+    fmt === 'heic'
   )
 }
 
@@ -736,7 +737,6 @@ export async function extractPhotoMetadataFromBuffer(params: {
   }
 
   if (!isSupportedMetadataFormat(detectedSig)) {
-    const isHeic = detectedSig === 'heic'
     const isBmp = detectedSig === 'bmp'
     return buildEmptyFailureResult({
       extractionStatus: 'unsupported',
@@ -745,16 +745,10 @@ export async function extractPhotoMetadataFromBuffer(params: {
       contentSha256: params.computedSha256,
       observedByteSize: params.observedByteSize,
       observedMtimeMs: params.observedMtimeMs,
-      errorCode: isHeic
-        ? 'UNSUPPORTED_HEIC_CONTAINER'
-        : isBmp
-          ? 'UNSUPPORTED_BMP_CONTAINER'
-          : 'UNSUPPORTED_RAW_CONTAINER',
-      errorMessage: isHeic
-        ? 'Detected HEIC/HEIF container; local HEVC codec decoding is not bundled offline'
-        : isBmp
-          ? 'Detected BMP container; BMP raster metadata pipeline is not enabled'
-          : `Detected ${detectedSig.toUpperCase()} camera RAW container; offline RAW demosaicing/decoding is not bundled`
+      errorCode: isBmp ? 'UNSUPPORTED_BMP_CONTAINER' : 'UNSUPPORTED_RAW_CONTAINER',
+      errorMessage: isBmp
+        ? 'Detected BMP container; BMP raster metadata pipeline is not enabled'
+        : `Detected ${detectedSig.toUpperCase()} camera RAW container; offline RAW demosaicing/decoding is not bundled`
     })
   }
 
@@ -894,9 +888,17 @@ export async function extractPhotoMetadataFromBuffer(params: {
     lensModel: rawLensModel
   })
 
+  // Sharp/libheif applies HEIF `irot` container rotation to `sharpMeta.width`/`height`
+  // while leaving `sharpMeta.orientation` undefined, even when EXIF `Orientation` is 5-8.
+  // Un-swap before calling `resolveDimensions` so all dimension/orientation validation runs
+  // identically without double-rotating display dimensions.
+  const swappedByExif = rawOrientation !== null && rawOrientation >= 5 && rawOrientation <= 8
+  const heicAlreadyOriented = detectedSig === 'heic' && sharpMeta.orientation === undefined
   const dimRes = resolveDimensions({
-    encodedWidth: sharpMeta.width ?? null,
-    encodedHeight: sharpMeta.height ?? null,
+    encodedWidth:
+      heicAlreadyOriented && swappedByExif ? (sharpMeta.height ?? null) : (sharpMeta.width ?? null),
+    encodedHeight:
+      heicAlreadyOriented && swappedByExif ? (sharpMeta.width ?? null) : (sharpMeta.height ?? null),
     exifOrientation: rawOrientation
   })
 

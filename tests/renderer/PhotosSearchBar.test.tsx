@@ -117,7 +117,7 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(screen.getByText(/query truncated to 77 tokens/i)).toBeInTheDocument()
   })
 
-  it('displays clear recovery guidance when the model status is corrupt or error', () => {
+  it('distinguishes a verified corrupt installed model from a download/setup failure notice', () => {
     const { rerender } = render(
       <PhotosSearchBar
         query="mountain"
@@ -128,8 +128,10 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
       />
     )
 
+    expect(screen.getByTestId('search-model-corrupt-notice')).toBeInTheDocument()
     expect(screen.getByText(/offline search model is invalid or damaged/i)).toBeInTheDocument()
     expect(screen.getByText(/re-download or re-import the verified model/i)).toBeInTheDocument()
+    expect(screen.queryByTestId('search-model-error-notice')).not.toBeInTheDocument()
 
     rerender(
       <PhotosSearchBar
@@ -141,7 +143,9 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
       />
     )
 
-    expect(screen.getByText(/offline search model is invalid or damaged/i)).toBeInTheDocument()
+    expect(screen.getByTestId('search-model-error-notice')).toBeInTheDocument()
+    expect(screen.getByText(/download or setup failed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/invalid or damaged/i)).not.toBeInTheDocument()
   })
 
   it('displays corrupt candidate warning with reindex guidance when corruptCount > 0', () => {
@@ -167,5 +171,46 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
 
     const warning = screen.getByTestId('search-corrupt-warning')
     expect(warning).toHaveTextContent(/2 damaged \(reindex recommended\)/i)
+  })
+
+  it('formats search timing compactly without raw token diagnostics in primary UI', () => {
+    render(
+      <PhotosSearchBar
+        query="ocean"
+        isSearching={false}
+        modelStatus="ready"
+        searchResult={{
+          totalMatched: 7,
+          eligibleCount: 20,
+          unindexedCount: 0,
+          staleCount: 0,
+          truncated: false,
+          tokenCount: 4,
+          queryLatencyMs: 240
+        }}
+        onSearch={vi.fn()}
+        onClear={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText(/0\.2s/i)).toBeInTheDocument()
+    expect(screen.queryByText(/240\s*ms/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/4\s*tokens/i)).not.toBeInTheDocument()
+  })
+
+  it('uses an accessible icon-only clear button outside the editable text area', () => {
+    render(
+      <PhotosSearchBar
+        query="golden hour"
+        isSearching={false}
+        modelStatus="ready"
+        onSearch={vi.fn()}
+        onClear={vi.fn()}
+      />
+    )
+
+    const clearBtn = screen.getByRole('button', { name: /clear search/i })
+    expect(clearBtn).toBeInTheDocument()
+    expect(clearBtn.textContent?.trim()).toBe('')
   })
 })

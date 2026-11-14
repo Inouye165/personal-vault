@@ -177,7 +177,8 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv }
   let child
   if (mode === 'unpacked') {
-    const exePath = join(rootDir, 'dist', 'win-unpacked', 'Personal Vault.exe')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
+    const exePath = join(unpackedRoot, 'Personal Vault.exe')
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
@@ -338,7 +339,7 @@ async function main() {
 
   // 1. In unpacked mode, verify packaged bundle hygiene & native ONNX Runtime resolution
   if (mode === 'unpacked') {
-    const unpackedRoot = join(rootDir, 'dist', 'win-unpacked')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
     const ortBinding = join(
       unpackedRoot,
       'resources',
@@ -465,9 +466,17 @@ async function main() {
     writeFileSync(dupPath, dupSourceBuf)
     createdPhotoPaths.push(dupPath)
 
-    // Unsupported Apple HEIC file (cataloged as photo by discovery policy, classified as unsupported by decoder)
-    const unsupportedPath = join(photosDir, 'iphone_unsupported.heic')
-    writeFileSync(unsupportedPath, Buffer.from('FAKE_APPLE_HEIC_IMAGE_PAYLOAD'))
+    // Unsupported Canon RAW file (cataloged as photo by discovery policy, classified as unsupported by decoder)
+    const unsupportedPath = join(photosDir, 'camera_unsupported.cr2')
+    writeFileSync(unsupportedPath, Buffer.from('II*\0\x10\0\0\0CR\x02\0', 'latin1'))
+
+    // Real HEIC file (decodable via offline libheif-js WASM decoder)
+    const heicPath = join(photosDir, 'sunset_sample.heic')
+    writeFileSync(
+      heicPath,
+      readFileSync(join(__dirname, '../tests/fixtures/heic/sunset_heic.heic'))
+    )
+    createdPhotoPaths.push(heicPath)
 
     // Corrupt JPEG file
     const corruptPath = join(photosDir, 'corrupt_image.jpg')
@@ -807,16 +816,16 @@ async function main() {
     }
 
     // Verify exact honest counts:
-    // Total catalog photos = 19 decodable + 1 unsupported SVG + 1 corrupt JPG + 1 mutated revision = 22 photos
+    // Total catalog photos = 20 decodable (incl. 1 HEIC) + 1 unsupported CR2 + 1 corrupt JPG + 1 mutated revision = 23 photos
     // Already indexed before this job (during Phase 4 before cancel) remain current and are not re-queued,
     // or are counted in currentIndexedPhotos.
-    // Specifically: currentIndexedPhotos must be 19 (all 19 valid decodable photos),
-    // unsupportedPhotos = 1 (diagram_unsupported.svg),
+    // Specifically: currentIndexedPhotos must be 20 (all 20 valid decodable photos),
+    // unsupportedPhotos = 1 (camera_unsupported.cr2),
     // failedPhotos = 2 (corrupt_image.jpg + photo_mutable_revision.jpg whose revision changed after scan),
     // reusedPhotos >= 1 (photo_001_exact_duplicate.jpg reused verified embedding from photo_001.jpg).
-    if (finalProgress.currentIndexedPhotos !== 19) {
+    if (finalProgress.currentIndexedPhotos !== 20) {
       throw new Error(
-        `Expected currentIndexedPhotos === 19, got ${finalProgress.currentIndexedPhotos} (${JSON.stringify(finalProgress)})`
+        `Expected currentIndexedPhotos === 20, got ${finalProgress.currentIndexedPhotos} (${JSON.stringify(finalProgress)})`
       )
     }
     if (finalProgress.unsupportedPhotos !== 1) {
@@ -855,7 +864,7 @@ async function main() {
       )
     }
     pass(
-      `Completed job reports honest partial coverage (19/22 indexed, ${finalProgress.reusedPhotos} reused, 1 unsupported, 2 failed) and rejects mutated source revision`
+      `Completed job reports honest partial coverage (20/23 indexed, ${finalProgress.reusedPhotos} reused, 1 unsupported, 2 failed) and rejects mutated source revision`
     )
 
     // Evaluate responsiveness & resource bounds during indexing + browsing + similarity competition
@@ -984,14 +993,14 @@ async function main() {
     })
     cdp = currentApp.cdp
 
-    // Verify persisted vectors & coverage survived restart (19/22 indexed)
+    // Verify persisted vectors & coverage survived restart (20/23 indexed)
     const persistedAfterRestart = await evaluate(cdp, `window.api.getSemanticIndexProgress()`)
-    if (persistedAfterRestart.currentIndexedPhotos !== 19) {
+    if (persistedAfterRestart.currentIndexedPhotos !== 20) {
       throw new Error(
-        `Expected 19 persisted vectors after restart, got ${persistedAfterRestart.currentIndexedPhotos}`
+        `Expected 20 persisted vectors after restart, got ${persistedAfterRestart.currentIndexedPhotos}`
       )
     }
-    pass('Persisted embeddings and coverage (19 photos) verified intact after restart')
+    pass('Persisted embeddings and coverage (20 photos) verified intact after restart')
 
     // Scan batch1Dir (5 new photos -> 27 total catalog photos)
     await runScanAndWait(cdp, [batch1Dir])
@@ -1062,14 +1071,14 @@ async function main() {
         `Resumed job altered authorized scope! Expected ${snapshottedTotalBeforeResume}, got ${resumedFinal.totalPhotos}`
       )
     }
-    // 19 previously indexed + 5 from batch1Dir = 24 indexed; the 2 from batch2Dir were NOT silently included in the resumed job!
-    if (resumedFinal.currentIndexedPhotos !== 24 || resumedFinal.totalCatalogPhotos !== 29) {
+    // 20 previously indexed + 5 from batch1Dir = 25 indexed; the 2 from batch2Dir were NOT silently included in the resumed job!
+    if (resumedFinal.currentIndexedPhotos !== 25 || resumedFinal.totalCatalogPhotos !== 30) {
       throw new Error(
-        `Expected 24/29 indexed after exact-scope resume (excluding 2 newly scanned batch2 photos), got ${resumedFinal.currentIndexedPhotos}/${resumedFinal.totalCatalogPhotos}`
+        `Expected 25/30 indexed after exact-scope resume (excluding 2 newly scanned batch2 photos), got ${resumedFinal.currentIndexedPhotos}/${resumedFinal.totalCatalogPhotos}`
       )
     }
     pass(
-      'Startup identified interrupted job and resumed exact snapshotted scope (24/29 indexed; 2 newly scanned photos excluded until next explicit job)'
+      'Startup identified interrupted job and resumed exact snapshotted scope (25/30 indexed; 2 newly scanned photos excluded until next explicit job)'
     )
 
     // 7. Verify strict source file preservation invariance across all non-mutated source photos

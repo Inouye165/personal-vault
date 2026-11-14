@@ -160,7 +160,8 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv }
   let child
   if (mode === 'unpacked') {
-    const exePath = join(rootDir, 'dist', 'win-unpacked', 'Personal Vault.exe')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
+    const exePath = join(unpackedRoot, 'Personal Vault.exe')
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
@@ -384,7 +385,7 @@ async function main() {
 
   // 1. Packaged hygiene check
   if (mode === 'unpacked') {
-    const unpackedRoot = join(rootDir, 'dist', 'win-unpacked')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
     const ortBinding = join(
       unpackedRoot,
       'resources',
@@ -576,6 +577,10 @@ async function main() {
       .toBuffer()
     writeFileSync(join(photosDir, `photo_neutral_${i}.jpg`), bg)
   }
+  writeFileSync(
+    join(photosDir, 'portrait_heic_sample.heic'),
+    readFileSync(join(rootDir, 'tests', 'fixtures', 'heic', 'portrait_exif6.heic'))
+  )
 
   const initialPhotoBaselines = snapshotDirectoryFiles(photosDir)
   pass(`Generated ${initialPhotoBaselines.size} distinct semantic photograph fixtures`)
@@ -659,18 +664,18 @@ async function main() {
         `Expected corrupt model import to fail with state='error', got: ${JSON.stringify(corruptImportRes)}`
       )
     }
-    let corruptBannerText = ''
+    let errorBannerText = ''
     for (let i = 0; i < 40; i++) {
-      corruptBannerText = await evaluate(
+      errorBannerText = await evaluate(
         app.cdp,
-        `document.querySelector('[data-testid="search-model-corrupt-notice"]')?.textContent ?? ''`
+        `document.querySelector('[data-testid="search-model-error-notice"]')?.textContent ?? ''`
       )
-      if (corruptBannerText.includes('invalid or damaged')) break
+      if (errorBannerText.includes('download or setup failed')) break
       await sleep(100)
     }
-    if (!corruptBannerText.includes('invalid or damaged')) {
+    if (!errorBannerText.includes('download or setup failed')) {
       throw new Error(
-        `Expected PhotosSearchBar corrupt model recovery banner, got: '${corruptBannerText}'`
+        `Expected PhotosSearchBar download/setup failure recovery banner, got: '${errorBannerText}'`
       )
     }
     // Restore valid config.json and refresh baseline snapshot
@@ -753,6 +758,27 @@ async function main() {
     }
     pass(
       `Query 'lush green forest' correctly matched '${forestRes.items[0].photo.fileName}' (score=${forestRes.items[0].score.toFixed(3)})`
+    )
+
+    // Query 2b: Verify indexed HEIC photo produced a semantic embedding and is reachable via search
+    const heicSearchRes = await evaluate(
+      app.cdp,
+      `window.api.searchPhotosSemantic({ queryText: 'portrait photo', limit: 50, minScore: -1.0 })`
+    )
+    const matchedHeic = heicSearchRes.items.find(
+      (item) => item.photo.fileName === 'portrait_heic_sample.heic'
+    )
+    if (
+      !matchedHeic ||
+      typeof matchedHeic.score !== 'number' ||
+      !Number.isFinite(matchedHeic.score)
+    ) {
+      throw new Error(
+        `Expected indexed HEIC photo 'portrait_heic_sample.heic' to be reachable via semantic search, got: ${JSON.stringify(heicSearchRes)}`
+      )
+    }
+    pass(
+      `Indexed HEIC photo 'portrait_heic_sample.heic' reachable via semantic search (score=${matchedHeic.score.toFixed(3)})`
     )
 
     // Query 3: Car

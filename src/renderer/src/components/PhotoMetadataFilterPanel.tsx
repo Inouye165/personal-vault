@@ -10,8 +10,11 @@ import {
   SlidersHorizontal
 } from 'lucide-react'
 import type {
+  CollectionItem,
   PhotoFileTypeBasis,
-  PhotoMetadataProgressResponse
+  PhotoFlagFilter,
+  PhotoMetadataProgressResponse,
+  PhotoRatingFilter
 } from '../../../shared/validation/ipc-schemas'
 import type { FacetSliceState } from '../hooks/usePhotoMetadata'
 import type { PhotoMetadataFilterState } from '../hooks/usePhotos'
@@ -21,6 +24,13 @@ export interface PhotoMetadataFilterPanelProps {
   readonly isBusy: boolean
   readonly actionError: string | null
   readonly matchingCount: number
+  readonly ratingFilter?: PhotoRatingFilter
+  readonly flagFilter?: PhotoFlagFilter
+  readonly collectionId?: number | null
+  readonly collections?: readonly CollectionItem[]
+  readonly onRatingFilterChange?: (filter: PhotoRatingFilter) => void
+  readonly onFlagFilterChange?: (filter: PhotoFlagFilter) => void
+  readonly onCollectionIdChange?: (collectionId: number | null) => void
   readonly metadataFilters: PhotoMetadataFilterState
   readonly cameraFacet: FacetSliceState
   readonly lensFacet: FacetSliceState
@@ -59,6 +69,13 @@ export function PhotoMetadataFilterPanel({
   isBusy,
   actionError,
   matchingCount,
+  ratingFilter = 'all',
+  flagFilter = 'all',
+  collectionId = null,
+  collections = [],
+  onRatingFilterChange,
+  onFlagFilterChange,
+  onCollectionIdChange,
   metadataFilters,
   cameraFacet,
   lensFacet,
@@ -102,7 +119,7 @@ export function PhotoMetadataFilterPanel({
       <div className="metadata-panel-header">
         <div className="metadata-panel-title-row">
           <SlidersHorizontal size={16} />
-          <h3>Photo Metadata &amp; SQL Filters</h3>
+          <h3>Filters &amp; Metadata</h3>
           <span className="metadata-badge" data-testid="metadata-matching-count-badge">
             Matching: {matchingCount.toLocaleString()} {matchingCount === 1 ? 'photo' : 'photos'}
           </span>
@@ -137,6 +154,74 @@ export function PhotoMetadataFilterPanel({
           )}
         </div>
       </div>
+
+      {/* Review & Organization Filters */}
+      {onRatingFilterChange && onFlagFilterChange && onCollectionIdChange && (
+        <div
+          className="photos-filter-bar"
+          role="region"
+          aria-label="Review and organization filters"
+        >
+          <div className="filter-group">
+            <label htmlFor="filter-rating" className="filter-label">
+              Rating
+            </label>
+            <select
+              id="filter-rating"
+              aria-label="Filter by Rating"
+              className="filter-select"
+              value={ratingFilter}
+              onChange={(e) => onRatingFilterChange(e.target.value as PhotoRatingFilter)}
+            >
+              <option value="all">All Ratings</option>
+              <option value="unrated">Unrated</option>
+              <option value="1">1+ Stars</option>
+              <option value="2">2+ Stars</option>
+              <option value="3">3+ Stars</option>
+              <option value="4">4+ Stars</option>
+              <option value="5">5 Stars</option>
+            </select>
+          </div>
+
+          <div className="filter-group">
+            <label htmlFor="filter-flag" className="filter-label">
+              Flag
+            </label>
+            <select
+              id="filter-flag"
+              aria-label="Filter by Flag"
+              className="filter-select"
+              value={flagFilter}
+              onChange={(e) => onFlagFilterChange(e.target.value as PhotoFlagFilter)}
+            >
+              <option value="all">All Flags</option>
+              <option value="none">Unflagged</option>
+              <option value="pick">Pick</option>
+              <option value="reject">Reject</option>
+            </select>
+          </div>
+
+          <div className="filter-group">
+            <label htmlFor="filter-collection" className="filter-label">
+              Collection
+            </label>
+            <select
+              id="filter-collection"
+              aria-label="Filter by Collection"
+              className="filter-select"
+              value={collectionId !== null ? String(collectionId) : ''}
+              onChange={(e) => onCollectionIdChange(e.target.value ? Number(e.target.value) : null)}
+            >
+              <option value="">All Collections</option>
+              {collections.map((col) => (
+                <option key={col.id} value={String(col.id)}>
+                  {col.name} ({col.photoCount ?? 0})
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
 
       {/* Extraction Coverage & Controls Bar */}
       <div className="metadata-coverage-card" data-testid="metadata-coverage-card">

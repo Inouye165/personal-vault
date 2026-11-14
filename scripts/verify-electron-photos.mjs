@@ -176,7 +176,8 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv }
   let child
   if (mode === 'unpacked') {
-    const exePath = join(rootDir, 'dist', 'win-unpacked', 'Personal Vault.exe')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
+    const exePath = join(unpackedRoot, 'Personal Vault.exe')
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
@@ -273,7 +274,10 @@ async function main() {
       { name: 'photo3_graphics.png', data: png400x400 },
       { name: 'photo4_modern.webp', data: webp300x300 },
       { name: 'photo5_anim.gif', data: gif200x200 },
-      { name: 'iphone_shot.heic', data: Buffer.from('FAKE_APPLE_HEIC_FILE_BYTES_FOR_PROBE') },
+      {
+        name: 'iphone_shot.heic',
+        data: readFileSync(join(__dirname, '../tests/fixtures/heic/portrait_exif6.heic'))
+      },
       { name: 'camera_raw.cr2', data: Buffer.from('FAKE_CANON_RAW_FILE_BYTES_FOR_PROBE') },
       { name: 'notes.txt', data: Buffer.from('Text document should not appear in Photos tab') }
     ]
@@ -372,16 +376,18 @@ async function main() {
     }
     pass('Automatically respects EXIF orientation tag (height scaled to 512px)')
 
-    // Unsupported formats: HEIC and RAW
+    // Real HEIC support (portrait_exif6.heic -> WebP without double-rotation) and unsupported RAW
     const photoHeic = pageRes.items.find((p) => p.fileName === 'iphone_shot.heic')
     const thumbHeic = await evaluate(
       cdp,
       `window.api.getThumbnail({ locationId: ${photoHeic.id} })`
     )
-    if (thumbHeic.status !== 'unsupported' || !thumbHeic.reason.includes('HEIC')) {
-      throw new Error(`Expected unsupported HEIC, got: ${JSON.stringify(thumbHeic)}`)
+    if (thumbHeic.status !== 'ready' || !(thumbHeic.height > thumbHeic.width)) {
+      throw new Error(`Expected ready portrait HEIC thumbnail, got: ${JSON.stringify(thumbHeic)}`)
     }
-    pass('Returns honest unsupported status for HEIC without crashing or executing external code')
+    pass(
+      `Decodes real HEIC portrait thumbnail offline (${thumbHeic.width}x${thumbHeic.height}, no double-rotation)`
+    )
 
     const photoRaw = pageRes.items.find((p) => p.fileName === 'camera_raw.cr2')
     const thumbRaw = await evaluate(cdp, `window.api.getThumbnail({ locationId: ${photoRaw.id} })`)
@@ -1042,6 +1048,10 @@ async function main() {
       )
     }
 
+    // Close details panel before scale scroll so grid column count stays consistent
+    await evaluate(cdp, `document.querySelector('button[aria-label="Close details"]')?.click()`)
+    await sleep(150)
+
     // Begin recording frame times via requestAnimationFrame in renderer
     await evaluate(
       cdp,
@@ -1060,12 +1070,13 @@ async function main() {
 
     // Cold scroll forward through the virtual grid past 2,000 photos
     const tCold0 = performance.now()
-    for (let pos = 5000; pos <= 135000; pos += 15000) {
+    for (let step = 1; step <= 10; step++) {
+      const frac = (step / 10) * 0.25
       await evaluate(
         cdp,
         `(() => {
           const el = document.querySelector('.photos-grid-container');
-          if (el) { el.scrollTop = ${pos}; el.dispatchEvent(new Event('scroll')); }
+          if (el) { el.scrollTop = Math.round(el.scrollHeight * ${frac}); el.dispatchEvent(new Event('scroll')); }
         })()`
       )
       await sampleWorkloadMetrics()
@@ -1080,7 +1091,7 @@ async function main() {
       cdp,
       `(() => {
         const el = document.querySelector('.photos-grid-container');
-        if (el) { el.scrollTop = 405000; el.dispatchEvent(new Event('scroll')); }
+        if (el) { el.scrollTop = Math.round(el.scrollHeight * 0.75); el.dispatchEvent(new Event('scroll')); }
       })()`
     )
     await sampleWorkloadMetrics()
@@ -1090,12 +1101,13 @@ async function main() {
 
     // Warm reversal: scroll back to index 0
     const tWarm0 = performance.now()
-    for (let pos = 350000; pos >= 0; pos -= 35000) {
+    for (let step = 10; step >= 0; step--) {
+      const frac = (step / 10) * 0.65
       await evaluate(
         cdp,
         `(() => {
           const el = document.querySelector('.photos-grid-container');
-          if (el) { el.scrollTop = ${pos}; el.dispatchEvent(new Event('scroll')); }
+          if (el) { el.scrollTop = Math.round(el.scrollHeight * ${frac}); el.dispatchEvent(new Event('scroll')); }
         })()`
       )
       await sampleWorkloadMetrics()
@@ -1103,8 +1115,8 @@ async function main() {
     }
     await sleep(200)
     const tWarm = performance.now() - tWarm0
-    // Checkpoint 3 (Page 0) contains 2 unsupported cards: iphone_shot.heic and camera_raw.cr2
-    await assertCheckpoint('Checkpoint 3: Return to Page 0', 1, 50, tWarm, 2)
+    // Checkpoint 3 (Page 0) contains 1 unsupported card: camera_raw.cr2 (iphone_shot.heic now decodes)
+    await assertCheckpoint('Checkpoint 3: Return to Page 0', 1, 50, tWarm, 1)
 
     // Stop frame recording and calculate true frame interval p95
     await evaluate(cdp, `window.__recording = false`)

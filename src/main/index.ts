@@ -63,8 +63,8 @@ function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1200,
     height: 800,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: 360,
+    minHeight: 480,
     show: false,
     autoHideMenuBar: true,
     title: 'Personal Vault',

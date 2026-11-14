@@ -283,6 +283,9 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
       expect(screen.getByText('sunset.jpg')).toBeInTheDocument()
     })
 
+    // Expand Filters panel
+    fireEvent.click(screen.getByTestId('photos-toggle-metadata-filters'))
+
     // Change rating filter to 4+
     const ratingFilter = screen.getByLabelText(/Filter by Rating/i)
     fireEvent.change(ratingFilter, { target: { value: '4' } })

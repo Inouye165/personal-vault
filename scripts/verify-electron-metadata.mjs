@@ -160,19 +160,6 @@ async function makeExifJpeg({ width, height, color, ifd0Tags = [], exifTags = []
   return Buffer.concat([base.subarray(0, 2), app1, exifHdr, tiff, base.subarray(2)])
 }
 
-function makeHeicHeaderFixture() {
-  const buf = Buffer.alloc(64)
-  buf.writeUInt32BE(24, 0)
-  buf.write('ftyp', 4, 'ascii')
-  buf.write('heic', 8, 'ascii')
-  buf.writeUInt32BE(0, 12)
-  buf.write('mif1', 16, 'ascii')
-  buf.write('heic', 20, 'ascii')
-  buf.writeUInt32BE(40, 24)
-  buf.write('mdat', 28, 'ascii')
-  return buf
-}
-
 function makeCanonCr2HeaderFixture() {
   const buf = Buffer.alloc(64)
   buf.write('II', 0, 'ascii')
@@ -307,7 +294,8 @@ async function launchApp(userDataDir, port, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv }
   let child
   if (mode === 'unpacked') {
-    const exePath = join(rootDir, 'dist', 'win-unpacked', 'Personal Vault.exe')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
+    const exePath = join(unpackedRoot, 'Personal Vault.exe')
     if (!existsSync(exePath)) {
       throw new Error(`Unpacked binary not found at ${exePath}. Run npm run build:unpack first.`)
     }
@@ -557,7 +545,7 @@ async function main() {
   pass('Sandboxed preload bundle verified (requires only "electron")')
 
   if (mode === 'unpacked') {
-    const unpackedRoot = join(rootDir, 'dist', 'win-unpacked')
+    const unpackedRoot = process.env.PV_UNPACKED_DIR || join(rootDir, 'dist', 'win-unpacked')
     if (
       !existsSync(join(unpackedRoot, 'Personal Vault.exe')) ||
       !existsSync(join(unpackedRoot, 'resources', 'app.asar'))
@@ -747,8 +735,11 @@ async function main() {
     })
     writeFileSync(join(immutablePhotosDir, 'mod_date_only.jpg'), modOnlyJpeg)
 
-    // 2 Unsupported (HEIC + Canon CR2) + 1 Corrupt JPEG
-    writeFileSync(join(immutablePhotosDir, 'iphone_sample.heic'), makeHeicHeaderFixture())
+    // 1 Real HEIC + 1 Unsupported (Canon CR2) + 1 Corrupt JPEG
+    writeFileSync(
+      join(immutablePhotosDir, 'iphone_sample.heic'),
+      readFileSync(join(__dirname, '../tests/fixtures/heic/portrait_exif6.heic'))
+    )
     writeFileSync(join(immutablePhotosDir, 'raw_sample.cr2'), makeCanonCr2HeaderFixture())
     writeFileSync(
       join(immutablePhotosDir, 'corrupt_truncated.jpg'),
@@ -895,14 +886,14 @@ async function main() {
     }
 
     const cov = completedProg.coverage
-    // 52 Canon + 4 Sony + 1 mod_date_only + 1 mutable = 58 extracted
+    // 52 Canon + 4 Sony + 1 mod_date_only + 1 mutable + 1 HEIC = 59 extracted
     // 3 PNG + 2 WebP + 1 disguised PNG = 6 no_metadata
-    // 2 unsupported (HEIC + CR2), 1 failed (corrupt_truncated.jpg)
+    // 1 unsupported (CR2), 1 failed (corrupt_truncated.jpg)
     if (
       cov.totalPhotos !== 67 ||
-      cov.extractedCount !== 58 ||
+      cov.extractedCount !== 59 ||
       cov.noMetadataCount !== 6 ||
-      cov.unsupportedCount !== 2 ||
+      cov.unsupportedCount !== 1 ||
       cov.failedCount !== 1 ||
       cov.unprocessedCount !== 0 ||
       cov.staleCount !== 0
@@ -914,7 +905,7 @@ async function main() {
       throw new Error('Semantic model state unexpectedly changed during metadata extraction')
     }
     pass(
-      `Extraction completed without semantic model: 58 extracted, 6 no_metadata, 2 unsupported (HEIC/CR2), 1 failed (corrupt JPEG), 0 unprocessed`
+      `Extraction completed without semantic model: 59 extracted (incl. HEIC), 6 no_metadata, 1 unsupported (CR2), 1 failed (corrupt JPEG), 0 unprocessed`
     )
 
     // =========================================================================
@@ -1139,9 +1130,9 @@ async function main() {
     await setReactInput(cdp, '[data-testid="filter-min-width"]', '1920')
     await setReactInput(cdp, '[data-testid="filter-min-height"]', '1080')
     await waitForCountBadge(cdp, 5, 'Orientation-adjusted min display 1920x1080 (5 photos)')
-    // Include Unknown dimensions (+3: HEIC + CR2 + corrupt JPEG = 8 photos)
+    // Include Unknown dimensions (+2: CR2 + corrupt JPEG = 7 photos)
     await setCheckboxChecked(cdp, '[data-testid="filter-include-unknown-dimensions"]', true)
-    await waitForCountBadge(cdp, 8, 'Min display 1920x1080 + Unknown dimensions (5 + 3 = 8)')
+    await waitForCountBadge(cdp, 7, 'Min display 1920x1080 + Unknown dimensions (5 + 2 = 7)')
 
     // Combined AND filter across Rating (5) + Flag (Pick) + Collection (Field Picks) +
     // Camera (canon eos r5) + Lens + Date (2024-02-01..2024-03-01) + Display Height >= 600 + Detected Format (jpeg)
@@ -1190,7 +1181,7 @@ async function main() {
     // Reset all filters via toolbar button
     await evaluate(
       cdp,
-      `Array.from(document.querySelectorAll('.photos-filter-bar button')).find((b) =>
+      `Array.from(document.querySelectorAll('.photos-filter-actions button, .photos-filter-bar button')).find((b) =>
         b.textContent?.includes('Reset filters')
       )?.click()`
     )

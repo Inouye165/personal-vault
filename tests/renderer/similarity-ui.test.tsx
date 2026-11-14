@@ -294,7 +294,8 @@ describe('Visual Similarity Review UI (Stage 5C)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Photo Grid' }))
 
     await waitFor(() => {
-      expect(screen.getByRole('search', { name: 'Photo filters' })).toBeInTheDocument()
+      expect(screen.getByTestId('photos-toggle-metadata-filters')).toBeInTheDocument()
+      expect(screen.getByRole('region', { name: 'Photographs Grid' })).toBeInTheDocument()
     })
   })
 

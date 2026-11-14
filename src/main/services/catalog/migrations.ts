@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 10
+export const CURRENT_SCHEMA_VERSION = 11
 
 interface Migration {
   readonly version: number
@@ -813,6 +813,20 @@ const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_photo_meta_job_items_job_status
           ON photo_metadata_job_items(job_id, status, id);
+      `)
+    }
+  },
+  {
+    version: 11,
+    name: 'recover_unsupported_heic_metadata',
+    up(db) {
+      db.exec(`
+        UPDATE photo_technical_metadata
+        SET extraction_status = 'stale',
+            is_current = 0
+        WHERE is_current = 1
+          AND extraction_status = 'unsupported'
+          AND error_code = 'UNSUPPORTED_HEIC_CONTAINER';
       `)
     }
   }

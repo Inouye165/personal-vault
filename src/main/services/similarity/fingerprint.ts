@@ -13,6 +13,7 @@
  */
 
 import sharp from 'sharp'
+import { openSharpFromImageBuffer } from '../thumbnails/heic-decoder'
 
 export const DHASH_ALGORITHM_VERSION = 'dhash64_v1'
 
@@ -116,13 +117,12 @@ export async function extractDHash64FromImageBuffer(
   imageBuffer: Buffer,
   maxInputPixels: number = 100_000_000
 ): Promise<ImageFingerprintResult> {
-  const image = sharp(imageBuffer, { limitInputPixels: maxInputPixels })
-  const meta = await image.metadata()
+  const meta = await sharp(imageBuffer, { limitInputPixels: maxInputPixels }).metadata()
   const width = meta.width ?? 0
   const height = meta.height ?? 0
 
+  const { image } = await openSharpFromImageBuffer(imageBuffer, maxInputPixels)
   const rawGrayscale = await image
-    .rotate() // preserve EXIF orientation
     .resize(9, 8, { fit: 'fill' }) // exact 9 cols x 8 rows
     .grayscale()
     .raw()

@@ -214,3 +214,183 @@ describe('shell: bridge states', () => {
     expect(screen.getByRole('searchbox', { name: /search/i })).toBeDisabled()
   })
 })
+
+describe('shell: photos tab single usable search input', () => {
+  it('removes the obsolete Stage 6 header placeholder and lets users type and submit through the single visible photo-search input', async () => {
+    const searchPhotosSemantic = vi.fn(async () => ({
+      items: [],
+      totalMatched: 0,
+      eligibleCount: 1,
+      unindexedCount: 0,
+      staleCount: 0,
+      corruptCount: 0,
+      truncated: false,
+      tokenCount: 1,
+      queryLatencyMs: 5,
+      modelStatus: 'ready' as const
+    }))
+    window.api = {
+      ...healthyApi(),
+      getVaultStatus: vi.fn(async () => ({ sourceCount: 1, itemCount: 1, isReady: true })),
+      getSemanticModelStatus: vi.fn(async () => ({
+        state: 'ready' as const,
+        modelId: 'Xenova/clip-vit-base-patch32@6b7c5237',
+        totalBytes: 155851918,
+        downloadedBytes: 155851918,
+        error: null,
+        verifiedAtMs: Date.now()
+      })),
+      getSemanticIndexProgress: vi.fn(async () => ({
+        status: 'idle' as const,
+        totalCatalogPhotos: 1,
+        currentIndexedPhotos: 1,
+        unindexedPhotos: 0,
+        stalePhotos: 0,
+        corruptPhotos: 0,
+        processedPhotos: 0,
+        totalPhotos: 0,
+        indexedPhotos: 0,
+        reusedPhotos: 0,
+        unsupportedPhotos: 0,
+        failedPhotos: 0,
+        pendingPhotos: 0,
+        lastError: null
+      })),
+      onSemanticIndexProgress: vi.fn(() => () => {}),
+      getPhotoMetadataProgress: vi.fn(async () => ({
+        status: 'idle' as const,
+        totalPhotos: 1,
+        processedPhotos: 1,
+        extractedPhotos: 1,
+        absentMetadataPhotos: 0,
+        reusedPhotos: 0,
+        unsupportedPhotos: 0,
+        failedPhotos: 0,
+        pendingPhotos: 0,
+        lastError: null,
+        coverage: {
+          parserRecipeVersion: 'exif_tech_v1',
+          totalPhotos: 1,
+          extractedCount: 1,
+          noMetadataCount: 0,
+          unsupportedCount: 0,
+          failedCount: 0,
+          staleCount: 0,
+          unprocessedCount: 0
+        }
+      })),
+      onPhotoMetadataProgress: vi.fn(() => () => {}),
+      getPhotoMetadataFacets: vi.fn(async () => ({
+        items: [],
+        totalDistinctCount: 0,
+        unknownCount: 0,
+        unextractedCount: 0
+      })),
+      listCollections: vi.fn(async () => ({ items: [], total: 0, offset: 0, limit: 50 })),
+      getSimilarityStatus: vi.fn(async () => ({
+        status: 'idle' as const,
+        totalPhotos: 0,
+        processedPhotos: 0,
+        unsupportedPhotos: 0,
+        errorPhotos: 0,
+        candidatePairsFound: 0,
+        lastError: null
+      })),
+      onSimilarityProgress: vi.fn(() => () => {}),
+      searchPhotosSemantic
+    } as unknown as VaultApi
+
+    await mount()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Photos' }))
+    })
+
+    expect(screen.queryByPlaceholderText(/stage 6/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/planned for stage 6/i)).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('searchbox')).toHaveLength(0)
+
+    const inputs = screen.getAllByRole('textbox')
+    expect(inputs).toHaveLength(1)
+    const input = inputs[0]!
+    expect(input).toBeEnabled()
+    expect(input).toHaveAccessibleName(/search photos by description/i)
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'sunset' } })
+    })
+    await act(async () => {
+      fireEvent.submit(input.closest('form')!)
+    })
+
+    expect(searchPhotosSemantic).toHaveBeenCalledWith(
+      expect.objectContaining({ queryText: 'sunset' })
+    )
+  })
+})
+
+describe('shell: responsive navigation drawer', () => {
+  it('opens and dismisses the mobile navigation drawer with Escape and restores focus', async () => {
+    const originalMatchMedia = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query.includes('767px'),
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    }))
+
+    try {
+      await mount()
+      const sidebar = document.getElementById('main-sidebar')!
+      expect(sidebar).toHaveAttribute('aria-hidden', 'true')
+      expect(sidebar).toHaveAttribute('inert')
+
+      const menuBtn = screen.getByRole('button', { name: /open navigation menu/i })
+      expect(menuBtn).toHaveAttribute('aria-expanded', 'false')
+
+      await act(async () => {
+        fireEvent.click(menuBtn)
+      })
+      expect(menuBtn).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByRole('dialog', { name: /main navigation/i })).toBeInTheDocument()
+      expect(sidebar).not.toHaveAttribute('aria-hidden')
+      expect(sidebar).not.toHaveAttribute('inert')
+
+      await act(async () => {
+        fireEvent.keyDown(document, { key: 'Escape' })
+      })
+      expect(menuBtn).toHaveAttribute('aria-expanded', 'false')
+      expect(sidebar).toHaveAttribute('aria-hidden', 'true')
+      expect(sidebar).toHaveAttribute('inert')
+      expect(document.activeElement).toBe(menuBtn)
+    } finally {
+      window.matchMedia = originalMatchMedia
+    }
+  })
+
+  it('keeps desktop navigation exposed and non-inert when viewport is wide', async () => {
+    const originalMatchMedia = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    }))
+
+    try {
+      await mount()
+      const sidebar = document.getElementById('main-sidebar')!
+      expect(sidebar).not.toHaveAttribute('aria-hidden')
+      expect(sidebar).not.toHaveAttribute('inert')
+    } finally {
+      window.matchMedia = originalMatchMedia
+    }
+  })
+})
