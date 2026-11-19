@@ -6,9 +6,11 @@ import { Header } from './components/Header'
 import { PhotosPanel } from './components/PhotosPanel'
 import { ScanJobsPanel } from './components/ScanJobsPanel'
 import { Sidebar } from './components/Sidebar'
+import { UnifiedSearchPanel } from './components/UnifiedSearchPanel'
 import { VaultImportPanel } from './components/VaultImportPanel'
 import { useScanJobs } from './hooks/useScanJobs'
 import { useMediaQuery } from './hooks/useMediaQuery'
+import { useUnifiedSearch } from './hooks/useUnifiedSearch'
 import { useVaultApi } from './hooks/useVaultApi'
 import type { NavigationTab } from '../../shared/validation/ipc-schemas'
 
@@ -18,8 +20,12 @@ export function App() {
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false)
   const isMobileViewport = useMediaQuery('(max-width: 767px)')
   const mobileNavTriggerRef = useRef<HTMLButtonElement>(null)
+  const headerSearchInputRef = useRef<HTMLInputElement>(null)
   const { state, notifyTab, refreshStatus } = useVaultApi()
   const scanJobs = useScanJobs()
+  const isAllSurfaceActive =
+    state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && currentTab === 'all'
+  const unifiedSearch = useUnifiedSearch({ isSurfaceActive: isAllSurfaceActive })
 
   const closeMobileNav = useCallback(() => {
     setIsMobileNavOpen(false)
@@ -76,6 +82,18 @@ export function App() {
         <Header
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
+          onSearchSubmit={(query) => {
+            if (currentTab !== 'all') {
+              selectTab('all')
+            }
+            unifiedSearch.submitSearch(query)
+          }}
+          onClearSearch={() => {
+            setSearchQuery('')
+            unifiedSearch.clearSearch()
+          }}
+          hasActiveUnifiedSearch={unifiedSearch.hasActiveSearch}
+          searchInputRef={headerSearchInputRef}
           state={state}
           currentTab={currentTab}
           isNavOpen={isMobileNavOpen}
@@ -114,7 +132,14 @@ export function App() {
             currentTab !== 'photos' &&
             currentTab !== 'documents' &&
             currentTab !== 'duplicates' &&
-            currentTab !== 'review' && (
+            currentTab !== 'review' &&
+            (unifiedSearch.hasActiveSearch ? (
+              <UnifiedSearchPanel
+                search={unifiedSearch}
+                isMobileViewport={isMobileViewport}
+                onNavigateTab={selectTab}
+              />
+            ) : (
               <div className="catalog-populated-view">
                 <ScanJobsPanel {...scanPanelProps} />
                 <div className="populated-summary-card">
@@ -127,7 +152,7 @@ export function App() {
                   </p>
                 </div>
               </div>
-            )}
+            ))}
         </div>
       </main>
     </div>

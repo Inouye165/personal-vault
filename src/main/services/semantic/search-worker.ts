@@ -15,6 +15,7 @@ import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import { embedQueryText, releaseTextSession } from './text-embedder'
+import { applySearchTestBarrier } from '../search-test-barrier'
 import { rankCandidatesWithBoundedPaging, type RankCandidate } from './ranking'
 import { tryDeserializeEmbeddingVector, isSemanticEmbeddingRecordCompatible } from './vector'
 import {
@@ -659,6 +660,7 @@ if (parentPort) {
             })
             return
           }
+          await applySearchTestBarrier('clip', message.queryText ?? '')
           const res = await embedQueryText({
             modelDir: message.modelDir,
             queryText: message.queryText ?? ''

@@ -577,6 +577,12 @@ export const PhotosDiagnosticsResponseSchema = z.object({
   searchPendingRequests: z.number().int().nonnegative().optional(),
   searchActiveCalls: z.number().int().nonnegative().optional(),
   searchMaxPendingRequests: z.number().int().nonnegative().optional(),
+  documentActiveWorkers: z.number().int().nonnegative().optional(),
+  documentTerminatingWorkers: z.number().int().nonnegative().optional(),
+  documentLiveWorkers: z.number().int().nonnegative().optional(),
+  ocrActiveWorkers: z.number().int().nonnegative().optional(),
+  ocrTerminatingWorkers: z.number().int().nonnegative().optional(),
+  ocrLiveWorkers: z.number().int().nonnegative().optional(),
   totalAppLiveWorkers: z.number().int().nonnegative().optional()
 })
 export type PhotosDiagnosticsResponse = z.infer<typeof PhotosDiagnosticsResponseSchema>
@@ -861,6 +867,32 @@ export const AnnotationJournalEntrySchema = z.discriminatedUnion('kind', [
     expectedRevisionB: z.string().min(1),
     decision: z.enum(['edited_version', 'similar_scene', 'unrelated', 'unreviewed']),
     version: z.number().int().positive()
+  }),
+  z.object({
+    formatVersion: z.number().int().positive().default(CURRENT_JOURNAL_FORMAT_VERSION),
+    entrySeq: z.number().int().positive(),
+    entryTimestampMs: z.number().int().positive(),
+    opId: z.string().min(1),
+    kind: z.literal('document_classification_override'),
+    locationId: z.number().int().positive(),
+    normalizedPath: z.string().min(1),
+    originalPath: z.string().min(1),
+    byteSize: z.number().int().nonnegative(),
+    filesystemMtimeMs: z.number().nullable(),
+    activeHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/i)
+      .nullable(),
+    discoveryObservationId: z.number().int().positive(),
+    expectedRevision: z.string().min(1),
+    overrideVersion: z.number().int().positive(),
+    purposeLabels: z
+      .array(z.enum(['legal', 'lists', 'instructions', 'receipts', 'recipes']))
+      .nullable(),
+    originLabels: z
+      .array(z.enum(['personal', 'software_project', 'application_system']))
+      .nullable(),
+    clutterOverride: z.enum(['inherit', 'force_keep', 'force_clutter'])
   })
 ])
 export type AnnotationJournalEntry = z.infer<typeof AnnotationJournalEntrySchema>
@@ -1301,7 +1333,8 @@ export const SemanticSearchRequestSchema = z
     includeUnknownDimensions: z.boolean().default(false),
     fileTypeBasis: PhotoFileTypeBasisSchema.default('detected_format'),
     fileTypeValue: z.string().max(32).nullable().default(null),
-    onlyUnknownDetectedFormat: z.boolean().default(false)
+    onlyUnknownDetectedFormat: z.boolean().default(false),
+    ownerGen: z.number().int().nonnegative().optional()
   })
   .strict()
 export type SemanticSearchRequest = z.input<typeof SemanticSearchRequestSchema>
@@ -1330,7 +1363,11 @@ export const SemanticSearchResponseSchema = z.object({
 })
 export type SemanticSearchResponse = z.infer<typeof SemanticSearchResponseSchema>
 
-export const SemanticSearchCancelRequestSchema = z.object({}).strict()
+export const SemanticSearchCancelRequestSchema = z
+  .object({
+    ownerGen: z.number().int().nonnegative().optional()
+  })
+  .strict()
 export type SemanticSearchCancelRequest = z.input<typeof SemanticSearchCancelRequestSchema>
 
 export const SemanticSearchCancelResponseSchema = z.object({
@@ -1339,6 +1376,126 @@ export const SemanticSearchCancelResponseSchema = z.object({
 export type SemanticSearchCancelResponse = z.infer<typeof SemanticSearchCancelResponseSchema>
 
 export * from './document-schemas'
+import {
+  DocSemanticSearchResponseSchema,
+  DocumentClutterFilterSchema,
+  DocumentOriginFilterSchema,
+  DocumentPurposeFilterSchema
+} from './document-schemas'
+
+// --- Stage 7F Slice 1: Unified Multi-Modal Search Contracts ---
+
+export const SearchOwnerSurfaceSchema = z.enum(['unified', 'photos-tab', 'documents-tab'])
+export type SearchOwnerSurface = z.infer<typeof SearchOwnerSurfaceSchema>
+
+export const UnifiedSearchModalitySchema = z.enum(['all', 'photos', 'documents'])
+export type UnifiedSearchModality = z.infer<typeof UnifiedSearchModalitySchema>
+
+export const UnifiedSearchStatusSchema = z.enum([
+  'ready',
+  'unprovisioned',
+  'corrupt',
+  'cancelled',
+  'overloaded',
+  'timed_out',
+  'error'
+])
+export type UnifiedSearchStatus = z.infer<typeof UnifiedSearchStatusSchema>
+
+export const UnifiedPhotoFiltersSchema = z
+  .object({
+    fileTypeBasis: PhotoFileTypeBasisSchema.optional(),
+    fileTypeValue: z.string().max(32).nullable().optional(),
+    onlyUnknownDetectedFormat: z.boolean().optional(),
+    ratingFilter: PhotoRatingFilterSchema.optional(),
+    flagFilter: PhotoFlagFilterSchema.optional(),
+    collectionId: z.number().int().positive().nullable().optional(),
+    captureDateFrom: CalendarDateIsoSchema.nullable().optional(),
+    captureDateTo: CalendarDateIsoSchema.nullable().optional(),
+    includeUnknownCaptureDate: z.boolean().optional(),
+    cameraNormalized: z.string().max(256).nullable().optional(),
+    onlyUnknownCamera: z.boolean().optional(),
+    lensNormalized: z.string().max(256).nullable().optional(),
+    onlyUnknownLens: z.boolean().optional(),
+    minWidthPx: z.number().int().min(1).max(100_000).nullable().optional(),
+    minHeightPx: z.number().int().min(1).max(100_000).nullable().optional(),
+    includeUnknownDimensions: z.boolean().optional(),
+    minScore: z.number().min(-1.0).max(1.0).optional()
+  })
+  .strict()
+export type UnifiedPhotoFilters = z.input<typeof UnifiedPhotoFiltersSchema>
+
+export const UnifiedSearchPhotosRequestSchema = z
+  .object({
+    query: z.string().trim().min(1).max(500),
+    ownerSurface: z.literal('unified'),
+    ownerGen: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative().default(0),
+    limit: z.number().int().min(1).max(100).default(20),
+    photoFilters: UnifiedPhotoFiltersSchema.optional()
+  })
+  .strict()
+export type UnifiedSearchPhotosRequest = z.input<typeof UnifiedSearchPhotosRequestSchema>
+
+export const UnifiedDocumentFiltersSchema = z
+  .object({
+    extensionFilter: z.string().max(32).nullable().optional(),
+    filenameQuery: z.string().max(200).optional(),
+    textSourceKindFilter: z.enum(['native', 'ocr']).nullable().optional(),
+    purposeFilter: DocumentPurposeFilterSchema.nullable().optional(),
+    originFilter: DocumentOriginFilterSchema.nullable().optional(),
+    clutterFilter: DocumentClutterFilterSchema.optional()
+  })
+  .strict()
+export type UnifiedDocumentFilters = z.input<typeof UnifiedDocumentFiltersSchema>
+
+export const UnifiedSearchDocumentsRequestSchema = z
+  .object({
+    query: z.string().trim().min(1).max(500),
+    ownerSurface: z.literal('unified'),
+    ownerGen: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative().default(0),
+    limit: z.number().int().min(1).max(100).default(20),
+    documentFilters: UnifiedDocumentFiltersSchema.optional()
+  })
+  .strict()
+export type UnifiedSearchDocumentsRequest = z.input<typeof UnifiedSearchDocumentsRequestSchema>
+
+export const UnifiedSearchCancelRequestSchema = z
+  .object({
+    ownerSurface: SearchOwnerSurfaceSchema,
+    ownerGen: z.number().int().nonnegative(),
+    modality: UnifiedSearchModalitySchema.default('all')
+  })
+  .strict()
+export type UnifiedSearchCancelRequest = z.input<typeof UnifiedSearchCancelRequestSchema>
+
+export const UnifiedSearchPhotosResponseSchema = z
+  .object({
+    status: UnifiedSearchStatusSchema,
+    modelId: z.literal('Xenova/clip-vit-base-patch32'),
+    result: SemanticSearchResponseSchema.nullable(),
+    errorMessage: z.string().nullable()
+  })
+  .strict()
+export type UnifiedSearchPhotosResponse = z.infer<typeof UnifiedSearchPhotosResponseSchema>
+
+export const UnifiedSearchDocumentsResponseSchema = z
+  .object({
+    status: UnifiedSearchStatusSchema,
+    modelId: z.literal('Xenova/bge-small-en-v1.5'),
+    result: DocSemanticSearchResponseSchema.nullable(),
+    errorMessage: z.string().nullable()
+  })
+  .strict()
+export type UnifiedSearchDocumentsResponse = z.infer<typeof UnifiedSearchDocumentsResponseSchema>
+
+export const UnifiedSearchCancelResponseSchema = z
+  .object({
+    cancelled: z.boolean()
+  })
+  .strict()
+export type UnifiedSearchCancelResponse = z.infer<typeof UnifiedSearchCancelResponseSchema>
 
 export function validatePayload<T>(
   schema: z.ZodSchema<T>,

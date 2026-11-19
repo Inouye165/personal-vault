@@ -13,6 +13,7 @@ import { Worker } from 'node:worker_threads'
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks'
 import { ThumbnailDiskCache, readWebPDimensions } from './cache'
 import { resolveMainWorkerScriptPath } from '../worker-path'
+import { AppWorkerBudget } from '../worker-budget'
 import {
   THUMBNAIL_LIMITS,
   type ThumbnailCoordinatorOptions,
@@ -175,6 +176,9 @@ export class ThumbnailCoordinator {
   private readonly maxSourceSizeBytes: number
   private readonly maxInputPixels: number
   private readonly workerScriptPath: string
+  private readonly maxAppLiveWorkers: number
+  private readonly getExternalLiveWorkers?: () => number
+  private readonly workerBudget: AppWorkerBudget
   private readonly eventLoopMonitor: IntervalHistogram
 
   private workers: ActiveWorkerEntry[] = []
@@ -207,6 +211,9 @@ export class ThumbnailCoordinator {
     this.maxSourceSizeBytes = options.maxSourceSizeBytes ?? THUMBNAIL_LIMITS.MAX_SOURCE_SIZE_BYTES
     this.maxInputPixels = options.maxInputPixels ?? THUMBNAIL_LIMITS.MAX_INPUT_PIXELS
     this.workerScriptPath = resolveWorkerScriptPath(options.workerScriptPath)
+    this.maxAppLiveWorkers = Math.max(1, options.maxAppLiveWorkers ?? 3)
+    this.getExternalLiveWorkers = options.getExternalLiveWorkers
+    this.workerBudget = options.workerBudget ?? new AppWorkerBudget(this.maxAppLiveWorkers)
     this.eventLoopMonitor = monitorEventLoopDelay({ resolution: 10 })
     this.eventLoopMonitor.enable()
     void this.cache.cleanupStagingFiles()
@@ -230,6 +237,31 @@ export class ThumbnailCoordinator {
 
   public getLiveWorkerCount(): number {
     return this.workers.length
+  }
+
+  public async releaseOneIdleWorker(): Promise<boolean> {
+    const idleEntry =
+      this.workers.find((w) => w.jobId === null && !w.isTerminating && !w.hasLoadedSemanticModel) ??
+      this.workers.find((w) => w.jobId === null && !w.isTerminating)
+    if (!idleEntry) {
+      return false
+    }
+    idleEntry.isTerminating = true
+    await new Promise<void>((resolveExit) => {
+      let settled = false
+      const done = () => {
+        if (!settled) {
+          settled = true
+          resolveExit()
+        }
+      }
+      idleEntry.worker.once('exit', done)
+      void idleEntry.worker.terminate().catch(() => {
+        this.workers = this.workers.filter((w) => w !== idleEntry)
+        done()
+      })
+    })
+    return true
   }
 
   public getActiveWorkerEntries(): readonly ActiveWorkerEntry[] {
@@ -1093,10 +1125,27 @@ export class ThumbnailCoordinator {
     }
 
     if (!entry) {
-      if (this.workers.length < this.maxActiveJobs) {
-        entry = this.spawnWorker()
+      const reservation =
+        this.workers.length < this.maxActiveJobs
+          ? this.workerBudget.tryReserve(this.getExternalLiveWorkers)
+          : null
+      if (reservation) {
+        try {
+          entry = this.spawnWorker()
+          this.workerBudget.promote(reservation, entry.worker)
+        } catch (err) {
+          this.workerBudget.releaseReservation(reservation)
+          throw err
+        }
       } else {
         this.queue.unshift(item)
+        if (this.workers.length === 0) {
+          setTimeout(() => {
+            if (!this.isShuttingDown) {
+              this.processNext()
+            }
+          }, 25)
+        }
         return
       }
     }

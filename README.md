@@ -80,6 +80,26 @@ npm run verify:metadata  # real Electron photo EXIF metadata extraction and SQL 
 npm run verify:metadata:unpacked # real Electron photo metadata & SQL filters verification in unpacked desktop binary
 npm run verify:semantic-search # real Electron natural-language photo search & ranking verification
 npm run verify:semantic-search:unpacked # real Electron natural-language photo search verification in unpacked binary
+npm run verify:documents # real Electron document browsing, local extraction & preview verification
+npm run verify:documents:unpacked # real Electron document browsing & extraction verification in unpacked binary
+npm run verify:ocr-foundation # real Electron Stage 7C Slice 1 offline OCR foundation verification
+npm run verify:ocr-foundation:unpacked # real Electron OCR foundation verification in isolated unpacked binary
+npm run verify:ocr-persistence # real Electron Stage 7C Slice 2 OCR persistence & resumable jobs verification
+npm run verify:ocr-persistence:unpacked # real Electron OCR persistence verification in isolated unpacked binary
+npm run verify:doc-semantic-foundation # real Electron Stage 7D Slice 1 document semantic foundation verification
+npm run verify:doc-semantic-foundation:unpacked # real Electron document semantic foundation verification in isolated unpacked binary
+npm run verify:doc-semantic-persistence # real Electron Stage 7D Slice 2 persistence & bounded ranking verification
+npm run verify:doc-semantic-persistence:unpacked # real Electron document semantic persistence verification in isolated unpacked binary
+npm run verify:doc-semantic-search # real Electron Stage 7D Slice 3 document semantic search & UI verification
+npm run verify:doc-semantic-search:unpacked # real Electron document semantic search verification in isolated unpacked binary
+npm run verify:doc-classify-foundation # real Electron Stage 7E Slice 1 document classification foundation verification
+npm run verify:doc-classify-foundation:unpacked # real Electron document classification foundation verification in isolated unpacked binary
+npm run verify:doc-classify-persistence # real Electron Stage 7E Slice 2 classification persistence & journal override verification
+npm run verify:doc-classify-persistence:unpacked # real Electron classification persistence verification in isolated unpacked binary
+npm run verify:doc-classify-ui # real Electron Stage 7E Slice 3 classification IPC & Documents UI verification
+npm run verify:doc-classify-ui:unpacked # real Electron classification UI verification in isolated unpacked binary
+npm run verify:unified-search # real Electron Stage 7F Slice 3 unified photo + document search verification
+npm run verify:unified-search:unpacked # real Electron unified search verification in isolated unpacked binary
 ```
 
 Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.
@@ -135,3 +155,15 @@ The output executable is generated at:
 - **Supported Image Formats**: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF, and Apple HEIC/HEIF (via bundled `libheif-js` WASM) are supported for thumbnail decoding, EXIF/header extraction, and CLIP indexing. Camera RAW formats (`.cr2`, `.nef`, `.arw`, `.dng`, `.orf`, `.rw2`, `.raf`) and SVG/BMP are reported honestly as `unsupported`.
 - **OS Read-Access Timestamps (`atime`)**: Source files are opened strictly read-only (`open(path, 'r')`), preserving exact bytes, SHA-256 digests, sizes, creation times (`birthtimeMs`), and modification times (`mtimeMs`). Depending on OS/mount settings, read-only opens may update the filesystem access timestamp (`atime`).
 - **Stage 6 Scope Boundaries**: Face recognition, GPS map views/reverse geocoding, video indexing, document OCR/unified search (Stage 7), and cloud sync are outside Stage 6 scope.
+
+---
+
+## Supported Offline Document Browsing, Text Extraction, OCR, Semantic Search, Classification & Unified Search (Stages 7A–7F)
+
+- **Browse Without Rescanning (`Documents`)**: Cataloged documents (`category = 'document'`) from existing scans appear immediately with pagination, filename and extension filters, recorded filesystem facts, SHA-256 provenance, and explicit `Unknown` values.
+- **Explicit Off-Main Text Extraction (`doc_extract_v1`)**: Extraction runs only when explicitly triggered (`Extract Text` / `Extract All Text` / `Extract Filtered Text`) inside bounded background worker threads (`<= 1` document worker under the shared `<= 3` app worker budget), supporting `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.rtf`, text-bearing `.pdf` (`pdfjs-dist`, scripts/fonts/network disabled), and `.docx` (`fflate` + `fast-xml-parser` with entity expansion disabled).
+- **Explicit Offline OCR (`doc_ocr_v1`)**: Scanned PDFs and explicitly selected raster document images can be OCR'd offline (`tesseract.js-core` WASM SIMD + SHA-256-verified `tessdata_fast` `eng.traineddata` + `pdfjs-dist`/`@napi-rs/canvas` page rasterization) under the shared `<= 3` app worker budget (`64 MiB` OCR source limit, conservative mixed-PDF page policy, dual-track persistence without overwriting native text, and never bulk-OCRing `category = 'photo'`).
+- **Explicit Offline Document Semantic Search (`Stage 7D`)**: Semantic indexing and search over extracted (`Native text`) and OCR'd (`OCR text (machine-recognized)`) document tracks use a separate, explicitly provisioned offline text-embedding model (`Xenova/bge-small-en-v1.5`, 384-d, 512-token window, zero automatic downloads) inside bounded worker threads under the shared `<= 3` app worker budget, returning inert `<pre>` winning-chunk excerpts with provenance badges and explicit partial-index/coverage disclosures. Evaluation used synthetic fixtures; real-world semantic search quality across diverse document collections has not been evaluated, and original-layout document viewing remains out of scope.
+- **Explicit Offline Document Classification & Reversible Clutter Filtering (`Stage 7E`)**: Pure deterministic rules (`doc_classify_rules_v1`, zero downloads, zero network calls) classify cataloged documents across purpose (`legal`, `lists`, `instructions`, `receipts`, `recipes`, distinct `Other / No structured match` vs `Unclassified / Needs text extraction or OCR`) and origin (`personal`, `software_project`, `application_system`, `unknown`). Browsing defaults to `Show all` with opt-in `Hide clutter`, scoped hidden counts + `Inspect hidden`, explicit provenance/uncertainty disclosures, durable two-phase `AnnotationJournal` user overrides, and pre-ranking SQL filtering in Stage 7D semantic search. Evaluation used synthetic corpora; real-world accuracy across diverse archives has not been evaluated.
+- **Unified Multi-Modal Search (`Stage 7F`, `All Items`)**: When sources are connected (`sourceCount > 0`), the `All Items` header search dispatches modality-scoped offline searches (`unified:search-photos` with CLIP and `unified:search-documents` with BGE) independently without waiting for the slower modality, rendering grouped `Photos` and `Documents` sections (`limit = 20` per page, isolated pagination and per-modality retry, `All` / `Photos` / `Documents` modality toggle, explicitly scoped quick filters with `aria-live="polite"` scope/clutter disclosures, `Enter` submit, Clear/`Escape` cancellation & focus restoration). Photo (CLIP) and document (BGE) similarity scores are uncalibrated and never merged or summed into combined counts; missing/corrupt models in one modality do not block the other or trigger automatic downloads. Stage 7 verification used synthetic mixed-media fixtures rather than real-world retrieval/classification accuracy benchmarks; Stage 8 (export, recovery, and release validation) remains planned (see `STAGES.md`).
+- **Inert Text Previews & Honest Statuses**: Previews render strictly as inert plain text (`<pre>`) with separate `"Extracted text"` and `"OCR text (machine-recognized)"` sections and no original-layout document viewer or File Explorer actions. Encrypted files report `Password protected`, and unsupported formats (e.g. `.doc`, `.odt`, `.xlsx`, `.pptx`, `.epub`) report `Unsupported`.

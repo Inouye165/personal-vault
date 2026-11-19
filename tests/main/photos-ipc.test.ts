@@ -10,6 +10,7 @@ import { CatalogDatabase } from '../../src/main/services/catalog/database'
 import { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
 import { SemanticModelManager } from '../../src/main/services/semantic/model-manager'
 import { SemanticSearchCoordinator } from '../../src/main/services/semantic/search-coordinator'
+import { DocumentExtractionCoordinator } from '../../src/main/services/documents/coordinator'
 import { registerIpcHandlers } from '../../src/main/ipc/handlers'
 
 type IpcHandler = (...args: unknown[]) => unknown
@@ -132,11 +133,13 @@ describe('Photos IPC Handlers', () => {
       modelManager
     })
 
+    const documentExtractionCoordinator = new DocumentExtractionCoordinator({ catalog })
     registerIpcHandlers({
       validateSender,
       catalog,
       thumbnailCoordinator,
-      semanticSearchCoordinator
+      semanticSearchCoordinator,
+      documentExtractionCoordinator
     })
 
     const diagHandler = ipcHandlers.get(IPC_CHANNELS.PHOTOS_GET_DIAGNOSTICS)
@@ -151,6 +154,9 @@ describe('Photos IPC Handlers', () => {
       searchPendingRequests?: number
       searchActiveCalls?: number
       searchMaxPendingRequests?: number
+      documentActiveWorkers?: number
+      documentTerminatingWorkers?: number
+      documentLiveWorkers?: number
       totalAppLiveWorkers?: number
     }
 
@@ -160,8 +166,50 @@ describe('Photos IPC Handlers', () => {
     expect(diag.searchPendingRequests).toBe(0)
     expect(diag.searchActiveCalls).toBe(0)
     expect(diag.searchMaxPendingRequests).toBe(16)
+    expect(diag.documentActiveWorkers).toBe(0)
+    expect(diag.documentTerminatingWorkers).toBe(0)
+    expect(diag.documentLiveWorkers).toBe(0)
     expect(diag.totalAppLiveWorkers).toBe(0)
 
     await semanticSearchCoordinator.shutdown()
+    await documentExtractionCoordinator.shutdown()
+  })
+
+  it('includes OCR worker diagnostics and sums totalAppLiveWorkers without double-counting', async () => {
+    const validateSender = vi.fn().mockReturnValue(true)
+    const mockOcrCoordinator = {
+      getDiagnostics: vi.fn().mockReturnValue({
+        activeWorkers: 1,
+        terminatingWorkers: 1,
+        liveWorkers: 2,
+        budgetLiveCount: 3,
+        budgetReservedCount: 3,
+        activeJobId: 'job-1',
+        activeFileLocationId: 42
+      })
+    }
+
+    registerIpcHandlers({
+      validateSender,
+      catalog,
+      thumbnailCoordinator,
+      documentOcrCoordinator: mockOcrCoordinator as never
+    })
+
+    const diagHandler = ipcHandlers.get(IPC_CHANNELS.PHOTOS_GET_DIAGNOSTICS)
+    expect(diagHandler).toBeDefined()
+
+    const diag = (await diagHandler!({} as never)) as {
+      ocrActiveWorkers?: number
+      ocrTerminatingWorkers?: number
+      ocrLiveWorkers?: number
+      totalAppLiveWorkers?: number
+    }
+
+    expect(diag.ocrActiveWorkers).toBe(1)
+    expect(diag.ocrTerminatingWorkers).toBe(1)
+    expect(diag.ocrLiveWorkers).toBe(2)
+    // Must add ocrLiveWorkers (2) to thumbnail liveWorkers (0), NOT budgetLiveCount (3)
+    expect(diag.totalAppLiveWorkers).toBe(2)
   })
 })

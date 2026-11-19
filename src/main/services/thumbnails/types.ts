@@ -73,6 +73,9 @@ export interface ThumbnailCoordinatorOptions {
   readonly maxInputPixels?: number
   readonly diskCacheBudget?: number
   readonly workerScriptPath?: string
+  readonly maxAppLiveWorkers?: number
+  readonly getExternalLiveWorkers?: () => number
+  readonly workerBudget?: import('../worker-budget').AppWorkerBudget
 }
 
 export interface ThumbnailRequestParams {

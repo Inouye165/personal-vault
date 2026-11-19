@@ -12,6 +12,7 @@ import type { CatalogDatabase } from '../catalog/database'
 import type { SemanticModelManager } from './model-manager'
 import { isObservationTimestampMatching } from './vector'
 import { resolveMainWorkerScriptPath } from '../worker-path'
+import { AppWorkerBudget, type WorkerBudgetReservation } from '../worker-budget'
 import type {
   SemanticSearchRequest,
   SemanticSearchResponse,
@@ -57,7 +58,12 @@ export interface SemanticSearchCoordinatorOptions {
   readonly modelManager: SemanticModelManager
   readonly workerScriptPath?: string
   readonly requestTimeoutMs?: number
+  readonly idleTimeoutMs?: number
   readonly maxPendingRequests?: number
+  readonly maxAppLiveWorkers?: number
+  readonly getExternalLiveWorkers?: () => number
+  readonly tryReleaseExternalIdleWorker?: () => Promise<boolean>
+  readonly workerBudget?: AppWorkerBudget
 }
 
 interface WorkerRankedItem {
@@ -131,11 +137,21 @@ export class SemanticSearchCoordinator {
   private readonly modelManager: SemanticModelManager
   private readonly workerScriptPath?: string
   private readonly requestTimeoutMs: number
+  private readonly idleTimeoutMs: number
   private readonly maxPendingRequests: number
+  private readonly maxAppLiveWorkers: number
+  private readonly getExternalLiveWorkers?: () => number
+  private readonly tryReleaseExternalIdleWorker?: () => Promise<boolean>
+  private readonly workerBudget: AppWorkerBudget
 
   private worker: Worker | null = null
   private readonly terminatingWorkers = new Set<Worker>()
-  private spawningWorkerPromise: Promise<Worker> | null = null
+  private readonly activeTerminations = new Map<Worker, Promise<void>>()
+  private readonly exitedWorkers = new WeakSet<Worker>()
+  private activeSpawn: { readonly epoch: number; readonly promise: Promise<Worker> } | null = null
+  private readonly pendingSpawns = new Set<Promise<unknown>>()
+  private spawnEpoch = 0
+  private idleTimer: ReturnType<typeof setTimeout> | null = null
   private isShuttingDown = false
   private nextMessageId = 1
 
@@ -152,14 +168,25 @@ export class SemanticSearchCoordinator {
     this.modelManager = options.modelManager
     this.workerScriptPath = options.workerScriptPath
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000
+    this.idleTimeoutMs = Math.max(1, options.idleTimeoutMs ?? 30_000)
     this.maxPendingRequests = Math.max(1, options.maxPendingRequests ?? 16)
+    this.maxAppLiveWorkers = Math.max(1, options.maxAppLiveWorkers ?? 3)
+    this.getExternalLiveWorkers = options.getExternalLiveWorkers
+    this.tryReleaseExternalIdleWorker = options.tryReleaseExternalIdleWorker
+    this.workerBudget = options.workerBudget ?? new AppWorkerBudget(this.maxAppLiveWorkers)
   }
 
   public getDiagnostics() {
+    const activeWorkers =
+      this.worker &&
+      !this.terminatingWorkers.has(this.worker) &&
+      !this.exitedWorkers.has(this.worker)
+        ? 1
+        : 0
     return {
-      activeWorkers: this.worker ? 1 : 0,
+      activeWorkers,
       terminatingWorkers: this.terminatingWorkers.size,
-      liveWorkers: (this.worker ? 1 : 0) + this.terminatingWorkers.size,
+      liveWorkers: activeWorkers + this.terminatingWorkers.size,
       pendingRequests: this.activeRequests.size,
       activeSearchCalls: this.activeSearchCalls,
       maxPendingRequests: this.maxPendingRequests,
@@ -167,87 +194,239 @@ export class SemanticSearchCoordinator {
     }
   }
 
+  private clearIdleTimer(): void {
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer)
+      this.idleTimer = null
+    }
+  }
+
+  private scheduleIdleTimer(): void {
+    this.clearIdleTimer()
+    if (
+      this.isShuttingDown ||
+      !this.worker ||
+      this.activeRequests.size > 0 ||
+      this.activeSearchCalls > 0
+    ) {
+      return
+    }
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null
+      void this.releaseIdleWorker().catch(() => {})
+    }, this.idleTimeoutMs)
+    this.idleTimer.unref?.()
+  }
+
+  private waitForWorkerExit(target: Worker, timeoutMs = 1_500): Promise<void> {
+    if (this.exitedWorkers.has(target)) {
+      this.terminatingWorkers.delete(target)
+      return Promise.resolve()
+    }
+    return new Promise((resolveExit) => {
+      let settled = false
+      const done = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        target.off('exit', done)
+        if (this.exitedWorkers.has(target)) {
+          this.terminatingWorkers.delete(target)
+        }
+        resolveExit()
+      }
+      const timer = setTimeout(done, timeoutMs)
+      timer.unref?.()
+      target.once('exit', done)
+    })
+  }
+
+  private terminateWorkerAndWaitExit(target: Worker): Promise<void> {
+    if (this.exitedWorkers.has(target)) {
+      this.terminatingWorkers.delete(target)
+      return Promise.resolve()
+    }
+    const existing = this.activeTerminations.get(target)
+    if (existing) {
+      return existing
+    }
+    this.terminatingWorkers.add(target)
+    const promise = (async () => {
+      try {
+        await target.terminate()
+      } catch {
+        // ignore termination errors
+      }
+      await this.waitForWorkerExit(target, 1_500)
+    })().finally(() => {
+      this.activeTerminations.delete(target)
+    })
+    this.activeTerminations.set(target, promise)
+    return promise
+  }
+
   private async ensureWorker(generation: number): Promise<Worker> {
-    while (true) {
-      if (this.isShuttingDown || generation !== this.currentQueryGeneration) {
+    const isCallerCancelled = (): boolean =>
+      this.isShuttingDown || generation !== this.currentQueryGeneration
+    const epochAtSpawn = this.spawnEpoch
+    const isSpawnCancelled = (): boolean => this.isShuttingDown || this.spawnEpoch !== epochAtSpawn
+
+    if (isCallerCancelled()) {
+      throw new SearchCancelledError('Search superseded before worker spawn')
+    }
+
+    if (
+      this.worker &&
+      !this.terminatingWorkers.has(this.worker) &&
+      !this.exitedWorkers.has(this.worker)
+    ) {
+      this.clearIdleTimer()
+      return this.worker
+    }
+
+    if (this.activeSpawn && this.activeSpawn.epoch === epochAtSpawn) {
+      const existing = await this.activeSpawn.promise
+      if (isCallerCancelled()) {
         throw new SearchCancelledError('Search superseded before worker spawn')
       }
+      return existing
+    }
 
-      if (this.worker) {
+    const spawnPromise = (async (): Promise<Worker> => {
+      while (this.terminatingWorkers.size > 0) {
+        if (isSpawnCancelled()) {
+          throw new SearchCancelledError('Search cancelled before worker spawn')
+        }
+        await Promise.all(Array.from(this.terminatingWorkers).map((w) => this.waitForWorkerExit(w)))
+      }
+
+      if (isSpawnCancelled()) {
+        throw new SearchCancelledError('Search cancelled before worker admission')
+      }
+
+      if (
+        this.worker &&
+        !this.terminatingWorkers.has(this.worker) &&
+        !this.exitedWorkers.has(this.worker)
+      ) {
         return this.worker
       }
 
-      if (this.spawningWorkerPromise) {
-        await this.spawningWorkerPromise.catch(() => {})
-        continue
+      const admissionDeadline = Date.now() + this.requestTimeoutMs
+      let reservation: WorkerBudgetReservation | null = null
+      while (reservation === null) {
+        if (isSpawnCancelled()) {
+          throw new SearchCancelledError('Search cancelled before worker admission')
+        }
+        reservation = this.workerBudget.tryReserve(this.getExternalLiveWorkers)
+        if (reservation !== null) {
+          if (isSpawnCancelled()) {
+            this.workerBudget.releaseReservation(reservation)
+            throw new SearchCancelledError('Search cancelled after reservation')
+          }
+          break
+        }
+        const released = await this.tryReleaseExternalIdleWorker?.()
+        if (isSpawnCancelled()) {
+          throw new SearchCancelledError('Search cancelled during idle reclamation')
+        }
+        if (released) {
+          reservation = this.workerBudget.tryReserve(this.getExternalLiveWorkers)
+          if (reservation !== null) {
+            if (isSpawnCancelled()) {
+              this.workerBudget.releaseReservation(reservation)
+              throw new SearchCancelledError('Search cancelled after reclamation reservation')
+            }
+            break
+          }
+        }
+        if (Date.now() >= admissionDeadline) {
+          throw new SearchTimeoutError(
+            `Application worker budget (${this.maxAppLiveWorkers} live workers) is exhausted`
+          )
+        }
+        await new Promise((r) => setTimeout(r, 25))
       }
 
-      const spawnPromise = (async (): Promise<Worker> => {
-        while (this.terminatingWorkers.size > 0) {
-          const exits = Array.from(this.terminatingWorkers).map(
-            (w) =>
-              new Promise<void>((res) => {
-                w.once('exit', () => res())
-              })
-          )
-          await Promise.all(exits)
-        }
-
-        if (this.isShuttingDown || generation !== this.currentQueryGeneration) {
-          throw new SearchCancelledError('Search superseded before worker spawn')
-        }
-
-        if (this.worker) {
-          return this.worker
-        }
-
-        const scriptPath = resolveSearchWorkerScriptPath(this.workerScriptPath)
-        const worker = new Worker(scriptPath)
-        this.worker = worker
-
-        worker.on('message', (msg: { id: number; status: string; [key: string]: unknown }) => {
-          const pending = this.activeRequests.get(msg.id)
-          if (!pending) return
-          this.activeRequests.delete(msg.id)
-          clearTimeout(pending.timer)
-
-          if (pending.generation !== this.currentQueryGeneration) {
-            pending.reject(new SearchCancelledError('Search superseded by a newer query'))
-            return
-          }
-
-          if (msg.status === 'ready' || msg.status === 'pong' || msg.status === 'released') {
-            pending.resolve(msg)
-          } else {
-            const errorMsg = typeof msg.message === 'string' ? msg.message : 'Search worker error'
-            pending.reject(new Error(errorMsg))
-          }
-        })
-
-        worker.on('error', (err) => {
-          this.handleWorkerFailure(worker, err.message)
-        })
-
-        worker.on('exit', (code) => {
-          this.terminatingWorkers.delete(worker)
-          if (this.worker === worker) {
-            this.worker = null
-            if (code !== 0 && !this.isShuttingDown) {
-              this.handleWorkerFailure(worker, `Search worker exited with code ${code}`)
-            }
-          }
-        })
-
-        return worker
-      })()
-
-      this.spawningWorkerPromise = spawnPromise
+      let worker: Worker
+      let promoted = false
       try {
-        await spawnPromise
-      } finally {
-        if (this.spawningWorkerPromise === spawnPromise) {
-          this.spawningWorkerPromise = null
+        if (isSpawnCancelled()) {
+          throw new SearchCancelledError('Search cancelled before worker spawn')
         }
+        const scriptPath = resolveSearchWorkerScriptPath(this.workerScriptPath)
+        if (isSpawnCancelled()) {
+          throw new SearchCancelledError('Search cancelled before worker spawn')
+        }
+        worker = new Worker(scriptPath)
+        this.workerBudget.promote(reservation, worker)
+        promoted = true
+      } finally {
+        if (!promoted) {
+          this.workerBudget.releaseReservation(reservation)
+        }
+      }
+
+      const spawned = worker
+      spawned.on('message', (msg: { id: number; status: string; [key: string]: unknown }) => {
+        const pending = this.activeRequests.get(msg.id)
+        if (!pending) return
+        this.activeRequests.delete(msg.id)
+        clearTimeout(pending.timer)
+
+        if (pending.generation !== this.currentQueryGeneration) {
+          pending.reject(new SearchCancelledError('Search superseded by a newer query'))
+          return
+        }
+
+        if (msg.status === 'ready' || msg.status === 'pong' || msg.status === 'released') {
+          pending.resolve(msg)
+        } else {
+          const errorMsg = typeof msg.message === 'string' ? msg.message : 'Search worker error'
+          pending.reject(new Error(errorMsg))
+        }
+      })
+
+      spawned.on('error', (err) => {
+        this.handleWorkerFailure(spawned, err.message)
+      })
+
+      spawned.on('exit', (code) => {
+        this.exitedWorkers.add(spawned)
+        this.terminatingWorkers.delete(spawned)
+        if (this.worker === spawned) {
+          this.worker = null
+          if (code !== 0 && !this.isShuttingDown) {
+            this.handleWorkerFailure(spawned, `Search worker exited with code ${code}`)
+          }
+        }
+      })
+
+      if (isSpawnCancelled()) {
+        await this.terminateWorkerAndWaitExit(spawned)
+        throw new SearchCancelledError('Search cancelled right after worker spawn')
+      }
+
+      this.worker = spawned
+      return spawned
+    })()
+
+    const spawnEntry = { epoch: epochAtSpawn, promise: spawnPromise }
+    this.activeSpawn = spawnEntry
+    this.pendingSpawns.add(spawnPromise)
+    const cleanupPending = (): void => {
+      this.pendingSpawns.delete(spawnPromise)
+    }
+    spawnPromise.then(cleanupPending, cleanupPending)
+    try {
+      const spawned = await spawnPromise
+      if (isCallerCancelled()) {
+        throw new SearchCancelledError('Search superseded after worker spawn')
+      }
+      return spawned
+    } finally {
+      if (this.activeSpawn === spawnEntry) {
+        this.activeSpawn = null
       }
     }
   }
@@ -256,18 +435,17 @@ export class SemanticSearchCoordinator {
     if (this.worker === worker) {
       this.worker = null
     }
-    this.terminatingWorkers.add(worker)
-    worker.once('exit', () => {
-      this.terminatingWorkers.delete(worker)
-    })
-    worker.terminate().catch(() => {})
+    void this.terminateWorkerAndWaitExit(worker)
   }
 
   private handleWorkerFailure(failedWorker: Worker, errorMessage: string): void {
     if (this.worker === failedWorker) {
       this.worker = null
     }
-    this.terminatingWorkers.delete(failedWorker)
+    if (!this.exitedWorkers.has(failedWorker)) {
+      this.terminatingWorkers.add(failedWorker)
+      void this.terminateWorkerAndWaitExit(failedWorker)
+    }
 
     // Reject in-flight requests that were waiting on this worker
     for (const [id, req] of this.activeRequests.entries()) {
@@ -277,43 +455,42 @@ export class SemanticSearchCoordinator {
     }
   }
 
-  public async shutdown(): Promise<void> {
-    this.isShuttingDown = true
-    this.currentQueryGeneration++
-    this.activeQueryKey = null
-    this.cachedEmbeddingResult = null
-    this.embeddingInFlightPromise = null
-
-    // Cancel all in-flight requests
-    for (const [id, req] of this.activeRequests.entries()) {
-      clearTimeout(req.timer)
-      this.activeRequests.delete(id)
-      req.reject(new SearchCancelledError('Search coordinator shutting down'))
+  public async releaseIdleWorker(): Promise<boolean> {
+    if (
+      !this.worker ||
+      this.activeRequests.size > 0 ||
+      this.activeSearchCalls > 0 ||
+      this.activeSpawn !== null ||
+      this.terminatingWorkers.size > 0 ||
+      this.exitedWorkers.has(this.worker)
+    ) {
+      return false
     }
-
-    if (this.worker) {
-      const w = this.worker
-      this.worker = null
-      this.terminateWorker(w)
-    }
-
-    // Wait for all terminating workers to finish exiting
-    const exitPromises: Promise<void>[] = []
-    for (const w of this.terminatingWorkers) {
-      exitPromises.push(
-        new Promise<void>((res) => {
-          w.once('exit', () => res())
-        })
-      )
-    }
-    await Promise.all(exitPromises)
+    this.clearIdleTimer()
+    const target = this.worker
+    this.worker = null
+    await this.terminateWorkerAndWaitExit(target)
+    return true
   }
 
-  public cancelActiveSearch(): void {
+  public async shutdown(): Promise<void> {
+    this.isShuttingDown = true
+    this.clearIdleTimer()
+    await this.cancelActiveSearch()
+    await Promise.all(Array.from(this.pendingSpawns).map((p) => p.catch(() => {})))
+    await Promise.all(Array.from(this.terminatingWorkers).map((w) => this.waitForWorkerExit(w)))
+  }
+
+  public cancelActiveSearch(): Promise<void> {
+    this.clearIdleTimer()
     this.currentQueryGeneration++
+    this.spawnEpoch++
     this.activeQueryKey = null
     this.cachedEmbeddingResult = null
     this.embeddingInFlightPromise = null
+    const cancelledSpawn = this.activeSpawn
+    this.activeSpawn = null
+    cancelledSpawn?.promise.catch(() => {})
 
     for (const [id, req] of this.activeRequests.entries()) {
       clearTimeout(req.timer)
@@ -321,9 +498,24 @@ export class SemanticSearchCoordinator {
       req.reject(new SearchCancelledError('Search cancelled by user'))
     }
 
-    if (this.worker) {
-      this.terminateWorker(this.worker)
+    const target = this.worker
+    this.worker = null
+    const terminationPromises: Promise<void>[] = Array.from(this.activeTerminations.values())
+    if (target) {
+      terminationPromises.push(this.terminateWorkerAndWaitExit(target))
     }
+    for (const w of this.terminatingWorkers) {
+      if (!this.activeTerminations.has(w)) {
+        terminationPromises.push(this.waitForWorkerExit(w, 1_500))
+      }
+    }
+    const spawnPromises: Promise<unknown>[] = Array.from(this.pendingSpawns).map((p) =>
+      p.catch(() => {})
+    )
+    if (cancelledSpawn && !this.pendingSpawns.has(cancelledSpawn.promise)) {
+      spawnPromises.push(cancelledSpawn.promise.catch(() => {}))
+    }
+    return Promise.all([...terminationPromises, ...spawnPromises]).then(() => undefined)
   }
 
   private async getOrEmbedQuery(
@@ -478,6 +670,7 @@ export class SemanticSearchCoordinator {
       )
     }
 
+    this.clearIdleTimer()
     this.activeSearchCalls++
     try {
       // Invalidate cached query embedding if the active model installation changed
@@ -725,7 +918,15 @@ export class SemanticSearchCoordinator {
         modelStatus: 'ready'
       }
     } finally {
-      this.activeSearchCalls--
+      this.activeSearchCalls = Math.max(0, this.activeSearchCalls - 1)
+      if (
+        this.activeSearchCalls === 0 &&
+        this.activeRequests.size === 0 &&
+        this.worker &&
+        !this.isShuttingDown
+      ) {
+        this.scheduleIdleTimer()
+      }
     }
   }
 }

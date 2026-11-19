@@ -5,10 +5,22 @@
     output: 'dist',
     buildResources: 'build'
   },
-  files: ['out/**/*', 'THIRD_PARTY_NOTICES.md'],
+  files: [
+    'out/**/*',
+    'THIRD_PARTY_NOTICES.md',
+    '!node_modules/tesseract.js-core/*.wasm.js',
+    '!node_modules/tesseract.js-core/tesseract-core.js',
+    '!node_modules/tesseract.js-core/tesseract-core.wasm',
+    '!node_modules/tesseract.js-core/tesseract-core-simd.js',
+    '!node_modules/tesseract.js-core/tesseract-core-simd.wasm',
+    '!node_modules/tesseract.js-core/tesseract-core-relaxedsimd*.js',
+    '!node_modules/tesseract.js-core/tesseract-core-relaxedsimd*.wasm'
+  ],
   asarUnpack: [
     'node_modules/sharp/**/*',
     'node_modules/@img/**/*',
+    'node_modules/@napi-rs/**/*',
+    'node_modules/tesseract.js-core/*.wasm',
     'node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**/*'
   ],
   win: {

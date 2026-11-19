@@ -111,7 +111,54 @@ describe('preload bridge', () => {
         'cancelPhotosSemanticSearch',
         'getDocumentsPage',
         'getDocumentDetail',
-        'getDocumentExtensionFacets'
+        'getDocumentExtensionFacets',
+        'getDocumentPreview',
+        'extractSelectedDocuments',
+        'startDocumentExtraction',
+        'pauseDocumentExtraction',
+        'resumeDocumentExtraction',
+        'cancelDocumentExtraction',
+        'getDocumentExtractionProgress',
+        'onDocumentExtractionProgress',
+        'getOcrModelStatus',
+        'downloadOcrModel',
+        'importOcrModel',
+        'cancelOcrModel',
+        'onOcrModelStatus',
+        'getDocumentOcrState',
+        'getDocumentOcrPreview',
+        'ocrSelectedDocuments',
+        'startDocumentOcr',
+        'pauseDocumentOcr',
+        'resumeDocumentOcr',
+        'cancelDocumentOcr',
+        'getDocumentOcrProgress',
+        'onDocumentOcrProgress',
+        'getDocSemanticModelStatus',
+        'downloadDocSemanticModel',
+        'importDocSemanticModel',
+        'cancelDocSemanticModel',
+        'indexSelectedDocuments',
+        'startDocumentSemanticIndexing',
+        'pauseDocumentSemanticIndexing',
+        'resumeDocumentSemanticIndexing',
+        'cancelDocumentSemanticIndexing',
+        'getDocumentSemanticProgress',
+        'searchDocumentsSemantic',
+        'cancelDocumentSemanticSearch',
+        'classifySelectedDocuments',
+        'startDocumentClassification',
+        'pauseDocumentClassification',
+        'resumeDocumentClassification',
+        'cancelDocumentClassification',
+        'getDocumentClassificationProgress',
+        'onDocumentClassificationProgress',
+        'setDocumentClassificationOverride',
+        'resetDocumentClassificationOverride',
+        'getDocumentClassificationFacets',
+        'searchUnifiedPhotos',
+        'searchUnifiedDocuments',
+        'cancelUnifiedSearch'
       ].sort()
     )
   })
@@ -130,6 +177,80 @@ describe('preload bridge', () => {
     electron.invoke.mockResolvedValueOnce({ name: 'Personal Vault' })
     const api = await loadApi()
     await expect(api.getAppInfo!()).rejects.toThrow(/invalid/i)
+  })
+
+  it('validates the document semantic search cancellation acknowledgement', async () => {
+    electron.invoke.mockResolvedValueOnce({ cancelled: true })
+    const api = await loadApi()
+    await expect(api.cancelDocumentSemanticSearch!()).resolves.toEqual({ cancelled: true })
+    expect(electron.invoke).toHaveBeenCalledWith('doc-semantic:search-cancel')
+  })
+
+  it.each([
+    ['a string flag', { cancelled: 'yes' }],
+    ['a missing flag', {}],
+    ['undefined', undefined],
+    ['a bare boolean', true]
+  ])(
+    'rejects a document semantic search cancellation acknowledgement with %s',
+    async (_label, response) => {
+      electron.invoke.mockResolvedValueOnce(response)
+      const api = await loadApi()
+      await expect(api.cancelDocumentSemanticSearch!()).rejects.toThrow(/invalid/i)
+    }
+  )
+
+  it('validates Stage 7E classification override requests and acknowledgements in preload', async () => {
+    const api = await loadApi()
+
+    await expect(
+      api.setDocumentClassificationOverride!({
+        fileLocationId: -1,
+        expectedRevision: 'rev',
+        expectedOverrideVersion: 0,
+        purposeLabels: null,
+        originLabels: null,
+        clutterOverride: 'force_keep'
+      })
+    ).rejects.toThrow(/invalid/i)
+
+    electron.invoke.mockResolvedValueOnce({
+      ok: true,
+      persistencePending: true,
+      persistenceError: 'DISK_FULL',
+      effectiveClassification: null
+    })
+    await expect(
+      api.setDocumentClassificationOverride!({
+        fileLocationId: 1,
+        expectedRevision: 'rev-1',
+        expectedOverrideVersion: 0,
+        purposeLabels: ['legal'],
+        originLabels: ['personal'],
+        clutterOverride: 'force_keep'
+      })
+    ).resolves.toMatchObject({
+      ok: true,
+      persistencePending: true,
+      persistenceError: 'DISK_FULL'
+    })
+    expect(electron.invoke).toHaveBeenCalledWith('documents:set-classification-override', {
+      fileLocationId: 1,
+      expectedRevision: 'rev-1',
+      expectedOverrideVersion: 0,
+      purposeLabels: ['legal'],
+      originLabels: ['personal'],
+      clutterOverride: 'force_keep'
+    })
+
+    electron.invoke.mockResolvedValueOnce({ bad: 'ack' })
+    await expect(
+      api.resetDocumentClassificationOverride!({
+        fileLocationId: 1,
+        expectedRevision: 'rev-1',
+        expectedOverrideVersion: 1
+      })
+    ).rejects.toThrow(/invalid/i)
   })
 
   it('returns the setTab acknowledgement when it is a boolean', async () => {
@@ -224,5 +345,159 @@ describe('preload bridge', () => {
 
     await expect(api.cancelPhotosSemanticSearch!()).resolves.toEqual({ cancelled: true })
     expect(electron.invoke).toHaveBeenCalledWith('semantic:search-cancel', {})
+  })
+
+  it('validates Stage 7C OCR requests and responses across preload', async () => {
+    const validModelStatus = {
+      state: 'missing',
+      modelId: 'tesseract-ocr/tessdata_fast:eng@65727574',
+      modelCommit: '65727574dfcd264acbb0c3e07860e4e9e9b22185',
+      modelManifestSha256: 'a'.repeat(64),
+      language: 'eng',
+      enginePackage: 'tesseract.js-core@7.0.0',
+      requiredBytes: 4_113_088,
+      downloadedBytes: 0,
+      currentArtifact: null,
+      verifiedAtMs: null,
+      error: null,
+      lastReplacementError: null
+    }
+    const validOcrProgress = {
+      jobId: null,
+      status: 'idle',
+      scopeKind: null,
+      recipeVersion: 'doc_ocr_v1',
+      ocrModelId: 'tesseract-ocr/tessdata_fast:eng@65727574',
+      ocrModelManifestSha256: 'a'.repeat(64),
+      ocrLanguage: 'eng',
+      totalItems: 0,
+      processedItems: 0,
+      extractedItems: 0,
+      noTextItems: 0,
+      passwordProtectedItems: 0,
+      unsupportedItems: 0,
+      failedItems: 0,
+      truncatedItems: 0,
+      reusedItems: 0,
+      skippedStaleItems: 0,
+      pendingItems: 0,
+      activeFileLocationId: null,
+      startedAtMs: null,
+      updatedAtMs: null,
+      completedAtMs: null,
+      lastError: null,
+      coverage: {
+        totalDocuments: 0,
+        ocrNeededDocuments: 0,
+        notProcessedDocuments: 0,
+        extractedDocuments: 0,
+        noTextDocuments: 0,
+        passwordProtectedDocuments: 0,
+        unsupportedDocuments: 0,
+        failedDocuments: 0,
+        truncatedDocuments: 0,
+        staleDocuments: 0,
+        selectedImageOcrCount: 0
+      },
+      coverageReady: true,
+      coverageRefreshing: false
+    }
+
+    const api = await loadApi()
+
+    // Invalid empty selection is rejected before IPC
+    await expect(api.ocrSelectedDocuments!({ fileLocationIds: [] })).rejects.toThrow(/invalid/i)
+    expect(electron.invoke).not.toHaveBeenCalled()
+
+    electron.invoke.mockResolvedValueOnce(validModelStatus)
+    await expect(api.getOcrModelStatus!()).resolves.toMatchObject({ state: 'missing' })
+
+    electron.invoke.mockResolvedValueOnce({ preview: null })
+    await expect(api.getDocumentOcrPreview!({ fileLocationId: 42 })).resolves.toEqual({
+      preview: null
+    })
+
+    electron.invoke.mockResolvedValueOnce(validOcrProgress)
+    await expect(api.startDocumentOcr!({ scope: 'ocr_needed' })).resolves.toMatchObject({
+      status: 'idle',
+      coverageReady: true
+    })
+
+    electron.invoke.mockResolvedValueOnce({ bad: true })
+    await expect(api.getDocumentOcrProgress!()).rejects.toThrow(/invalid/i)
+  })
+
+  it('validates Stage 7F Slice 1 unified search and cancellation requests and responses in preload', async () => {
+    const api = await loadApi()
+
+    // Reject invalid unified requests before IPC
+    await expect(
+      api.searchUnifiedPhotos!({ query: '   ', ownerSurface: 'unified', ownerGen: 1 })
+    ).rejects.toThrow(/invalid/i)
+    await expect(
+      api.searchUnifiedDocuments!({ query: 'ok', ownerSurface: 'unified', ownerGen: -1 })
+    ).rejects.toThrow(/invalid/i)
+    await expect(
+      api.cancelUnifiedSearch!({ ownerSurface: 'unified', ownerGen: 1, modality: 'invalid' })
+    ).rejects.toThrow(/invalid/i)
+    expect(electron.invoke).not.toHaveBeenCalled()
+
+    // Valid unified photos round-trip (applies limit=20, offset=0 defaults)
+    electron.invoke.mockResolvedValueOnce({
+      status: 'unprovisioned',
+      modelId: 'Xenova/clip-vit-base-patch32',
+      result: null,
+      errorMessage: null
+    })
+    await expect(
+      api.searchUnifiedPhotos!({ query: '  sunset  ', ownerSurface: 'unified', ownerGen: 1 })
+    ).resolves.toMatchObject({ status: 'unprovisioned' })
+    expect(electron.invoke).toHaveBeenCalledWith('unified:search-photos', {
+      query: 'sunset',
+      ownerSurface: 'unified',
+      ownerGen: 1,
+      offset: 0,
+      limit: 20
+    })
+
+    // Valid unified documents round-trip
+    electron.invoke.mockResolvedValueOnce({
+      status: 'unprovisioned',
+      modelId: 'Xenova/bge-small-en-v1.5',
+      result: null,
+      errorMessage: null
+    })
+    await expect(
+      api.searchUnifiedDocuments!({ query: '  receipt  ', ownerSurface: 'unified', ownerGen: 2 })
+    ).resolves.toMatchObject({ status: 'unprovisioned' })
+    expect(electron.invoke).toHaveBeenCalledWith('unified:search-documents', {
+      query: 'receipt',
+      ownerSurface: 'unified',
+      ownerGen: 2,
+      offset: 0,
+      limit: 20
+    })
+
+    // Valid unified cancel round-trip
+    electron.invoke.mockResolvedValueOnce({ cancelled: true })
+    await expect(
+      api.cancelUnifiedSearch!({ ownerSurface: 'unified', ownerGen: 2 })
+    ).resolves.toEqual({ cancelled: true })
+    expect(electron.invoke).toHaveBeenCalledWith('unified:search-cancel', {
+      ownerSurface: 'unified',
+      ownerGen: 2,
+      modality: 'all'
+    })
+
+    // Reject malformed response payloads from main
+    electron.invoke.mockResolvedValueOnce({
+      status: 'ready',
+      modelId: 'wrong-model',
+      result: null,
+      errorMessage: null
+    })
+    await expect(
+      api.searchUnifiedPhotos!({ query: 'sunset', ownerSurface: 'unified', ownerGen: 3 })
+    ).rejects.toThrow(/invalid/i)
   })
 })

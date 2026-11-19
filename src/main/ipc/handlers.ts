@@ -114,6 +114,15 @@ import {
   SemanticSearchCancelResponseSchema,
   type SemanticSearchResponse,
   type SemanticSearchCancelResponse,
+  UnifiedSearchPhotosRequestSchema,
+  UnifiedSearchPhotosResponseSchema,
+  UnifiedSearchDocumentsRequestSchema,
+  UnifiedSearchDocumentsResponseSchema,
+  UnifiedSearchCancelRequestSchema,
+  UnifiedSearchCancelResponseSchema,
+  type UnifiedSearchPhotosResponse,
+  type UnifiedSearchDocumentsResponse,
+  type UnifiedSearchCancelResponse,
   PhotoMetadataProgressResponseSchema,
   StartPhotoMetadataExtractionRequestSchema,
   GetPhotoMetadataDetailRequestSchema,
@@ -139,6 +148,15 @@ import type {
   SemanticSearchCoordinator
 } from '../services/semantic'
 import { METADATA_PARSER_RECIPE_VERSION, type PhotoMetadataCoordinator } from '../services/metadata'
+import type { DocumentExtractionCoordinator } from '../services/documents'
+import type { DocumentClassificationCoordinator } from '../services/documents/classification/coordinator'
+import type { DocumentOcrCoordinator, OcrModelManager } from '../services/documents/ocr'
+import type {
+  DocSemanticModelManager,
+  DocumentSearchCoordinator,
+  DocumentSemanticCoordinator
+} from '../services/documents/semantic'
+import { UnifiedSearchCoordinator } from '../services/unified-search'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 import { registerDocumentIpcHandlers } from './document-handlers'
 
@@ -153,10 +171,20 @@ export interface IpcHandlerOptions {
   readonly semanticIndexCoordinator?: SemanticIndexCoordinator
   readonly semanticSearchCoordinator?: SemanticSearchCoordinator
   readonly photoMetadataCoordinator?: PhotoMetadataCoordinator
+  readonly documentExtractionCoordinator?: DocumentExtractionCoordinator
+  readonly ocrModelManager?: OcrModelManager
+  readonly documentOcrCoordinator?: DocumentOcrCoordinator
+  readonly docSemanticModelManager?: DocSemanticModelManager
+  readonly docSemanticCoordinator?: DocumentSemanticCoordinator
+  readonly docSearchCoordinator?: DocumentSearchCoordinator
+  readonly unifiedSearchCoordinator?: UnifiedSearchCoordinator
+  readonly documentClassificationCoordinator?: DocumentClassificationCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
+  readonly selectDocSemanticModelDirectory?: () => Promise<string | null>
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectDirectory?: () => Promise<string | null>
+  readonly selectOcrModelDirectory?: () => Promise<string | null>
 }
 
 export function registerIpcHandlers({
@@ -170,11 +198,28 @@ export function registerIpcHandlers({
   semanticIndexCoordinator,
   semanticSearchCoordinator,
   photoMetadataCoordinator,
+  documentExtractionCoordinator,
+  ocrModelManager,
+  documentOcrCoordinator,
+  docSemanticModelManager,
+  docSemanticCoordinator,
+  docSearchCoordinator,
+  unifiedSearchCoordinator,
+  documentClassificationCoordinator,
   getMainWindow,
   selectDirectories,
+  selectDocSemanticModelDirectory,
   selectVaultDirectory,
-  selectDirectory
+  selectDirectory,
+  selectOcrModelDirectory
 }: IpcHandlerOptions): void {
+  const resolvedUnifiedSearchCoordinator =
+    unifiedSearchCoordinator ??
+    new UnifiedSearchCoordinator({
+      semanticSearchCoordinator: semanticSearchCoordinator ?? null,
+      docSearchCoordinator: docSearchCoordinator ?? null
+    })
+
   const handle = <Args extends unknown[], Result>(
     channel: string,
     fn: (...args: Args) => Result | Promise<Result>
@@ -807,6 +852,8 @@ export function registerIpcHandlers({
     }
     const diag = thumbnailCoordinator.getDiagnostics()
     const searchDiag = semanticSearchCoordinator?.getDiagnostics()
+    const docDiag = documentExtractionCoordinator?.getDiagnostics()
+    const ocrDiag = documentOcrCoordinator?.getDiagnostics()
     const combinedDiag = {
       ...diag,
       ...(searchDiag
@@ -816,8 +863,30 @@ export function registerIpcHandlers({
             searchLiveWorkers: searchDiag.liveWorkers,
             searchPendingRequests: searchDiag.pendingRequests,
             searchActiveCalls: searchDiag.activeSearchCalls,
-            searchMaxPendingRequests: searchDiag.maxPendingRequests,
-            totalAppLiveWorkers: (diag.liveWorkers ?? diag.activeWorkers) + searchDiag.liveWorkers
+            searchMaxPendingRequests: searchDiag.maxPendingRequests
+          }
+        : {}),
+      ...(docDiag
+        ? {
+            documentActiveWorkers: docDiag.activeWorkers,
+            documentTerminatingWorkers: docDiag.terminatingWorkers,
+            documentLiveWorkers: docDiag.liveWorkers
+          }
+        : {}),
+      ...(ocrDiag
+        ? {
+            ocrActiveWorkers: ocrDiag.activeWorkers,
+            ocrTerminatingWorkers: ocrDiag.terminatingWorkers,
+            ocrLiveWorkers: ocrDiag.liveWorkers
+          }
+        : {}),
+      ...(searchDiag || docDiag || ocrDiag
+        ? {
+            totalAppLiveWorkers:
+              (diag.liveWorkers ?? diag.activeWorkers) +
+              (searchDiag?.liveWorkers ?? 0) +
+              (docDiag?.liveWorkers ?? 0) +
+              (ocrDiag?.liveWorkers ?? 0)
           }
         : {})
     }
@@ -1307,7 +1376,7 @@ export function registerIpcHandlers({
           queryLatencyMs: 0
         }
       }
-      const result = await semanticSearchCoordinator.search(parsed.data)
+      const result = await resolvedUnifiedSearchCoordinator.searchPhotosFromTab(parsed.data)
       const validated = validatePayload(SemanticSearchResponseSchema, result)
       if (!validated.success) {
         throw new Error(`Invalid outgoing SemanticSearchResponse: ${validated.error}`)
@@ -1323,13 +1392,59 @@ export function registerIpcHandlers({
       if (!parsed.success) {
         throw new Error(`Invalid incoming SemanticSearchCancelRequest: ${parsed.error}`)
       }
-      if (semanticSearchCoordinator) {
-        semanticSearchCoordinator.cancelActiveSearch()
-      }
-      const response: SemanticSearchCancelResponse = { cancelled: true }
+      const response: SemanticSearchCancelResponse =
+        await resolvedUnifiedSearchCoordinator.cancelPhotosFromTab(parsed.data.ownerGen)
       const validated = validatePayload(SemanticSearchCancelResponseSchema, response)
       if (!validated.success) {
         throw new Error(`Invalid outgoing SemanticSearchCancelResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.UNIFIED_SEARCH_PHOTOS,
+    async (raw: unknown): Promise<UnifiedSearchPhotosResponse> => {
+      const parsed = validatePayload(UnifiedSearchPhotosRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming UnifiedSearchPhotosRequest: ${parsed.error}`)
+      }
+      const result = await resolvedUnifiedSearchCoordinator.searchPhotos(parsed.data)
+      const validated = validatePayload(UnifiedSearchPhotosResponseSchema, result)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing UnifiedSearchPhotosResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.UNIFIED_SEARCH_DOCUMENTS,
+    async (raw: unknown): Promise<UnifiedSearchDocumentsResponse> => {
+      const parsed = validatePayload(UnifiedSearchDocumentsRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming UnifiedSearchDocumentsRequest: ${parsed.error}`)
+      }
+      const result = await resolvedUnifiedSearchCoordinator.searchDocuments(parsed.data)
+      const validated = validatePayload(UnifiedSearchDocumentsResponseSchema, result)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing UnifiedSearchDocumentsResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(
+    IPC_CHANNELS.UNIFIED_SEARCH_CANCEL,
+    async (raw: unknown): Promise<UnifiedSearchCancelResponse> => {
+      const parsed = validatePayload(UnifiedSearchCancelRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming UnifiedSearchCancelRequest: ${parsed.error}`)
+      }
+      const result = await resolvedUnifiedSearchCoordinator.cancel(parsed.data)
+      const validated = validatePayload(UnifiedSearchCancelResponseSchema, result)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing UnifiedSearchCancelResponse: ${validated.error}`)
       }
       return validated.data
     }
@@ -1522,5 +1637,19 @@ export function registerIpcHandlers({
     })
   }
 
-  registerDocumentIpcHandlers({ handle, catalog })
+  registerDocumentIpcHandlers({
+    handle,
+    catalog,
+    documentExtractionCoordinator,
+    ocrModelManager,
+    documentOcrCoordinator,
+    docSemanticModelManager,
+    docSemanticCoordinator,
+    docSearchCoordinator,
+    unifiedSearchCoordinator: resolvedUnifiedSearchCoordinator,
+    documentClassificationCoordinator,
+    getMainWindow,
+    selectOcrModelDirectory,
+    selectDocSemanticModelDirectory
+  })
 }

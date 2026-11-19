@@ -81,7 +81,41 @@ import type {
   GetDocumentDetailRequest,
   GetDocumentDetailResponse,
   GetDocumentExtensionFacetsRequest,
-  GetDocumentExtensionFacetsResponse
+  GetDocumentExtensionFacetsResponse,
+  GetDocumentPreviewRequest,
+  GetDocumentPreviewResponse,
+  ExtractSelectedDocumentsRequest,
+  StartDocumentExtractionRequest,
+  DocumentExtractionProgressDto,
+  OcrModelStatusDto,
+  GetDocumentOcrStateRequest,
+  GetDocumentOcrStateResponse,
+  GetDocumentOcrPreviewRequest,
+  GetDocumentOcrPreviewResponse,
+  OcrSelectedDocumentsRequest,
+  StartDocumentOcrRequest,
+  DocumentOcrProgressDto,
+  DocSemanticModelStatusDto,
+  DocumentSemanticProgressDto,
+  IndexSelectedDocumentsRequest,
+  StartDocSemanticIndexRequest,
+  DocSemanticSearchRequest,
+  DocSemanticSearchResponseDto,
+  DocSemanticSearchCancelRequest,
+  UnifiedSearchPhotosRequest,
+  UnifiedSearchPhotosResponse,
+  UnifiedSearchDocumentsRequest,
+  UnifiedSearchDocumentsResponse,
+  UnifiedSearchCancelRequest,
+  UnifiedSearchCancelResponse,
+  ClassifySelectedDocumentsRequest,
+  StartDocumentClassificationRequest,
+  DocumentClassificationProgressDto,
+  SetDocumentClassificationOverrideRequest,
+  ResetDocumentClassificationOverrideRequest,
+  DocumentClassificationOverrideAckDto,
+  GetDocumentClassificationFacetsRequest,
+  GetDocumentClassificationFacetsResponseDto
 } from '../shared/validation/ipc-schemas.js'
 
 export interface VaultApi {
@@ -179,6 +213,83 @@ export interface VaultApi {
   getDocumentExtensionFacets: (
     request?: GetDocumentExtensionFacetsRequest
   ) => Promise<GetDocumentExtensionFacetsResponse>
+  getDocumentPreview: (request: GetDocumentPreviewRequest) => Promise<GetDocumentPreviewResponse>
+  extractSelectedDocuments: (
+    request: ExtractSelectedDocumentsRequest
+  ) => Promise<DocumentExtractionProgressDto>
+  startDocumentExtraction: (
+    request?: StartDocumentExtractionRequest
+  ) => Promise<DocumentExtractionProgressDto>
+  pauseDocumentExtraction: () => Promise<DocumentExtractionProgressDto>
+  resumeDocumentExtraction: () => Promise<DocumentExtractionProgressDto>
+  cancelDocumentExtraction: () => Promise<DocumentExtractionProgressDto>
+  getDocumentExtractionProgress: () => Promise<DocumentExtractionProgressDto>
+  onDocumentExtractionProgress: (
+    callback: (progress: DocumentExtractionProgressDto) => void
+  ) => () => void
+  getOcrModelStatus: () => Promise<OcrModelStatusDto>
+  downloadOcrModel: () => Promise<OcrModelStatusDto>
+  importOcrModel: () => Promise<OcrModelStatusDto>
+  cancelOcrModel: () => Promise<OcrModelStatusDto>
+  onOcrModelStatus: (callback: (status: OcrModelStatusDto) => void) => () => void
+  getDocumentOcrState: (request: GetDocumentOcrStateRequest) => Promise<GetDocumentOcrStateResponse>
+  getDocumentOcrPreview: (
+    request: GetDocumentOcrPreviewRequest
+  ) => Promise<GetDocumentOcrPreviewResponse>
+  ocrSelectedDocuments: (request: OcrSelectedDocumentsRequest) => Promise<DocumentOcrProgressDto>
+  startDocumentOcr: (request?: StartDocumentOcrRequest) => Promise<DocumentOcrProgressDto>
+  pauseDocumentOcr: () => Promise<DocumentOcrProgressDto>
+  resumeDocumentOcr: () => Promise<DocumentOcrProgressDto>
+  cancelDocumentOcr: () => Promise<DocumentOcrProgressDto>
+  getDocumentOcrProgress: () => Promise<DocumentOcrProgressDto>
+  onDocumentOcrProgress: (callback: (progress: DocumentOcrProgressDto) => void) => () => void
+  getDocSemanticModelStatus: () => Promise<DocSemanticModelStatusDto>
+  downloadDocSemanticModel: () => Promise<DocSemanticModelStatusDto>
+  importDocSemanticModel: () => Promise<DocSemanticModelStatusDto>
+  cancelDocSemanticModel: () => Promise<DocSemanticModelStatusDto>
+  indexSelectedDocuments: (
+    request: IndexSelectedDocumentsRequest
+  ) => Promise<DocumentSemanticProgressDto>
+  startDocumentSemanticIndexing: (
+    request?: StartDocSemanticIndexRequest
+  ) => Promise<DocumentSemanticProgressDto>
+  pauseDocumentSemanticIndexing: () => Promise<DocumentSemanticProgressDto>
+  resumeDocumentSemanticIndexing: () => Promise<DocumentSemanticProgressDto>
+  cancelDocumentSemanticIndexing: () => Promise<DocumentSemanticProgressDto>
+  getDocumentSemanticProgress: () => Promise<DocumentSemanticProgressDto>
+  searchDocumentsSemantic: (
+    request: DocSemanticSearchRequest
+  ) => Promise<DocSemanticSearchResponseDto>
+  cancelDocumentSemanticSearch: (
+    request?: DocSemanticSearchCancelRequest
+  ) => Promise<{ cancelled: boolean }>
+  classifySelectedDocuments: (
+    request: ClassifySelectedDocumentsRequest
+  ) => Promise<DocumentClassificationProgressDto>
+  startDocumentClassification: (
+    request?: StartDocumentClassificationRequest
+  ) => Promise<DocumentClassificationProgressDto>
+  pauseDocumentClassification: () => Promise<DocumentClassificationProgressDto>
+  resumeDocumentClassification: () => Promise<DocumentClassificationProgressDto>
+  cancelDocumentClassification: () => Promise<DocumentClassificationProgressDto>
+  getDocumentClassificationProgress: () => Promise<DocumentClassificationProgressDto>
+  onDocumentClassificationProgress: (
+    callback: (progress: DocumentClassificationProgressDto) => void
+  ) => () => void
+  setDocumentClassificationOverride: (
+    request: SetDocumentClassificationOverrideRequest
+  ) => Promise<DocumentClassificationOverrideAckDto>
+  resetDocumentClassificationOverride: (
+    request: ResetDocumentClassificationOverrideRequest
+  ) => Promise<DocumentClassificationOverrideAckDto>
+  getDocumentClassificationFacets: (
+    request?: GetDocumentClassificationFacetsRequest
+  ) => Promise<GetDocumentClassificationFacetsResponseDto>
+  searchUnifiedPhotos: (request: UnifiedSearchPhotosRequest) => Promise<UnifiedSearchPhotosResponse>
+  searchUnifiedDocuments: (
+    request: UnifiedSearchDocumentsRequest
+  ) => Promise<UnifiedSearchDocumentsResponse>
+  cancelUnifiedSearch: (request: UnifiedSearchCancelRequest) => Promise<UnifiedSearchCancelResponse>
 }
 
 declare global {

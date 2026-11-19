@@ -1208,6 +1208,43 @@ export class AnnotationJournal {
     }))
   }
 
+  public appendDocumentClassificationOverrideSync(params: {
+    opId?: string
+    locationId: number
+    normalizedPath: string
+    originalPath: string
+    byteSize: number
+    filesystemMtimeMs: number | null
+    activeHash: string | null
+    discoveryObservationId: number
+    expectedRevision: string
+    overrideVersion: number
+    purposeLabels: readonly ('legal' | 'lists' | 'instructions' | 'receipts' | 'recipes')[] | null
+    originLabels: readonly ('personal' | 'software_project' | 'application_system')[] | null
+    clutterOverride: 'inherit' | 'force_keep' | 'force_clutter'
+  }): AnnotationJournalEntry {
+    const opId = params.opId ?? randomUUID()
+    return this.appendEntrySync((nextSeq, timestampMs) => ({
+      formatVersion: CURRENT_JOURNAL_FORMAT_VERSION,
+      entrySeq: nextSeq,
+      entryTimestampMs: timestampMs,
+      opId,
+      kind: 'document_classification_override',
+      locationId: params.locationId,
+      normalizedPath: params.normalizedPath,
+      originalPath: params.originalPath,
+      byteSize: params.byteSize,
+      filesystemMtimeMs: params.filesystemMtimeMs,
+      activeHash: params.activeHash,
+      discoveryObservationId: params.discoveryObservationId,
+      expectedRevision: params.expectedRevision,
+      overrideVersion: params.overrideVersion,
+      purposeLabels: params.purposeLabels ? [...params.purposeLabels] : null,
+      originLabels: params.originLabels ? [...params.originLabels] : null,
+      clutterOverride: params.clutterOverride
+    }))
+  }
+
   public async appendCommitRecord(params: {
     opId: string
     targetSeq: number

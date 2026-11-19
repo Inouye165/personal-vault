@@ -9,6 +9,21 @@
 
 export type ItemKind = 'photo' | 'document'
 
+export type {
+  ClassificationConfidenceBand,
+  DocumentClassificationEvidence,
+  DocumentClassificationInput,
+  DocumentClassificationRange,
+  DocumentClassificationResult,
+  DocumentClassificationTextSource,
+  DocumentClutterOverride,
+  DocumentOriginLabel,
+  DocumentOriginStatus,
+  DocumentPurposeLabel,
+  DocumentPurposeStatus,
+  UncertaintyReason
+} from '../validation/document-schemas'
+
 export type DocumentPurpose =
   | 'personal'
   | 'software_project'

@@ -10,9 +10,9 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 11
+export const CURRENT_SCHEMA_VERSION = 15
 
-interface Migration {
+export interface Migration {
   readonly version: number
   readonly name: string
   readonly up: (db: DatabaseSync) => void
@@ -39,7 +39,7 @@ function getTableColumns(db: DatabaseSync, tableName: string): string[] {
   return rows.map((r) => r.name)
 }
 
-const MIGRATIONS: readonly Migration[] = [
+export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
     name: 'initial_catalog_schema',
@@ -827,6 +827,521 @@ const MIGRATIONS: readonly Migration[] = [
         WHERE is_current = 1
           AND extraction_status = 'unsupported'
           AND error_code = 'UNSUPPORTED_HEIC_CONTAINER';
+      `)
+    }
+  },
+  {
+    version: 12,
+    name: 'document_extractions_and_jobs',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS document_extractions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms NUMERIC,
+          content_revision TEXT NOT NULL,
+          recipe_version TEXT NOT NULL,
+          extraction_status TEXT NOT NULL CHECK (
+            extraction_status IN (
+              'extracted',
+              'no_text_ocr_required',
+              'password_protected',
+              'unsupported',
+              'corrupt_or_failed',
+              'truncated'
+            )
+          ),
+          status_detail TEXT,
+          extracted_text TEXT,
+          extracted_char_count INTEGER NOT NULL DEFAULT 0 CHECK (extracted_char_count >= 0),
+          page_count INTEGER,
+          truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+          truncation_reason TEXT,
+          detected_encoding TEXT,
+          extracted_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_ext_file_current
+          ON document_extractions(file_location_id)
+          WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS idx_doc_ext_sha_recipe
+          ON document_extractions(content_sha256, recipe_version);
+
+        CREATE INDEX IF NOT EXISTS idx_doc_ext_status
+          ON document_extractions(extraction_status, is_current);
+
+        CREATE TABLE IF NOT EXISTS document_extraction_jobs (
+          id TEXT PRIMARY KEY,
+          scope_kind TEXT NOT NULL CHECK (scope_kind IN ('selected', 'filtered', 'all')),
+          status TEXT NOT NULL CHECK (
+            status IN ('running', 'paused', 'cancelled', 'interrupted', 'completed', 'failed')
+          ),
+          recipe_version TEXT NOT NULL,
+          force_reextract INTEGER NOT NULL DEFAULT 0 CHECK (force_reextract IN (0, 1)),
+          snapshot_complete INTEGER NOT NULL DEFAULT 1 CHECK (snapshot_complete IN (0, 1)),
+          total_documents INTEGER NOT NULL DEFAULT 0,
+          processed_documents INTEGER NOT NULL DEFAULT 0,
+          extracted_documents INTEGER NOT NULL DEFAULT 0,
+          no_text_documents INTEGER NOT NULL DEFAULT 0,
+          password_protected_documents INTEGER NOT NULL DEFAULT 0,
+          unsupported_documents INTEGER NOT NULL DEFAULT 0,
+          failed_documents INTEGER NOT NULL DEFAULT 0,
+          truncated_documents INTEGER NOT NULL DEFAULT 0,
+          reused_documents INTEGER NOT NULL DEFAULT 0,
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS document_extraction_job_items (
+          job_id TEXT NOT NULL REFERENCES document_extraction_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_revision TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'pending',
+              'extracted',
+              'no_text_ocr_required',
+              'password_protected',
+              'unsupported',
+              'corrupt_or_failed',
+              'truncated',
+              'reused',
+              'skipped_stale'
+            )
+          ),
+          error_message TEXT,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (job_id, file_location_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_ext_job_items_status
+          ON document_extraction_job_items(job_id, status, file_location_id);
+      `)
+    }
+  },
+  {
+    version: 13,
+    name: 'document_ocr_persistence_and_jobs',
+    up: (db: DatabaseSync) => {
+      const extCols = getTableColumns(db, 'document_extractions')
+      if (extCols.length > 0 && !extCols.includes('ocr_candidate_page_count')) {
+        db.exec('ALTER TABLE document_extractions ADD COLUMN ocr_candidate_page_count INTEGER;')
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS document_ocr_extractions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms NUMERIC,
+          content_revision TEXT NOT NULL,
+          recipe_version TEXT NOT NULL,
+          ocr_model_id TEXT NOT NULL,
+          ocr_model_manifest_sha256 TEXT NOT NULL CHECK (length(ocr_model_manifest_sha256) = 64),
+          ocr_language TEXT NOT NULL,
+          extraction_method TEXT NOT NULL CHECK (
+            extraction_method IN (
+              'ocr_image_tesseract',
+              'ocr_pdf_tesseract',
+              'ocr_hybrid_pdf',
+              'native_pdf_passthrough',
+              'none'
+            )
+          ),
+          ocr_status TEXT NOT NULL CHECK (
+            ocr_status IN (
+              'extracted',
+              'ocr_no_text',
+              'password_protected',
+              'unsupported',
+              'corrupt_or_failed',
+              'truncated'
+            )
+          ),
+          status_detail TEXT,
+          extracted_text TEXT,
+          extracted_char_count INTEGER NOT NULL DEFAULT 0 CHECK (extracted_char_count >= 0),
+          page_count INTEGER,
+          ocr_page_count INTEGER NOT NULL DEFAULT 0 CHECK (ocr_page_count >= 0),
+          native_only_page_count INTEGER NOT NULL DEFAULT 0 CHECK (native_only_page_count >= 0),
+          skipped_blank_page_count INTEGER NOT NULL DEFAULT 0 CHECK (skipped_blank_page_count >= 0),
+          mean_confidence REAL,
+          truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+          truncation_reason TEXT,
+          extracted_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_ocr_ext_file_current
+          ON document_ocr_extractions(file_location_id)
+          WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS idx_doc_ocr_ext_reuse
+          ON document_ocr_extractions(
+            content_sha256,
+            recipe_version,
+            ocr_model_id,
+            ocr_model_manifest_sha256,
+            ocr_language
+          )
+          WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS idx_doc_ocr_ext_status
+          ON document_ocr_extractions(ocr_status, is_current);
+
+        CREATE TABLE IF NOT EXISTS document_ocr_jobs (
+          id TEXT PRIMARY KEY NOT NULL,
+          scope_kind TEXT NOT NULL CHECK (scope_kind IN ('selected', 'ocr_needed', 'filtered', 'all')),
+          status TEXT NOT NULL CHECK (
+            status IN ('running', 'paused', 'cancelled', 'interrupted', 'completed', 'failed')
+          ),
+          recipe_version TEXT NOT NULL,
+          ocr_model_id TEXT NOT NULL,
+          ocr_model_manifest_sha256 TEXT NOT NULL,
+          ocr_language TEXT NOT NULL,
+          force_reocr INTEGER NOT NULL DEFAULT 0 CHECK (force_reocr IN (0, 1)),
+          snapshot_complete INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_complete IN (0, 1)),
+          total_items INTEGER NOT NULL DEFAULT 0,
+          processed_items INTEGER NOT NULL DEFAULT 0,
+          extracted_items INTEGER NOT NULL DEFAULT 0,
+          no_text_items INTEGER NOT NULL DEFAULT 0,
+          password_protected_items INTEGER NOT NULL DEFAULT 0,
+          unsupported_items INTEGER NOT NULL DEFAULT 0,
+          failed_items INTEGER NOT NULL DEFAULT 0,
+          truncated_items INTEGER NOT NULL DEFAULT 0,
+          reused_items INTEGER NOT NULL DEFAULT 0,
+          skipped_stale_items INTEGER NOT NULL DEFAULT 0,
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS document_ocr_job_items (
+          job_id TEXT NOT NULL REFERENCES document_ocr_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_revision TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'pending',
+              'extracted',
+              'ocr_no_text',
+              'password_protected',
+              'unsupported',
+              'corrupt_or_failed',
+              'truncated',
+              'reused',
+              'skipped_stale'
+            )
+          ),
+          error_message TEXT,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (job_id, file_location_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_ocr_job_items_status
+          ON document_ocr_job_items(job_id, status, file_location_id);
+      `)
+    }
+  },
+  {
+    version: 14,
+    name: 'document_semantic_search_index',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS document_semantic_tracks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          text_source_kind TEXT NOT NULL CHECK (text_source_kind IN ('native', 'ocr')),
+          discovery_observation_id INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          observed_byte_size INTEGER NOT NULL,
+          observed_mtime_ms INTEGER,
+          content_revision TEXT NOT NULL,
+          source_extraction_id INTEGER NOT NULL,
+          source_recipe_version TEXT NOT NULL,
+          source_ocr_model_id TEXT,
+          source_ocr_model_manifest_sha256 TEXT,
+          source_ocr_language TEXT,
+          normalized_text_sha256 TEXT NOT NULL,
+          doc_model_id TEXT NOT NULL,
+          doc_model_commit TEXT NOT NULL,
+          doc_model_manifest_sha256 TEXT NOT NULL,
+          chunking_recipe_version TEXT NOT NULL,
+          max_content_tokens_per_chunk INTEGER NOT NULL,
+          overlap_tokens INTEGER NOT NULL,
+          max_chunks_per_document INTEGER NOT NULL,
+          max_text_chars_for_indexing INTEGER NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('indexed', 'truncated', 'empty_text', 'failed')),
+          normalized_char_count INTEGER NOT NULL DEFAULT 0,
+          indexed_char_count INTEGER NOT NULL DEFAULT 0,
+          coverage_ratio REAL NOT NULL DEFAULT 1,
+          truncated INTEGER NOT NULL DEFAULT 0,
+          truncation_reason TEXT,
+          total_token_count INTEGER NOT NULL DEFAULT 0,
+          unique_indexed_token_count INTEGER NOT NULL DEFAULT 0,
+          emitted_chunk_token_sum INTEGER NOT NULL DEFAULT 0,
+          chunk_count INTEGER NOT NULL DEFAULT 0,
+          error_message TEXT,
+          is_current INTEGER NOT NULL DEFAULT 1,
+          indexed_at_ms INTEGER NOT NULL,
+          UNIQUE(file_location_id, text_source_kind)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_semantic_tracks_lookup
+          ON document_semantic_tracks(is_current, file_location_id, text_source_kind);
+
+        CREATE INDEX IF NOT EXISTS idx_doc_semantic_tracks_reuse
+          ON document_semantic_tracks(
+            normalized_text_sha256,
+            doc_model_manifest_sha256,
+            chunking_recipe_version,
+            is_current
+          );
+
+        CREATE TABLE IF NOT EXISTS document_semantic_chunks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          track_id INTEGER NOT NULL REFERENCES document_semantic_tracks(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          text_source_kind TEXT NOT NULL CHECK (text_source_kind IN ('native', 'ocr')),
+          discovery_observation_id INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          observed_byte_size INTEGER NOT NULL,
+          observed_mtime_ms INTEGER,
+          content_revision TEXT NOT NULL,
+          source_extraction_id INTEGER NOT NULL,
+          source_recipe_version TEXT NOT NULL,
+          source_ocr_model_id TEXT,
+          source_ocr_model_manifest_sha256 TEXT,
+          source_ocr_language TEXT,
+          normalized_text_sha256 TEXT NOT NULL,
+          doc_model_id TEXT NOT NULL,
+          doc_model_commit TEXT NOT NULL,
+          doc_model_manifest_sha256 TEXT NOT NULL,
+          chunking_recipe_version TEXT NOT NULL,
+          max_content_tokens_per_chunk INTEGER NOT NULL,
+          overlap_tokens INTEGER NOT NULL,
+          max_chunks_per_document INTEGER NOT NULL,
+          max_text_chars_for_indexing INTEGER NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          char_offset_start INTEGER NOT NULL,
+          char_offset_end INTEGER NOT NULL,
+          content_token_count INTEGER NOT NULL,
+          vector_dimensions INTEGER NOT NULL,
+          embedding_vector BLOB NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1,
+          created_at_ms INTEGER NOT NULL,
+          UNIQUE(file_location_id, text_source_kind, chunk_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_semantic_chunks_rank_stream
+          ON document_semantic_chunks(
+            is_current,
+            doc_model_manifest_sha256,
+            chunking_recipe_version,
+            file_location_id,
+            id
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_semantic_chunks_track
+          ON document_semantic_chunks(track_id, chunk_index);
+
+        CREATE TABLE IF NOT EXISTS document_semantic_jobs (
+          id TEXT PRIMARY KEY,
+          scope_kind TEXT NOT NULL CHECK (scope_kind IN ('selected', 'unindexed_or_stale', 'filtered', 'all')),
+          status TEXT NOT NULL CHECK (status IN ('running', 'paused', 'completed', 'cancelled', 'interrupted', 'failed')),
+          doc_model_id TEXT NOT NULL,
+          doc_model_commit TEXT NOT NULL,
+          doc_model_manifest_sha256 TEXT NOT NULL,
+          chunking_recipe_version TEXT NOT NULL,
+          filter_extension TEXT,
+          filter_filename_query TEXT,
+          force_reindex INTEGER NOT NULL DEFAULT 0,
+          snapshot_complete INTEGER NOT NULL DEFAULT 0,
+          total_items INTEGER NOT NULL DEFAULT 0,
+          processed_items INTEGER NOT NULL DEFAULT 0,
+          indexed_items INTEGER NOT NULL DEFAULT 0,
+          truncated_items INTEGER NOT NULL DEFAULT 0,
+          empty_text_items INTEGER NOT NULL DEFAULT 0,
+          failed_items INTEGER NOT NULL DEFAULT 0,
+          reused_items INTEGER NOT NULL DEFAULT 0,
+          skipped_stale_items INTEGER NOT NULL DEFAULT 0,
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS document_semantic_job_items (
+          job_id TEXT NOT NULL REFERENCES document_semantic_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          text_source_kind TEXT NOT NULL CHECK (text_source_kind IN ('native', 'ocr')),
+          source_extraction_id INTEGER NOT NULL,
+          discovery_observation_id INTEGER NOT NULL,
+          content_revision TEXT NOT NULL,
+          normalized_text_sha256 TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'pending',
+              'indexed',
+              'truncated',
+              'empty_text',
+              'failed',
+              'reused',
+              'skipped_stale'
+            )
+          ),
+          error_message TEXT,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (job_id, file_location_id, text_source_kind)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_semantic_job_items_status
+          ON document_semantic_job_items(job_id, status, file_location_id, text_source_kind);
+      `)
+    }
+  },
+  {
+    version: 15,
+    name: 'document_classifications_and_overrides',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS document_classifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms REAL,
+          content_revision TEXT NOT NULL,
+          source_root_path TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          native_extraction_id INTEGER,
+          native_recipe_version TEXT,
+          ocr_extraction_id INTEGER,
+          ocr_recipe_version TEXT,
+          ocr_model_id TEXT,
+          ocr_model_manifest_sha256 TEXT,
+          ocr_language TEXT,
+          text_source_kind TEXT NOT NULL CHECK (text_source_kind IN ('native', 'ocr', 'none')),
+          normalized_input_sha256 TEXT NOT NULL CHECK (length(normalized_input_sha256) = 64),
+          classifier_kind TEXT NOT NULL,
+          rule_version TEXT NOT NULL,
+          purpose_status TEXT NOT NULL CHECK (purpose_status IN ('classified', 'other', 'unknown')),
+          origin_status TEXT NOT NULL CHECK (origin_status IN ('classified', 'unknown')),
+          confidence_band TEXT NOT NULL CHECK (confidence_band IN ('high', 'medium', 'low')),
+          uncertainty_reason TEXT,
+          uncertainty_reasons_json TEXT NOT NULL,
+          total_normalized_chars INTEGER NOT NULL DEFAULT 0,
+          inspected_head_chars INTEGER NOT NULL DEFAULT 0,
+          inspected_tail_chars INTEGER NOT NULL DEFAULT 0,
+          omitted_chars INTEGER NOT NULL DEFAULT 0,
+          upstream_truncated INTEGER NOT NULL DEFAULT 0 CHECK (upstream_truncated IN (0, 1)),
+          unclosed_fence_at_eof INTEGER NOT NULL DEFAULT 0 CHECK (unclosed_fence_at_eof IN (0, 1)),
+          is_clutter_candidate INTEGER NOT NULL DEFAULT 0 CHECK (is_clutter_candidate IN (0, 1)),
+          has_personal_veto INTEGER NOT NULL DEFAULT 0 CHECK (has_personal_veto IN (0, 1)),
+          evidence_json TEXT NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+          created_at_ms INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_classifications_current
+          ON document_classifications(file_location_id)
+          WHERE is_current = 1;
+
+        CREATE INDEX IF NOT EXISTS idx_doc_classifications_clutter
+          ON document_classifications(is_current, is_clutter_candidate, rule_version, file_location_id);
+
+        CREATE TABLE IF NOT EXISTS document_classification_labels (
+          classification_id INTEGER NOT NULL REFERENCES document_classifications(id) ON DELETE CASCADE,
+          axis TEXT NOT NULL CHECK (axis IN ('purpose', 'origin')),
+          label TEXT NOT NULL,
+          PRIMARY KEY (classification_id, axis, label)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_classification_labels_axis_label
+          ON document_classification_labels(axis, label, classification_id);
+
+        CREATE TABLE IF NOT EXISTS document_classification_overrides (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms REAL,
+          content_revision TEXT NOT NULL,
+          purpose_labels_json TEXT,
+          origin_labels_json TEXT,
+          clutter_override TEXT NOT NULL DEFAULT 'inherit' CHECK (
+            clutter_override IN ('inherit', 'force_keep', 'force_clutter')
+          ),
+          override_version INTEGER NOT NULL DEFAULT 1 CHECK (override_version >= 1),
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_classification_overrides_current
+          ON document_classification_overrides(file_location_id)
+          WHERE is_current = 1;
+
+        CREATE TABLE IF NOT EXISTS document_classification_jobs (
+          id TEXT PRIMARY KEY,
+          scope_kind TEXT NOT NULL CHECK (
+            scope_kind IN ('selected', 'unclassified_or_stale', 'filtered', 'all')
+          ),
+          status TEXT NOT NULL CHECK (
+            status IN ('running', 'paused', 'completed', 'cancelled', 'interrupted', 'failed')
+          ),
+          rule_version TEXT NOT NULL,
+          filter_extension TEXT,
+          filter_filename_query TEXT,
+          force_reclassify INTEGER NOT NULL DEFAULT 0 CHECK (force_reclassify IN (0, 1)),
+          snapshot_complete INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_complete IN (0, 1)),
+          total_items INTEGER NOT NULL DEFAULT 0 CHECK (total_items >= 0),
+          processed_items INTEGER NOT NULL DEFAULT 0 CHECK (processed_items >= 0),
+          classified_items INTEGER NOT NULL DEFAULT 0 CHECK (classified_items >= 0),
+          other_items INTEGER NOT NULL DEFAULT 0 CHECK (other_items >= 0),
+          unknown_items INTEGER NOT NULL DEFAULT 0 CHECK (unknown_items >= 0),
+          clutter_items INTEGER NOT NULL DEFAULT 0 CHECK (clutter_items >= 0),
+          reused_items INTEGER NOT NULL DEFAULT 0 CHECK (reused_items >= 0),
+          skipped_stale_items INTEGER NOT NULL DEFAULT 0 CHECK (skipped_stale_items >= 0),
+          failed_items INTEGER NOT NULL DEFAULT 0 CHECK (failed_items >= 0),
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS document_classification_job_items (
+          job_id TEXT NOT NULL REFERENCES document_classification_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_revision TEXT NOT NULL,
+          native_extraction_id INTEGER,
+          ocr_extraction_id INTEGER,
+          normalized_input_sha256 TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (
+            status IN ('pending', 'classified', 'other', 'unknown', 'reused', 'skipped_stale', 'failed')
+          ),
+          error_message TEXT,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (job_id, file_location_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_classify_job_items_status
+          ON document_classification_job_items(job_id, status, file_location_id);
       `)
     }
   }

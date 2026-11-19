@@ -87,7 +87,43 @@ import {
   GetDocumentDetailResponseSchema,
   GetDocumentExtensionFacetsRequestSchema,
   GetDocumentExtensionFacetsResponseSchema,
+  GetDocumentPreviewRequestSchema,
+  GetDocumentPreviewResponseSchema,
+  ExtractSelectedDocumentsRequestSchema,
+  StartDocumentExtractionRequestSchema,
+  DocumentExtractionProgressSchema,
+  OcrModelStatusSchema,
+  GetDocumentOcrStateRequestSchema,
+  GetDocumentOcrStateResponseSchema,
+  GetDocumentOcrPreviewRequestSchema,
+  GetDocumentOcrPreviewResponseSchema,
+  OcrSelectedDocumentsRequestSchema,
+  StartDocumentOcrRequestSchema,
+  DocumentOcrProgressSchema,
+  DocSemanticModelStatusSchema,
+  DocSemanticProgressSchema,
+  IndexSelectedDocumentsRequestSchema,
+  StartDocSemanticIndexRequestSchema,
+  DocSemanticSearchRequestSchema,
+  DocSemanticSearchResponseSchema,
+  DocSemanticSearchCancelRequestSchema,
+  DocSemanticSearchCancelResponseSchema,
+  UnifiedSearchPhotosRequestSchema,
+  UnifiedSearchPhotosResponseSchema,
+  UnifiedSearchDocumentsRequestSchema,
+  UnifiedSearchDocumentsResponseSchema,
+  UnifiedSearchCancelRequestSchema,
+  UnifiedSearchCancelResponseSchema,
+  ClassifySelectedDocumentsRequestSchema,
+  StartDocumentClassificationRequestSchema,
+  DocumentClassificationProgressSchema,
+  SetDocumentClassificationOverrideRequestSchema,
+  ResetDocumentClassificationOverrideRequestSchema,
+  DocumentClassificationOverrideAckSchema,
+  GetDocumentClassificationFacetsRequestSchema,
+  GetDocumentClassificationFacetsResponseSchema,
   validatePayload,
+  type DocSemanticSearchCancelResponseDto,
   type AppInfo,
   type NavigationTab,
   type VaultStatus,
@@ -170,7 +206,41 @@ import {
   type GetDocumentDetailRequest,
   type GetDocumentDetailResponse,
   type GetDocumentExtensionFacetsRequest,
-  type GetDocumentExtensionFacetsResponse
+  type GetDocumentExtensionFacetsResponse,
+  type GetDocumentPreviewRequest,
+  type GetDocumentPreviewResponse,
+  type ExtractSelectedDocumentsRequest,
+  type StartDocumentExtractionRequest,
+  type DocumentExtractionProgressDto,
+  type OcrModelStatusDto,
+  type GetDocumentOcrStateRequest,
+  type GetDocumentOcrStateResponse,
+  type GetDocumentOcrPreviewRequest,
+  type GetDocumentOcrPreviewResponse,
+  type OcrSelectedDocumentsRequest,
+  type StartDocumentOcrRequest,
+  type DocumentOcrProgressDto,
+  type DocSemanticModelStatusDto,
+  type DocumentSemanticProgressDto,
+  type IndexSelectedDocumentsRequest,
+  type StartDocSemanticIndexRequest,
+  type DocSemanticSearchRequest,
+  type DocSemanticSearchResponseDto,
+  type DocSemanticSearchCancelRequest,
+  type UnifiedSearchPhotosRequest,
+  type UnifiedSearchPhotosResponse,
+  type UnifiedSearchDocumentsRequest,
+  type UnifiedSearchDocumentsResponse,
+  type UnifiedSearchCancelRequest,
+  type UnifiedSearchCancelResponse,
+  type ClassifySelectedDocumentsRequest,
+  type StartDocumentClassificationRequest,
+  type DocumentClassificationProgressDto,
+  type SetDocumentClassificationOverrideRequest,
+  type ResetDocumentClassificationOverrideRequest,
+  type DocumentClassificationOverrideAckDto,
+  type GetDocumentClassificationFacetsRequest,
+  type GetDocumentClassificationFacetsResponseDto
 } from '../shared/validation/ipc-schemas.js'
 import type { VaultApi } from './index.d.js'
 
@@ -1039,6 +1109,586 @@ const api: VaultApi = {
     const result = validatePayload(GetDocumentExtensionFacetsResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getDocumentExtensionFacets response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentPreview(
+    request: GetDocumentPreviewRequest
+  ): Promise<GetDocumentPreviewResponse> {
+    const parsed = validatePayload(GetDocumentPreviewRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentPreview request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_GET_PREVIEW, parsed.data)
+    const result = validatePayload(GetDocumentPreviewResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentPreview response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async extractSelectedDocuments(
+    request: ExtractSelectedDocumentsRequest
+  ): Promise<DocumentExtractionProgressDto> {
+    const parsed = validatePayload(ExtractSelectedDocumentsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid extractSelectedDocuments request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_EXTRACT_SELECTED, parsed.data)
+    const result = validatePayload(DocumentExtractionProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid extractSelectedDocuments response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startDocumentExtraction(
+    request?: StartDocumentExtractionRequest
+  ): Promise<DocumentExtractionProgressDto> {
+    const parsed = validatePayload(StartDocumentExtractionRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid startDocumentExtraction request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_START_EXTRACTION, parsed.data)
+    const result = validatePayload(DocumentExtractionProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startDocumentExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseDocumentExtraction(): Promise<DocumentExtractionProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_PAUSE_EXTRACTION)
+    const result = validatePayload(DocumentExtractionProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseDocumentExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeDocumentExtraction(): Promise<DocumentExtractionProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_RESUME_EXTRACTION)
+    const result = validatePayload(DocumentExtractionProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeDocumentExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelDocumentExtraction(): Promise<DocumentExtractionProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CANCEL_EXTRACTION)
+    const result = validatePayload(DocumentExtractionProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelDocumentExtraction response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentExtractionProgress(): Promise<DocumentExtractionProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_GET_EXTRACTION_PROGRESS)
+    const result = validatePayload(DocumentExtractionProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentExtractionProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onDocumentExtractionProgress(
+    callback: (progress: DocumentExtractionProgressDto) => void
+  ): () => void {
+    const handler = (_event: Electron.IpcRendererEvent, rawPayload: unknown) => {
+      const result = validatePayload(DocumentExtractionProgressSchema, rawPayload)
+      if (result.success) {
+        callback(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.DOCUMENTS_EXTRACTION_PROGRESS_EVENT, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.DOCUMENTS_EXTRACTION_PROGRESS_EVENT, handler)
+    }
+  },
+
+  async getOcrModelStatus(): Promise<OcrModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.OCR_MODEL_GET_STATUS)
+    const result = validatePayload(OcrModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getOcrModelStatus response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async downloadOcrModel(): Promise<OcrModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.OCR_MODEL_DOWNLOAD)
+    const result = validatePayload(OcrModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid downloadOcrModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async importOcrModel(): Promise<OcrModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.OCR_MODEL_IMPORT)
+    const result = validatePayload(OcrModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid importOcrModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelOcrModel(): Promise<OcrModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.OCR_MODEL_CANCEL)
+    const result = validatePayload(OcrModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelOcrModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onOcrModelStatus(callback: (status: OcrModelStatusDto) => void): () => void {
+    const handler = (_event: Electron.IpcRendererEvent, rawPayload: unknown) => {
+      const result = validatePayload(OcrModelStatusSchema, rawPayload)
+      if (result.success) {
+        callback(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.OCR_MODEL_STATUS_EVENT, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.OCR_MODEL_STATUS_EVENT, handler)
+    }
+  },
+
+  async getDocumentOcrState(
+    request: GetDocumentOcrStateRequest
+  ): Promise<GetDocumentOcrStateResponse> {
+    const parsed = validatePayload(GetDocumentOcrStateRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentOcrState request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_GET_STATE, parsed.data)
+    const result = validatePayload(GetDocumentOcrStateResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentOcrState response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentOcrPreview(
+    request: GetDocumentOcrPreviewRequest
+  ): Promise<GetDocumentOcrPreviewResponse> {
+    const parsed = validatePayload(GetDocumentOcrPreviewRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentOcrPreview request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_GET_PREVIEW, parsed.data)
+    const result = validatePayload(GetDocumentOcrPreviewResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentOcrPreview response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async ocrSelectedDocuments(
+    request: OcrSelectedDocumentsRequest
+  ): Promise<DocumentOcrProgressDto> {
+    const parsed = validatePayload(OcrSelectedDocumentsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid ocrSelectedDocuments request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_SELECTED, parsed.data)
+    const result = validatePayload(DocumentOcrProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid ocrSelectedDocuments response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startDocumentOcr(
+    request: StartDocumentOcrRequest = { scope: 'ocr_needed' }
+  ): Promise<DocumentOcrProgressDto> {
+    const parsed = validatePayload(StartDocumentOcrRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid startDocumentOcr request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_START, parsed.data)
+    const result = validatePayload(DocumentOcrProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startDocumentOcr response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseDocumentOcr(): Promise<DocumentOcrProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_PAUSE)
+    const result = validatePayload(DocumentOcrProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseDocumentOcr response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeDocumentOcr(): Promise<DocumentOcrProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_RESUME)
+    const result = validatePayload(DocumentOcrProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeDocumentOcr response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelDocumentOcr(): Promise<DocumentOcrProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_CANCEL)
+    const result = validatePayload(DocumentOcrProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelDocumentOcr response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentOcrProgress(): Promise<DocumentOcrProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_OCR_GET_PROGRESS)
+    const result = validatePayload(DocumentOcrProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentOcrProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onDocumentOcrProgress(callback: (progress: DocumentOcrProgressDto) => void): () => void {
+    const handler = (_event: Electron.IpcRendererEvent, rawPayload: unknown) => {
+      const result = validatePayload(DocumentOcrProgressSchema, rawPayload)
+      if (result.success) {
+        callback(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.DOCUMENTS_OCR_PROGRESS_EVENT, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.DOCUMENTS_OCR_PROGRESS_EVENT, handler)
+    }
+  },
+
+  async getDocSemanticModelStatus(): Promise<DocSemanticModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_MODEL_GET_STATUS)
+    const result = validatePayload(DocSemanticModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocSemanticModelStatus response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async downloadDocSemanticModel(): Promise<DocSemanticModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_MODEL_DOWNLOAD)
+    const result = validatePayload(DocSemanticModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid downloadDocSemanticModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async importDocSemanticModel(): Promise<DocSemanticModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_MODEL_IMPORT)
+    const result = validatePayload(DocSemanticModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid importDocSemanticModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelDocSemanticModel(): Promise<DocSemanticModelStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_MODEL_CANCEL)
+    const result = validatePayload(DocSemanticModelStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelDocSemanticModel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async indexSelectedDocuments(
+    request: IndexSelectedDocumentsRequest
+  ): Promise<DocumentSemanticProgressDto> {
+    const parsed = validatePayload(IndexSelectedDocumentsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid indexSelectedDocuments request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_INDEX_SELECTED, parsed.data)
+    const result = validatePayload(DocSemanticProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid indexSelectedDocuments response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startDocumentSemanticIndexing(
+    request?: StartDocSemanticIndexRequest
+  ): Promise<DocumentSemanticProgressDto> {
+    const parsed = validatePayload(StartDocSemanticIndexRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid startDocumentSemanticIndexing request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_INDEX_START, parsed.data)
+    const result = validatePayload(DocSemanticProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startDocumentSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseDocumentSemanticIndexing(): Promise<DocumentSemanticProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_INDEX_PAUSE)
+    const result = validatePayload(DocSemanticProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseDocumentSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeDocumentSemanticIndexing(): Promise<DocumentSemanticProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_INDEX_RESUME)
+    const result = validatePayload(DocSemanticProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeDocumentSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelDocumentSemanticIndexing(): Promise<DocumentSemanticProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_INDEX_CANCEL)
+    const result = validatePayload(DocSemanticProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelDocumentSemanticIndexing response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentSemanticProgress(): Promise<DocumentSemanticProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_INDEX_GET_PROGRESS)
+    const result = validatePayload(DocSemanticProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentSemanticProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async searchDocumentsSemantic(
+    request: DocSemanticSearchRequest
+  ): Promise<DocSemanticSearchResponseDto> {
+    const parsed = validatePayload(DocSemanticSearchRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid searchDocumentsSemantic request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_SEARCH, parsed.data)
+    const result = validatePayload(DocSemanticSearchResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid searchDocumentsSemantic response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelDocumentSemanticSearch(
+    request?: DocSemanticSearchCancelRequest
+  ): Promise<DocSemanticSearchCancelResponseDto> {
+    if (request !== undefined) {
+      const parsed = validatePayload(DocSemanticSearchCancelRequestSchema, request)
+      if (!parsed.success) {
+        throw new Error(`Invalid cancelDocumentSemanticSearch request: ${parsed.error}`)
+      }
+      const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_SEARCH_CANCEL, parsed.data)
+      const result = validatePayload(DocSemanticSearchCancelResponseSchema, raw)
+      if (!result.success) {
+        throw new Error(`Invalid cancelDocumentSemanticSearch response from main: ${result.error}`)
+      }
+      return result.data
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOC_SEMANTIC_SEARCH_CANCEL)
+    const result = validatePayload(DocSemanticSearchCancelResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelDocumentSemanticSearch response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async classifySelectedDocuments(
+    request: ClassifySelectedDocumentsRequest
+  ): Promise<DocumentClassificationProgressDto> {
+    const parsed = validatePayload(ClassifySelectedDocumentsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid classifySelectedDocuments request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CLASSIFY_SELECTED, parsed.data)
+    const result = validatePayload(DocumentClassificationProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid classifySelectedDocuments response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startDocumentClassification(
+    request?: StartDocumentClassificationRequest
+  ): Promise<DocumentClassificationProgressDto> {
+    const parsed = validatePayload(StartDocumentClassificationRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid startDocumentClassification request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CLASSIFY_START, parsed.data)
+    const result = validatePayload(DocumentClassificationProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startDocumentClassification response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseDocumentClassification(): Promise<DocumentClassificationProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CLASSIFY_PAUSE)
+    const result = validatePayload(DocumentClassificationProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseDocumentClassification response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeDocumentClassification(): Promise<DocumentClassificationProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CLASSIFY_RESUME)
+    const result = validatePayload(DocumentClassificationProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeDocumentClassification response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelDocumentClassification(): Promise<DocumentClassificationProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CLASSIFY_CANCEL)
+    const result = validatePayload(DocumentClassificationProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelDocumentClassification response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getDocumentClassificationProgress(): Promise<DocumentClassificationProgressDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.DOCUMENTS_CLASSIFY_GET_PROGRESS)
+    const result = validatePayload(DocumentClassificationProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(
+        `Invalid getDocumentClassificationProgress response from main: ${result.error}`
+      )
+    }
+    return result.data
+  },
+
+  onDocumentClassificationProgress(
+    callback: (progress: DocumentClassificationProgressDto) => void
+  ): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+      const result = validatePayload(DocumentClassificationProgressSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.DOCUMENTS_CLASSIFY_PROGRESS_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.DOCUMENTS_CLASSIFY_PROGRESS_EVENT, listener)
+    }
+  },
+
+  async setDocumentClassificationOverride(
+    request: SetDocumentClassificationOverrideRequest
+  ): Promise<DocumentClassificationOverrideAckDto> {
+    const parsed = validatePayload(SetDocumentClassificationOverrideRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid setDocumentClassificationOverride request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(
+      IPC_CHANNELS.DOCUMENTS_SET_CLASSIFICATION_OVERRIDE,
+      parsed.data
+    )
+    const result = validatePayload(DocumentClassificationOverrideAckSchema, raw)
+    if (!result.success) {
+      throw new Error(
+        `Invalid setDocumentClassificationOverride response from main: ${result.error}`
+      )
+    }
+    return result.data
+  },
+
+  async resetDocumentClassificationOverride(
+    request: ResetDocumentClassificationOverrideRequest
+  ): Promise<DocumentClassificationOverrideAckDto> {
+    const parsed = validatePayload(ResetDocumentClassificationOverrideRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid resetDocumentClassificationOverride request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(
+      IPC_CHANNELS.DOCUMENTS_RESET_CLASSIFICATION_OVERRIDE,
+      parsed.data
+    )
+    const result = validatePayload(DocumentClassificationOverrideAckSchema, raw)
+    if (!result.success) {
+      throw new Error(
+        `Invalid resetDocumentClassificationOverride response from main: ${result.error}`
+      )
+    }
+    return result.data
+  },
+
+  async getDocumentClassificationFacets(
+    request?: GetDocumentClassificationFacetsRequest
+  ): Promise<GetDocumentClassificationFacetsResponseDto> {
+    const parsed = validatePayload(GetDocumentClassificationFacetsRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid getDocumentClassificationFacets request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(
+      IPC_CHANNELS.DOCUMENTS_GET_CLASSIFICATION_FACETS,
+      parsed.data
+    )
+    const result = validatePayload(GetDocumentClassificationFacetsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getDocumentClassificationFacets response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async searchUnifiedPhotos(
+    request: UnifiedSearchPhotosRequest
+  ): Promise<UnifiedSearchPhotosResponse> {
+    const parsed = validatePayload(UnifiedSearchPhotosRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid searchUnifiedPhotos request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UNIFIED_SEARCH_PHOTOS, parsed.data)
+    const result = validatePayload(UnifiedSearchPhotosResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid searchUnifiedPhotos response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async searchUnifiedDocuments(
+    request: UnifiedSearchDocumentsRequest
+  ): Promise<UnifiedSearchDocumentsResponse> {
+    const parsed = validatePayload(UnifiedSearchDocumentsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid searchUnifiedDocuments request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UNIFIED_SEARCH_DOCUMENTS, parsed.data)
+    const result = validatePayload(UnifiedSearchDocumentsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid searchUnifiedDocuments response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelUnifiedSearch(
+    request: UnifiedSearchCancelRequest
+  ): Promise<UnifiedSearchCancelResponse> {
+    const parsed = validatePayload(UnifiedSearchCancelRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelUnifiedSearch request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UNIFIED_SEARCH_CANCEL, parsed.data)
+    const result = validatePayload(UnifiedSearchCancelResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelUnifiedSearch response from main: ${result.error}`)
     }
     return result.data
   }

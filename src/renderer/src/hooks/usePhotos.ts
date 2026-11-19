@@ -19,6 +19,7 @@ import type {
   PhotosSearchBarResultMeta,
   PhotosSearchModelStatus
 } from '../components/PhotosSearchBar'
+import { allocateSearchOwnerGen } from './search-owner'
 
 export const PHOTO_BOUNDS = {
   PAGE_SIZE: 50,
@@ -201,6 +202,7 @@ export function usePhotos(): UsePhotosResult {
 
   // Monotonic generation incremented on unmount, refresh, and filter change
   const generationRef = useRef<number>(1)
+  const searchOwnerGenRef = useRef<number | null>(null)
   // Page LRU tracking
   const pageLruRef = useRef<number[]>([])
   // Page photo IDs tracking for pure LRU eviction
@@ -263,7 +265,8 @@ export function usePhotos(): UsePhotosResult {
             includeUnknownDimensions: filters.metadata.includeUnknownDimensions,
             fileTypeBasis: filters.metadata.fileTypeBasis,
             fileTypeValue: filters.metadata.fileTypeValue,
-            onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat
+            onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat,
+            ...(searchOwnerGenRef.current !== null ? { ownerGen: searchOwnerGenRef.current } : {})
           })
 
           // Discard response if generation changed
@@ -423,6 +426,9 @@ export function usePhotos(): UsePhotosResult {
       newMetadata: PhotoMetadataFilterState
     ) => {
       const nextGen = ++generationRef.current
+      if (searchQueryRef.current) {
+        searchOwnerGenRef.current = allocateSearchOwnerGen()
+      }
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
@@ -450,6 +456,12 @@ export function usePhotos(): UsePhotosResult {
       const trimmed = newQuery.trim()
       searchQueryRef.current = trimmed
       setSearchQueryState(trimmed)
+      if (trimmed) {
+        searchOwnerGenRef.current = allocateSearchOwnerGen()
+      } else if (searchOwnerGenRef.current !== null) {
+        void window.api?.cancelPhotosSemanticSearch?.({ ownerGen: searchOwnerGenRef.current })
+        searchOwnerGenRef.current = null
+      }
       const nextGen = ++generationRef.current
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
@@ -478,7 +490,11 @@ export function usePhotos(): UsePhotosResult {
     setSearchQueryState('')
     setSearchResultMeta(null)
     setSearchScores(new Map())
-    void window.api?.cancelPhotosSemanticSearch?.()
+    const cancelOwnerGen = searchOwnerGenRef.current
+    searchOwnerGenRef.current = null
+    void window.api?.cancelPhotosSemanticSearch?.(
+      cancelOwnerGen !== null ? { ownerGen: cancelOwnerGen } : undefined
+    )
     const nextGen = ++generationRef.current
     pageLruRef.current = []
     pagePhotoIdsRef.current.clear()
@@ -568,7 +584,11 @@ export function usePhotos(): UsePhotosResult {
     setSearchQueryState('')
     setSearchResultMeta(null)
     setSearchScores(new Map())
-    void window.api?.cancelPhotosSemanticSearch?.()
+    const cancelOwnerGen = searchOwnerGenRef.current
+    searchOwnerGenRef.current = null
+    void window.api?.cancelPhotosSemanticSearch?.(
+      cancelOwnerGen !== null ? { ownerGen: cancelOwnerGen } : undefined
+    )
     setRatingFilterState('all')
     setFlagFilterState('all')
     setCollectionIdState(null)
@@ -776,6 +796,11 @@ export function usePhotos(): UsePhotosResult {
   useEffect(() => {
     return () => {
       generationRef.current += 1
+      if (searchOwnerGenRef.current !== null) {
+        const cancelOwnerGen = searchOwnerGenRef.current
+        searchOwnerGenRef.current = null
+        void window.api?.cancelPhotosSemanticSearch?.({ ownerGen: cancelOwnerGen })
+      }
     }
   }, [])
 

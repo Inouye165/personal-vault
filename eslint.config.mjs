@@ -8,12 +8,15 @@ export default tseslint.config(
     ignores: [
       'out/**',
       'dist/**',
+      'dist-*/**',
       'build/**',
       'coverage/**',
       'node_modules/**',
       '**/*.tsbuildinfo',
       'spikes/**/node_modules/**',
-      'spikes/**/.model-cache/**'
+      'spikes/**/.model-cache/**',
+      'spikes/**/out/**',
+      'spikes/**/.dist-unpacked/**'
     ]
   },
 
@@ -35,6 +38,7 @@ export default tseslint.config(
       'tests/main/**/*.ts',
       'tests/preload/**/*.ts',
       'tests/shared/**/*.ts',
+      'spikes/**/*.ts',
       '*.config.ts'
     ],
     languageOptions: { globals: globals.node }

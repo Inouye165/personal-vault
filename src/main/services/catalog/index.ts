@@ -27,8 +27,42 @@ export {
   StaleReviewError,
   InvalidPreferredLocationError
 } from './errors'
-export { CURRENT_SCHEMA_VERSION, checkSchemaCompatibility, runMigrations } from './migrations'
-export { DocumentRepository } from './document-repository'
+export {
+  CURRENT_SCHEMA_VERSION,
+  MIGRATIONS,
+  checkSchemaCompatibility,
+  runMigrations
+} from './migrations'
+export { AnnotationJournal } from '../annotations/journal'
+export {
+  DocumentClassificationRepository,
+  type DocClassificationCoverage,
+  type DocClassificationJobRecord,
+  type DocClassificationOverrideRecord,
+  type EffectiveDocumentClassification
+} from './document-classification-repository'
+export { DocumentRepository, buildDocumentContentRevision } from './document-repository'
+export {
+  DocumentOcrRepository,
+  type DocumentOcrCandidate,
+  type DocumentOcrCoverage,
+  type DocumentOcrJobItemRecord,
+  type DocumentOcrJobItemStatus,
+  type DocumentOcrJobRecord,
+  type DocumentOcrJobStatus,
+  type DocumentOcrPreviewPayload,
+  type DocumentOcrPreviewStatus,
+  type DocumentOcrStateItem,
+  type DocumentOcrStatus,
+  type ReusableDocumentOcrRecord
+} from './document-ocr-repository'
+export {
+  DEFAULT_OCR_COMPATIBILITY_SPEC,
+  doesDocumentRowRequireOcr,
+  isOcrExtractionRowCompatible,
+  type DocumentOcrJobScopeKind,
+  type OcrCompatibilitySpec
+} from './document-ocr-snapshot-query'
 export {
   normalizePathForLookup,
   isSameOrDescendantPath,

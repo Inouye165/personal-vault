@@ -18,6 +18,21 @@ import {
   APPROVED_DOWNLOAD_HOSTS
 } from './services/semantic'
 import { PhotoMetadataCoordinator } from './services/metadata'
+import { DocumentExtractionCoordinator } from './services/documents'
+import { DocumentClassificationCoordinator } from './services/documents/classification/coordinator'
+import {
+  APPROVED_OCR_DOWNLOAD_HOSTS,
+  DocumentOcrCoordinator,
+  OcrModelManager
+} from './services/documents/ocr'
+import {
+  APPROVED_DOC_SEMANTIC_DOWNLOAD_HOSTS,
+  DocSemanticModelManager,
+  DocumentSearchCoordinator,
+  DocumentSemanticCoordinator
+} from './services/documents/semantic'
+import { UnifiedSearchCoordinator } from './services/unified-search'
+import { AppWorkerBudget } from './services/worker-budget'
 
 function logStartup(message: string): void {
   try {
@@ -57,6 +72,14 @@ let semanticModelManager: SemanticModelManager | null = null
 let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
 let semanticSearchCoordinator: SemanticSearchCoordinator | null = null
 let photoMetadataCoordinator: PhotoMetadataCoordinator | null = null
+let documentExtractionCoordinator: DocumentExtractionCoordinator | null = null
+let ocrModelManager: OcrModelManager | null = null
+let documentOcrCoordinator: DocumentOcrCoordinator | null = null
+let docSemanticModelManager: DocSemanticModelManager | null = null
+let docSemanticCoordinator: DocumentSemanticCoordinator | null = null
+let docSearchCoordinator: DocumentSearchCoordinator | null = null
+let unifiedSearchCoordinator: UnifiedSearchCoordinator | null = null
+let documentClassificationCoordinator: DocumentClassificationCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -175,11 +198,41 @@ if (!app.requestSingleInstanceLock()) {
       await vaultCoordinator.initialize()
       logStartup('vaultCoordinator.initialize completed')
 
+      const appWorkerBudget = new AppWorkerBudget(3)
+      let releasingExternalIdle = false
+      const tryReleaseExternalIdleWorker = async (
+        exclude?: 'semantic-search' | 'doc-search'
+      ): Promise<boolean> => {
+        if (releasingExternalIdle) return false
+        releasingExternalIdle = true
+        try {
+          if ((await thumbnailCoordinator?.releaseOneIdleWorker()) ?? false) {
+            return true
+          }
+          if (
+            exclude !== 'semantic-search' &&
+            ((await semanticSearchCoordinator?.releaseIdleWorker()) ?? false)
+          ) {
+            return true
+          }
+          if (
+            exclude !== 'doc-search' &&
+            ((await docSearchCoordinator?.releaseIdleWorker()) ?? false)
+          ) {
+            return true
+          }
+          return false
+        } finally {
+          releasingExternalIdle = false
+        }
+      }
       const cacheDir = join(app.getPath('userData'), 'thumbnails')
       thumbnailCoordinator = new ThumbnailCoordinator({
         cacheDir,
         approvedRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
-        vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
+        vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null),
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget
       })
       await thumbnailCoordinator.initialize()
       logStartup('thumbnailCoordinator initialized')
@@ -231,9 +284,109 @@ if (!app.requestSingleInstanceLock()) {
 
       semanticSearchCoordinator = new SemanticSearchCoordinator({
         catalog,
-        modelManager: semanticModelManager
+        modelManager: semanticModelManager,
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget,
+        tryReleaseExternalIdleWorker: () => tryReleaseExternalIdleWorker('semantic-search')
       })
       logStartup('semanticSearchCoordinator initialized')
+
+      documentExtractionCoordinator = new DocumentExtractionCoordinator({
+        catalog,
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget,
+        tryReleaseExternalIdleWorker: () => tryReleaseExternalIdleWorker()
+      })
+      documentExtractionCoordinator.initialize()
+      logStartup('documentExtractionCoordinator initialized')
+
+      const ocrModelsRootDir = join(app.getPath('userData'), 'models', 'ocr')
+      const customOcrDownloadBaseUrl = process.env.PV_TEST_OCR_MODEL_BASE_URL
+      const allowOcrLoopbackForTests =
+        customOcrDownloadBaseUrl &&
+        /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(customOcrDownloadBaseUrl)
+          ? true
+          : false
+      const ocrAllowedHosts = allowOcrLoopbackForTests
+        ? [...APPROVED_OCR_DOWNLOAD_HOSTS, '127.0.0.1', 'localhost']
+        : APPROVED_OCR_DOWNLOAD_HOSTS
+
+      ocrModelManager = new OcrModelManager({
+        modelsRootDir: ocrModelsRootDir,
+        getApprovedRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
+        getVaultRoot: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null),
+        baseDownloadUrl: customOcrDownloadBaseUrl,
+        allowedHosts: ocrAllowedHosts,
+        allowLoopbackHttpForTests: allowOcrLoopbackForTests
+      })
+      await ocrModelManager.initialize()
+      logStartup('ocrModelManager initialized')
+
+      documentOcrCoordinator = new DocumentOcrCoordinator({
+        catalog,
+        modelManager: ocrModelManager,
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget,
+        tryReleaseExternalIdleWorker: () => tryReleaseExternalIdleWorker(),
+        appPath: app.getAppPath(),
+        isPackaged: app.isPackaged
+      })
+      documentOcrCoordinator.initialize()
+      logStartup('documentOcrCoordinator initialized')
+
+      const docSemanticModelsRootDir = join(app.getPath('userData'), 'models', 'doc-semantic')
+      docSemanticModelManager = new DocSemanticModelManager({
+        modelsRootDir: docSemanticModelsRootDir,
+        getApprovedRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
+        getVaultRoot: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null),
+        baseDownloadUrl: process.env.PV_TEST_DOC_MODEL_BASE_URL || undefined,
+        allowedHosts: process.env.PV_TEST_DOC_MODEL_BASE_URL
+          ? ['127.0.0.1', 'localhost', ...APPROVED_DOC_SEMANTIC_DOWNLOAD_HOSTS]
+          : undefined,
+        allowLoopbackHttpForTests: Boolean(process.env.PV_TEST_DOC_MODEL_BASE_URL)
+      })
+      await docSemanticModelManager.initialize()
+      logStartup('docSemanticModelManager initialized')
+
+      docSemanticCoordinator = new DocumentSemanticCoordinator({
+        catalog,
+        modelManager: docSemanticModelManager,
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget,
+        tryReleaseExternalIdleWorker: () => tryReleaseExternalIdleWorker(),
+        appPath: app.getAppPath(),
+        isPackaged: app.isPackaged
+      })
+      docSemanticCoordinator.initialize()
+      logStartup('docSemanticCoordinator initialized')
+
+      docSearchCoordinator = new DocumentSearchCoordinator({
+        catalog,
+        modelManager: docSemanticModelManager,
+        indexCoordinator: docSemanticCoordinator,
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget,
+        tryReleaseExternalIdleWorker: () => tryReleaseExternalIdleWorker('doc-search'),
+        appPath: app.getAppPath(),
+        isPackaged: app.isPackaged
+      })
+      logStartup('docSearchCoordinator initialized')
+
+      unifiedSearchCoordinator = new UnifiedSearchCoordinator({
+        semanticSearchCoordinator,
+        docSearchCoordinator
+      })
+      logStartup('unifiedSearchCoordinator initialized')
+
+      documentClassificationCoordinator = new DocumentClassificationCoordinator({
+        catalog,
+        maxAppLiveWorkers: 3,
+        workerBudget: appWorkerBudget,
+        tryReleaseExternalIdleWorker: () => tryReleaseExternalIdleWorker(),
+        appPath: app.getAppPath(),
+        isPackaged: app.isPackaged
+      })
+      logStartup('documentClassificationCoordinator initialized')
 
       registerIpcHandlers({
         validateSender: createSenderValidator({
@@ -249,6 +402,14 @@ if (!app.requestSingleInstanceLock()) {
         semanticIndexCoordinator,
         semanticSearchCoordinator,
         photoMetadataCoordinator,
+        documentExtractionCoordinator,
+        ocrModelManager,
+        documentOcrCoordinator,
+        docSemanticModelManager,
+        docSemanticCoordinator,
+        docSearchCoordinator,
+        unifiedSearchCoordinator,
+        documentClassificationCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -295,6 +456,11 @@ if (!app.requestSingleInstanceLock()) {
             await semanticIndexCoordinator.shutdown()
             logStartup('semantic index coordinator shutdown done')
           }
+          if (unifiedSearchCoordinator) {
+            logStartup('shutting down unified search coordinator')
+            await unifiedSearchCoordinator.shutdown()
+            logStartup('unified search coordinator shutdown done')
+          }
           if (semanticSearchCoordinator) {
             logStartup('shutting down semantic search coordinator')
             await semanticSearchCoordinator.shutdown()
@@ -309,6 +475,36 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down thumbnail coordinator')
             await thumbnailCoordinator.shutdown()
             logStartup('thumbnail coordinator shutdown done')
+          }
+          if (documentExtractionCoordinator) {
+            logStartup('shutting down document extraction coordinator')
+            await documentExtractionCoordinator.shutdown()
+            logStartup('document extraction coordinator shutdown done')
+          }
+          if (documentOcrCoordinator) {
+            logStartup('shutting down document OCR coordinator')
+            await documentOcrCoordinator.shutdown()
+            logStartup('document OCR coordinator shutdown done')
+          }
+          if (ocrModelManager) {
+            logStartup('shutting down OCR model manager')
+            await ocrModelManager.shutdown()
+            logStartup('OCR model manager shutdown done')
+          }
+          if (docSearchCoordinator) {
+            logStartup('shutting down doc search coordinator')
+            await docSearchCoordinator.shutdown()
+            logStartup('doc search coordinator shutdown done')
+          }
+          if (docSemanticCoordinator) {
+            logStartup('shutting down doc semantic coordinator')
+            await docSemanticCoordinator.shutdown()
+            logStartup('doc semantic coordinator shutdown done')
+          }
+          if (documentClassificationCoordinator) {
+            logStartup('shutting down document classification coordinator')
+            await documentClassificationCoordinator.shutdown()
+            logStartup('document classification coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

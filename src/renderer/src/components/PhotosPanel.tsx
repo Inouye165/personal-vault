@@ -46,6 +46,7 @@ import { SimilarityReviewPanel } from './SimilarityReviewPanel'
 import { SemanticIndexPanel } from './SemanticIndexPanel'
 import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import { PhotosSearchBar } from './PhotosSearchBar'
+import { PhotoSelectedOcrSection } from './PhotoSelectedOcrSection'
 import type {
   PhotoItem,
   PhotoTechnicalMetadataDetail,
@@ -1540,6 +1541,11 @@ export function PhotosPanel() {
                   <dd>Discovery Observation #{selectedPhoto.discoveryObservationId}</dd>
                 </dl>
               </div>
+
+              <PhotoSelectedOcrSection
+                fileLocationId={selectedPhoto.id}
+                extension={selectedPhoto.extension}
+              />
             </div>
           </aside>
         </>

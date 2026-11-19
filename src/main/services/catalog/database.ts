@@ -16,6 +16,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { checkSchemaCompatibility, runMigrations } from './migrations'
 import { normalizePathForLookup } from './path-normalization'
 import { DocumentRepository } from './document-repository'
+import { DocumentOcrRepository } from './document-ocr-repository'
+import { DocumentSemanticRepository } from './document-semantic-repository'
+import { DocumentClassificationRepository } from './document-classification-repository'
 import type {
   DocumentDetailItem,
   GetDocumentExtensionFacetsRequest,
@@ -390,8 +393,14 @@ export class CatalogDatabase {
   private journal?: AnnotationJournal
   public readonly catalogPath: string
   private closed = false
+  private documentOcrMutationSeq = 0
   private readonly semanticSearchRepository: SemanticSearchRepository
   private readonly documentRepository: DocumentRepository
+  private readonly documentOcrRepository: DocumentOcrRepository
+  private readonly documentSemanticRepository: DocumentSemanticRepository
+  private documentSemanticMutationSeq = 0
+  private readonly documentClassificationRepository: DocumentClassificationRepository
+  private documentClassificationMutationSeq = 0
 
   private constructor(
     db: DatabaseSync,
@@ -406,8 +415,77 @@ export class CatalogDatabase {
       getFileLocationById: (id) => this.getFileLocationById(id)
     })
     this.documentRepository = new DocumentRepository({
-      getDb: () => this.getRawDb()
+      getDb: () => this.getRawDb(),
+      getCatalogPath: () => this.catalogPath,
+      onOcrRelevantMutation: () => {
+        this.bumpDocumentOcrMutationSeq()
+        this.bumpDocumentSemanticMutationSeq()
+        this.bumpDocumentClassificationMutationSeq()
+      }
     })
+    this.documentOcrRepository = new DocumentOcrRepository({
+      getDb: () => this.getRawDb(),
+      getCatalogPath: () => this.catalogPath,
+      onOcrRelevantMutation: () => {
+        this.bumpDocumentOcrMutationSeq()
+        this.bumpDocumentSemanticMutationSeq()
+        this.bumpDocumentClassificationMutationSeq()
+      }
+    })
+    this.documentSemanticRepository = new DocumentSemanticRepository(this.db, this.catalogPath)
+    this.documentClassificationRepository = new DocumentClassificationRepository({
+      getDb: () => this.getRawDb(),
+      getCatalogPath: () => this.catalogPath,
+      getJournal: () => this.journal,
+      onClassificationMutation: () => {
+        this.bumpDocumentClassificationMutationSeq()
+      }
+    })
+  }
+
+  public bumpDocumentClassificationMutationSeq(): number {
+    this.documentClassificationMutationSeq += 1
+    return this.documentClassificationMutationSeq
+  }
+
+  public getDocumentClassificationCoverageGeneration(): string {
+    this.assertOpen()
+    const row = this.db.prepare('PRAGMA data_version;').get() as unknown as
+      { data_version?: number } | undefined
+    return `${this.documentClassificationMutationSeq}:${Number(row?.data_version ?? 0)}`
+  }
+
+  public getDocumentClassificationRepository(): DocumentClassificationRepository {
+    this.assertOpen()
+    return this.documentClassificationRepository
+  }
+
+  public bumpDocumentSemanticMutationSeq(): number {
+    this.documentSemanticMutationSeq += 1
+    return this.documentSemanticMutationSeq
+  }
+
+  public getDocumentSemanticCoverageGeneration(): string {
+    this.assertOpen()
+    const row = this.db.prepare('PRAGMA data_version;').get() as unknown as
+      { data_version?: number } | undefined
+    return `${this.documentSemanticMutationSeq}:${Number(row?.data_version ?? 0)}`
+  }
+
+  public bumpDocumentOcrMutationSeq(): number {
+    this.documentOcrMutationSeq += 1
+    return this.documentOcrMutationSeq
+  }
+
+  public getDocumentOcrMutationSeq(): number {
+    return this.documentOcrMutationSeq
+  }
+
+  public getDocumentOcrCoverageGeneration(): string {
+    this.assertOpen()
+    const row = this.db.prepare('PRAGMA data_version;').get() as unknown as
+      { data_version?: number } | undefined
+    return `${this.documentOcrMutationSeq}:${Number(row?.data_version ?? 0)}`
   }
 
   public getCatalogPath(): string {
@@ -419,12 +497,33 @@ export class CatalogDatabase {
     return this.db
   }
 
-  public getDocumentsPage(input: GetDocumentsPageRequest): GetDocumentsPageResponse {
-    return this.documentRepository.getDocumentsPage(input)
+  public getDocumentRepository(): DocumentRepository {
+    this.assertOpen()
+    return this.documentRepository
   }
 
-  public getDocumentDetail(fileLocationId: number): DocumentDetailItem | null {
-    return this.documentRepository.getDocumentDetail(fileLocationId)
+  public getDocumentOcrRepository(): DocumentOcrRepository {
+    this.assertOpen()
+    return this.documentOcrRepository
+  }
+
+  public getDocumentSemanticRepository(): DocumentSemanticRepository {
+    this.assertOpen()
+    return this.documentSemanticRepository
+  }
+
+  public getDocumentsPage(
+    input: GetDocumentsPageRequest,
+    options?: { processingFileLocationIds?: ReadonlySet<number> }
+  ): GetDocumentsPageResponse {
+    return this.documentRepository.getDocumentsPage(input, options)
+  }
+
+  public getDocumentDetail(
+    fileLocationId: number,
+    options?: { processingFileLocationIds?: ReadonlySet<number> }
+  ): DocumentDetailItem | null {
+    return this.documentRepository.getDocumentDetail(fileLocationId, options)
   }
 
   public getDocumentExtensionFacets(
@@ -460,6 +559,7 @@ export class CatalogDatabase {
 
       if (!options.readOnly) {
         runMigrations(rawDb)
+        ensureDocumentExtractionJobsColumns(rawDb)
       }
 
       const instance = new CatalogDatabase(rawDb, options.journal, options.catalogPath)
@@ -789,6 +889,7 @@ export class CatalogDatabase {
               )
               .run(existingFile.id)
             this.reconcilePhotoAnnotations(existingFile.id)
+            this.documentClassificationRepository.reconcileForLocationInActiveTx(existingFile.id)
             updatedCount++
           } else {
             updateObsLastSeenStmt.run(candidate.discoveredAtMs, currentObs.id)
@@ -799,6 +900,11 @@ export class CatalogDatabase {
       }
 
       this.db.exec('COMMIT;')
+      if (insertedCount > 0 || updatedCount > 0 || invalidatedHashCount > 0) {
+        this.bumpDocumentOcrMutationSeq()
+        this.bumpDocumentSemanticMutationSeq()
+        this.bumpDocumentClassificationMutationSeq()
+      }
       return {
         insertedCount,
         updatedCount,
@@ -853,6 +959,7 @@ export class CatalogDatabase {
     }
 
     const results: HashObservationRecord[] = []
+    let mutated = false
     this.db.exec('BEGIN TRANSACTION;')
     try {
       const selectFileAndObsStmt = this.db.prepare(`
@@ -932,6 +1039,7 @@ export class CatalogDatabase {
         if (existingHash) {
           invalidateExistingStmt.run(fileAndObs.discovery_observation_id)
         }
+        mutated = true
 
         const row = insertHashStmt.get(
           fileAndObs.file_id,
@@ -954,9 +1062,15 @@ export class CatalogDatabase {
           )
           .run(fileAndObs.file_id, normalizedSha256)
         this.reconcilePhotoAnnotations(fileAndObs.file_id)
+        this.documentClassificationRepository.reconcileForLocationInActiveTx(fileAndObs.file_id)
       }
 
       this.db.exec('COMMIT;')
+      if (mutated) {
+        this.bumpDocumentOcrMutationSeq()
+        this.bumpDocumentSemanticMutationSeq()
+        this.bumpDocumentClassificationMutationSeq()
+      }
       return results
     } catch (error) {
       try {
@@ -6620,4 +6734,23 @@ export function normalizeCollectionName(name: string): string {
     throw new RangeError('Collection name must not contain control characters')
   }
   return trimmed.toLowerCase()
+}
+
+function ensureDocumentExtractionJobsColumns(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(document_extraction_jobs)').all() as Array<{
+    name?: unknown
+  }>
+  if (columns.length === 0) {
+    return
+  }
+  if (!columns.some((col) => col.name === 'force_reextract')) {
+    db.exec(
+      'ALTER TABLE document_extraction_jobs ADD COLUMN force_reextract INTEGER NOT NULL DEFAULT 0 CHECK (force_reextract IN (0, 1))'
+    )
+  }
+  if (!columns.some((col) => col.name === 'snapshot_complete')) {
+    db.exec(
+      'ALTER TABLE document_extraction_jobs ADD COLUMN snapshot_complete INTEGER NOT NULL DEFAULT 1 CHECK (snapshot_complete IN (0, 1))'
+    )
+  }
 }
