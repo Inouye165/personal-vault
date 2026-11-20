@@ -157,8 +157,10 @@ import type {
   DocumentSemanticCoordinator
 } from '../services/documents/semantic'
 import { UnifiedSearchCoordinator } from '../services/unified-search'
+import type { ExportCoordinator } from '../services/export/coordinator'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 import { registerDocumentIpcHandlers } from './document-handlers'
+import { registerExportIpcHandlers } from './export-handlers'
 
 export interface IpcHandlerOptions {
   readonly validateSender: SenderValidator
@@ -179,12 +181,17 @@ export interface IpcHandlerOptions {
   readonly docSearchCoordinator?: DocumentSearchCoordinator
   readonly unifiedSearchCoordinator?: UnifiedSearchCoordinator
   readonly documentClassificationCoordinator?: DocumentClassificationCoordinator
+  readonly exportCoordinator?: ExportCoordinator
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDocSemanticModelDirectory?: () => Promise<string | null>
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectVaultDirectory?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
   readonly selectDirectory?: () => Promise<string | null>
   readonly selectOcrModelDirectory?: () => Promise<string | null>
+  readonly selectExportDestinationDirectory?: () => Promise<{
+    canceled: boolean
+    directoryPath: string | null
+  }>
 }
 
 export function registerIpcHandlers({
@@ -206,12 +213,14 @@ export function registerIpcHandlers({
   docSearchCoordinator,
   unifiedSearchCoordinator,
   documentClassificationCoordinator,
+  exportCoordinator,
   getMainWindow,
   selectDirectories,
   selectDocSemanticModelDirectory,
   selectVaultDirectory,
   selectDirectory,
-  selectOcrModelDirectory
+  selectOcrModelDirectory,
+  selectExportDestinationDirectory
 }: IpcHandlerOptions): void {
   const resolvedUnifiedSearchCoordinator =
     unifiedSearchCoordinator ??
@@ -1651,5 +1660,12 @@ export function registerIpcHandlers({
     getMainWindow,
     selectOcrModelDirectory,
     selectDocSemanticModelDirectory
+  })
+
+  registerExportIpcHandlers({
+    handle,
+    exportCoordinator,
+    getMainWindow,
+    selectDestinationDirectory: selectExportDestinationDirectory
   })
 }

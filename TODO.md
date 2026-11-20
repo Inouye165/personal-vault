@@ -291,11 +291,11 @@ Status: **Complete (Substages 7A–7F independently accepted; Stage 7 closed in 
 
 ---
 
-## Stage 8: Export, Recovery, Release Validation, Beta, and Public Release (In progress — 8A Slice 1 checkpointed at `a03504c`, Slice 2 awaiting review)
+## Stage 8: Export, Recovery, Release Validation, Beta, and Public Release (In progress — 8A Complete, 8B–8E Planned)
 
-Status: **In progress** (Stage 8A Slice 1 checkpointed at `a03504c`; Slice 2 implemented and awaiting independent review; Stage 8B–8E future planning).
+Status: **In progress** (Stage 8A Complete: Slice 1 checkpointed at `a03504c`; Slice 2 checkpointed at `36f1444`; Slice 3 independently ACCEPTED, closing Stage 8A; Stage 8B–8E future planning).
 
-- [ ] **8A**: Selective export bundles with preserved metadata sidecars (Slice 1 export core & schemas **Complete — accepted & checkpointed at `a03504c`**, retaining non-blocking orphaned-sidecar observation in `inspectExportBundleStatus` for follow-up; Slice 2 Migration 16 & `ExportRepository` **Implemented — awaiting independent review**; IPC/preload/UI remaining).
+- [x] **8A**: Selective export bundles with preserved metadata sidecars (Slice 1 export core & schemas **Complete — accepted & checkpointed at `a03504c`**; Slice 2 Migration 16 & `ExportRepository` **Complete — accepted & checkpointed at `36f1444`**; Slice 3 Electron `ExportCoordinator`, IPC, preload & `ExportPanel` **Complete — independently ACCEPTED**, verified with 49/49 focused tests, 1,530/1,530 full-suite tests, `typecheck`/`lint`/`format:check`, `build:unpack`, `smoke:built` & `smoke:unpacked` passing; live unpacked native picker verified Cancel and confirmation of the default `Downloads` folder, with navigation to a different folder remaining unverified).
 - [ ] **8B**: Backup, restore, and catalog recovery from vault manifests.
 - [ ] **8C**: Release scope, security, performance, cross-platform installers, and documentation.
 - [ ] **8D**: Beta testing, defect resolution, and release candidate acceptance.

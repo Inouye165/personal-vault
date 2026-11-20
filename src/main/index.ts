@@ -32,6 +32,7 @@ import {
   DocumentSemanticCoordinator
 } from './services/documents/semantic'
 import { UnifiedSearchCoordinator } from './services/unified-search'
+import { ExportCoordinator } from './services/export'
 import { AppWorkerBudget } from './services/worker-budget'
 
 function logStartup(message: string): void {
@@ -80,6 +81,7 @@ let docSemanticCoordinator: DocumentSemanticCoordinator | null = null
 let docSearchCoordinator: DocumentSearchCoordinator | null = null
 let unifiedSearchCoordinator: UnifiedSearchCoordinator | null = null
 let documentClassificationCoordinator: DocumentClassificationCoordinator | null = null
+let exportCoordinator: ExportCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -388,6 +390,14 @@ if (!app.requestSingleInstanceLock()) {
       })
       logStartup('documentClassificationCoordinator initialized')
 
+      exportCoordinator = new ExportCoordinator({
+        catalog,
+        userDataDir: app.getPath('userData'),
+        appVersion: app.getVersion()
+      })
+      const recoveredExportJobs = exportCoordinator.initialize()
+      logStartup(`exportCoordinator initialized (recovered=${recoveredExportJobs})`)
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -410,6 +420,7 @@ if (!app.requestSingleInstanceLock()) {
         docSearchCoordinator,
         unifiedSearchCoordinator,
         documentClassificationCoordinator,
+        exportCoordinator,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -505,6 +516,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down document classification coordinator')
             await documentClassificationCoordinator.shutdown()
             logStartup('document classification coordinator shutdown done')
+          }
+          if (exportCoordinator) {
+            logStartup('shutting down export coordinator')
+            await exportCoordinator.shutdown()
+            logStartup('export coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

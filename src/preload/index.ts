@@ -1,6 +1,29 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../shared/contracts/channels.js'
 import {
+  ExportCancelRequestSchema,
+  ExportCancelResponseSchema,
+  ExportGetJobItemsRequestSchema,
+  ExportGetJobRequestSchema,
+  ExportJobItemsResponseSchema,
+  ExportJobListResponseSchema,
+  ExportJobRecordSchema,
+  ExportListJobsRequestSchema,
+  ExportProgressEventSchema,
+  ExportSelectDestinationResponseSchema,
+  ExportStartRequestSchema,
+  ExportVerifyJobRequestSchema,
+  type ExportCancelResponse,
+  type ExportGetJobItemsRequest,
+  type ExportJobItemsResponse,
+  type ExportJobListResponse,
+  type ExportJobRecordDto,
+  type ExportListJobsRequest,
+  type ExportProgressEvent,
+  type ExportSelectDestinationResponse,
+  type ExportStartRequest
+} from '../shared/validation/export-schemas.js'
+import {
   AppInfoSchema,
   NavigationTabSchema,
   TabAckSchema,
@@ -1691,6 +1714,118 @@ const api: VaultApi = {
       throw new Error(`Invalid cancelUnifiedSearch response from main: ${result.error}`)
     }
     return result.data
+  },
+
+  async selectExportDestination(): Promise<ExportSelectDestinationResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SELECT_DESTINATION)
+    const result = validatePayload(ExportSelectDestinationResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid selectExportDestination response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startExport(request: ExportStartRequest): Promise<ExportJobRecordDto> {
+    const parsed = validatePayload(ExportStartRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid startExport request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_START, parsed.data)
+    const result = validatePayload(ExportJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startExport response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelExport(jobId: string): Promise<ExportCancelResponse> {
+    const parsed = validatePayload(ExportCancelRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelExport request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_CANCEL, parsed.data)
+    const result = validatePayload(ExportCancelResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelExport response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getActiveExportJob(): Promise<ExportJobRecordDto | null> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_GET_ACTIVE)
+    if (raw === null) return null
+    const result = validatePayload(ExportJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getActiveExportJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listExportJobs(request?: ExportListJobsRequest): Promise<ExportJobListResponse> {
+    const parsed = validatePayload(ExportListJobsRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid listExportJobs request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_LIST_JOBS, parsed.data)
+    const result = validatePayload(ExportJobListResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listExportJobs response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getExportJob(jobId: string): Promise<ExportJobRecordDto | null> {
+    const parsed = validatePayload(ExportGetJobRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid getExportJob request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_GET_JOB, parsed.data)
+    if (raw === null) return null
+    const result = validatePayload(ExportJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getExportJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getExportJobItems(request: ExportGetJobItemsRequest): Promise<ExportJobItemsResponse> {
+    const parsed = validatePayload(ExportGetJobItemsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getExportJobItems request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_GET_JOB_ITEMS, parsed.data)
+    const result = validatePayload(ExportJobItemsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getExportJobItems response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async verifyExportJob(jobId: string): Promise<ExportJobRecordDto | null> {
+    const parsed = validatePayload(ExportVerifyJobRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid verifyExportJob request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.EXPORT_VERIFY_JOB, parsed.data)
+    if (raw === null) return null
+    const result = validatePayload(ExportJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid verifyExportJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onExportProgress(listener: (event: ExportProgressEvent) => void): () => void {
+    const wrapped = (_event: Electron.IpcRendererEvent, raw: unknown): void => {
+      const result = validatePayload(ExportProgressEventSchema, raw)
+      if (result.success) {
+        listener(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.EXPORT_PROGRESS_EVENT, wrapped)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.EXPORT_PROGRESS_EVENT, wrapped)
+    }
   }
 }
 

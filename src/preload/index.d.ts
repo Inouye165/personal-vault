@@ -1,4 +1,15 @@
 import type {
+  ExportCancelResponse,
+  ExportGetJobItemsRequest,
+  ExportJobItemsResponse,
+  ExportJobListResponse,
+  ExportJobRecordDto,
+  ExportListJobsRequest,
+  ExportProgressEvent,
+  ExportSelectDestinationResponse,
+  ExportStartRequest
+} from '../shared/validation/export-schemas.js'
+import type {
   AppInfo,
   NavigationTab,
   VaultStatus,
@@ -290,6 +301,15 @@ export interface VaultApi {
     request: UnifiedSearchDocumentsRequest
   ) => Promise<UnifiedSearchDocumentsResponse>
   cancelUnifiedSearch: (request: UnifiedSearchCancelRequest) => Promise<UnifiedSearchCancelResponse>
+  selectExportDestination: () => Promise<ExportSelectDestinationResponse>
+  startExport: (request: ExportStartRequest) => Promise<ExportJobRecordDto>
+  cancelExport: (jobId: string) => Promise<ExportCancelResponse>
+  getActiveExportJob: () => Promise<ExportJobRecordDto | null>
+  listExportJobs: (request?: ExportListJobsRequest) => Promise<ExportJobListResponse>
+  getExportJob: (jobId: string) => Promise<ExportJobRecordDto | null>
+  getExportJobItems: (request: ExportGetJobItemsRequest) => Promise<ExportJobItemsResponse>
+  verifyExportJob: (jobId: string) => Promise<ExportJobRecordDto | null>
+  onExportProgress: (listener: (event: ExportProgressEvent) => void) => () => void
 }
 
 declare global {

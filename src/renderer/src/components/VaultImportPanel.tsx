@@ -21,6 +21,7 @@ import type {
   VaultImportProgress,
   VaultRecord
 } from '../../../shared/validation/ipc-schemas'
+import { ExportPanel } from './ExportPanel'
 
 const CANDIDATES_PER_PAGE = 100
 
@@ -663,6 +664,8 @@ export function VaultImportPanel() {
           )}
         </div>
       )}
+
+      <ExportPanel selectedLocationIds={Array.from(selectedLocationIds)} />
     </div>
   )
 }

@@ -117,7 +117,16 @@ export const IPC_CHANNELS = {
   DOCUMENTS_GET_CLASSIFICATION_FACETS: 'documents:get-classification-facets',
   UNIFIED_SEARCH_PHOTOS: 'unified:search-photos',
   UNIFIED_SEARCH_DOCUMENTS: 'unified:search-documents',
-  UNIFIED_SEARCH_CANCEL: 'unified:search-cancel'
+  UNIFIED_SEARCH_CANCEL: 'unified:search-cancel',
+  EXPORT_SELECT_DESTINATION: 'export:select-destination',
+  EXPORT_START: 'export:start',
+  EXPORT_CANCEL: 'export:cancel',
+  EXPORT_GET_ACTIVE: 'export:get-active',
+  EXPORT_LIST_JOBS: 'export:list-jobs',
+  EXPORT_GET_JOB: 'export:get-job',
+  EXPORT_GET_JOB_ITEMS: 'export:get-job-items',
+  EXPORT_VERIFY_JOB: 'export:verify-job',
+  EXPORT_PROGRESS_EVENT: 'export:progress-event'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

@@ -711,63 +711,83 @@ export class ExportRepository {
       })
       return { result, job }
     } catch (err) {
-      const failedAtMs = Date.now()
-      const inspectBundle = options?.inspectBundle ?? this.defaultInspectBundle
-      const inspection = inspectBundle(bundleDir)
-      const reasonsJson = inspection.reasons.length > 0 ? JSON.stringify(inspection.reasons) : null
       const message = err instanceof Error ? err.message : 'Export failed unexpectedly'
-
-      const db = this.getDb()
-      runInImmediateTx(db, () => {
-        const current = db
-          .prepare('SELECT status FROM export_jobs WHERE id = ?;')
-          .get(params.exportJobId) as { status: ExportJobStatus } | undefined
-        if (!current || current.status !== 'running') {
-          return
-        }
-
-        db.prepare(
-          `
-          UPDATE export_job_items
-          SET status = 'failed',
-              error_message = ?,
-              updated_at_ms = ?
-          WHERE job_id = ? AND status = 'pending';
-        `
-        ).run(message, failedAtMs, params.exportJobId)
-
-        const counts = recomputeCountsForJob(db, params.exportJobId)
-
-        db.prepare(
-          `
-          UPDATE export_jobs
-          SET status = 'failed',
-              manifest_published = 0,
-              bundle_verified = 0,
-              exported_items = ?,
-              failed_items = ?,
-              cancelled_items = ?,
-              vault_integrity_warnings = ?,
-              incomplete_reasons_json = ?,
-              error_message = ?,
-              updated_at_ms = ?,
-              completed_at_ms = ?
-          WHERE id = ?;
-        `
-        ).run(
-          counts.exportedItems,
-          counts.failedItems,
-          counts.cancelledItems,
-          counts.vaultIntegrityWarnings,
-          reasonsJson,
-          message,
-          failedAtMs,
-          failedAtMs,
-          params.exportJobId
-        )
+      this.failRunningExportJob({
+        jobId: params.exportJobId,
+        bundleDir,
+        errorMessage: message,
+        inspectBundle: options?.inspectBundle
       })
       throw err
     }
+  }
+
+  /**
+   * Transitions a still-`running` export job to `failed`, marks `pending` items `failed`,
+   * preserves any already-recorded item outcomes, and recomputes job counters atomically.
+   * No-ops if the job is missing or already in a terminal state.
+   */
+  public failRunningExportJob(input: {
+    readonly jobId: string
+    readonly bundleDir: string
+    readonly errorMessage: string
+    readonly failedAtMs?: number
+    readonly inspectBundle?: (bundleDir: string) => ExportBundleInspectionResult
+  }): void {
+    const failedAtMs = input.failedAtMs ?? Date.now()
+    const inspectBundle = input.inspectBundle ?? this.defaultInspectBundle
+    const inspection = inspectBundle(input.bundleDir)
+    const reasonsJson = inspection.reasons.length > 0 ? JSON.stringify(inspection.reasons) : null
+
+    const db = this.getDb()
+    runInImmediateTx(db, () => {
+      const current = db
+        .prepare('SELECT status FROM export_jobs WHERE id = ?;')
+        .get(input.jobId) as { status: ExportJobStatus } | undefined
+      if (!current || current.status !== 'running') {
+        return
+      }
+
+      db.prepare(
+        `
+        UPDATE export_job_items
+        SET status = 'failed',
+            error_message = ?,
+            updated_at_ms = ?
+        WHERE job_id = ? AND status = 'pending';
+      `
+      ).run(input.errorMessage, failedAtMs, input.jobId)
+
+      const counts = recomputeCountsForJob(db, input.jobId)
+
+      db.prepare(
+        `
+        UPDATE export_jobs
+        SET status = 'failed',
+            manifest_published = 0,
+            bundle_verified = 0,
+            exported_items = ?,
+            failed_items = ?,
+            cancelled_items = ?,
+            vault_integrity_warnings = ?,
+            incomplete_reasons_json = ?,
+            error_message = ?,
+            updated_at_ms = ?,
+            completed_at_ms = ?
+        WHERE id = ?;
+      `
+      ).run(
+        counts.exportedItems,
+        counts.failedItems,
+        counts.cancelledItems,
+        counts.vaultIntegrityWarnings,
+        reasonsJson,
+        input.errorMessage,
+        failedAtMs,
+        failedAtMs,
+        input.jobId
+      )
+    })
   }
 
   public getExportJob(jobId: string): ExportJobRecord | null {

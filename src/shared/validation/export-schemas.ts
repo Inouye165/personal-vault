@@ -370,3 +370,173 @@ export const ExportCompletionMarkerSchema = z
   .strict()
 
 export type ExportCompletionMarker = z.infer<typeof ExportCompletionMarkerSchema>
+
+// ─── Stage 8A Slice 3: IPC Request & Response Schemas ─────────────────────────
+
+export const ExportJobStatusSchema = z.enum([
+  'running',
+  'completed',
+  'cancelled',
+  'interrupted',
+  'failed'
+])
+
+export const ExportJobItemStatusSchema = z.enum([
+  'pending',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted'
+])
+
+export const ExportBundleIncompleteReasonSchema = z.enum([
+  'bundle_dir_missing',
+  'in_progress_marker_present',
+  'temp_dir_present',
+  'completion_marker_missing',
+  'completion_marker_invalid',
+  'manifest_missing',
+  'manifest_invalid',
+  'manifest_hash_mismatch',
+  'orphaned_file_without_sidecar',
+  'missing_pair_file'
+])
+
+export const ExportSelectDestinationResponseSchema = z
+  .object({
+    canceled: z.boolean(),
+    directoryPath: z.string().min(1).nullable()
+  })
+  .strict()
+export type ExportSelectDestinationResponse = z.infer<typeof ExportSelectDestinationResponseSchema>
+
+export const ExportStartRequestSchema = z
+  .object({
+    parentDir: z.string().min(1),
+    bundleFolderName: SingleSegmentNameSchema,
+    fileLocationIds: z.array(z.number().int().positive()).min(1).max(10_000),
+    privacyOptions: ExportPrivacyOptionsSchema.optional()
+  })
+  .strict()
+export type ExportStartRequest = z.infer<typeof ExportStartRequestSchema>
+
+export const ExportCancelRequestSchema = z
+  .object({
+    jobId: z.string().min(1)
+  })
+  .strict()
+export type ExportCancelRequest = z.infer<typeof ExportCancelRequestSchema>
+
+export const ExportCancelResponseSchema = z
+  .object({
+    cancelled: z.boolean(),
+    jobId: z.string().min(1)
+  })
+  .strict()
+export type ExportCancelResponse = z.infer<typeof ExportCancelResponseSchema>
+
+export const ExportListJobsRequestSchema = z
+  .object({
+    limit: z.number().int().min(1).max(500).optional(),
+    offset: z.number().int().min(0).optional(),
+    status: ExportJobStatusSchema.optional()
+  })
+  .strict()
+export type ExportListJobsRequest = z.infer<typeof ExportListJobsRequestSchema>
+
+export const ExportGetJobRequestSchema = z
+  .object({
+    jobId: z.string().min(1)
+  })
+  .strict()
+export type ExportGetJobRequest = z.infer<typeof ExportGetJobRequestSchema>
+
+export const ExportGetJobItemsRequestSchema = z
+  .object({
+    jobId: z.string().min(1),
+    limit: z.number().int().min(1).max(500).optional(),
+    offset: z.number().int().min(0).optional(),
+    status: ExportJobItemStatusSchema.optional()
+  })
+  .strict()
+export type ExportGetJobItemsRequest = z.infer<typeof ExportGetJobItemsRequestSchema>
+
+export const ExportVerifyJobRequestSchema = z
+  .object({
+    jobId: z.string().min(1)
+  })
+  .strict()
+export type ExportVerifyJobRequest = z.infer<typeof ExportVerifyJobRequestSchema>
+
+export const ExportJobRecordSchema = z
+  .object({
+    id: z.string().min(1),
+    bundleDir: z.string().min(1),
+    bundleFolderName: SingleSegmentNameSchema,
+    status: ExportJobStatusSchema,
+    privacyOptions: ExportPrivacyOptionsSchema,
+    manifestPublished: z.boolean(),
+    bundleVerified: z.boolean(),
+    incompleteReasons: z.array(ExportBundleIncompleteReasonSchema),
+    totalItems: z.number().int().nonnegative(),
+    exportedItems: z.number().int().nonnegative(),
+    failedItems: z.number().int().nonnegative(),
+    cancelledItems: z.number().int().nonnegative(),
+    vaultIntegrityWarnings: z.number().int().nonnegative(),
+    errorCode: ExportErrorCodeSchema.nullable(),
+    errorMessage: z.string().nullable(),
+    startedAtMs: z.number().int().nonnegative(),
+    updatedAtMs: z.number().int().nonnegative(),
+    completedAtMs: z.number().int().nonnegative().nullable()
+  })
+  .strict()
+export type ExportJobRecordDto = z.infer<typeof ExportJobRecordSchema>
+
+export const ExportJobItemRecordSchema = z
+  .object({
+    jobId: z.string().min(1),
+    fileLocationId: z.number().int().positive(),
+    discoveryObservationId: z.number().int().positive(),
+    hashObservationId: z.number().int().positive(),
+    category: z.enum(['photo', 'document']),
+    originalFileName: z.string().min(1),
+    expectedSha256: Sha256HexSchema,
+    expectedByteSize: z.number().int().nonnegative(),
+    status: ExportJobItemStatusSchema,
+    exportedFileName: z.string().min(1).nullable(),
+    sidecarFileName: z.string().min(1).nullable(),
+    byteSourceUsed: ExportByteSourceUsedSchema.nullable(),
+    vaultIntegrityWarning: ExportVaultIntegrityWarningSchema.nullable(),
+    errorCode: ExportErrorCodeSchema.nullable(),
+    errorMessage: z.string().nullable(),
+    updatedAtMs: z.number().int().nonnegative()
+  })
+  .strict()
+export type ExportJobItemRecordDto = z.infer<typeof ExportJobItemRecordSchema>
+
+export const ExportJobListResponseSchema = z
+  .object({
+    items: z.array(ExportJobRecordSchema),
+    total: z.number().int().nonnegative(),
+    limit: z.number().int().min(1).max(500),
+    offset: z.number().int().nonnegative()
+  })
+  .strict()
+export type ExportJobListResponse = z.infer<typeof ExportJobListResponseSchema>
+
+export const ExportJobItemsResponseSchema = z
+  .object({
+    items: z.array(ExportJobItemRecordSchema),
+    total: z.number().int().nonnegative(),
+    limit: z.number().int().min(1).max(500),
+    offset: z.number().int().nonnegative()
+  })
+  .strict()
+export type ExportJobItemsResponse = z.infer<typeof ExportJobItemsResponseSchema>
+
+export const ExportProgressEventSchema = z
+  .object({
+    job: ExportJobRecordSchema
+  })
+  .strict()
+export type ExportProgressEvent = z.infer<typeof ExportProgressEventSchema>

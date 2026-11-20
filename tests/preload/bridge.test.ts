@@ -158,7 +158,16 @@ describe('preload bridge', () => {
         'getDocumentClassificationFacets',
         'searchUnifiedPhotos',
         'searchUnifiedDocuments',
-        'cancelUnifiedSearch'
+        'cancelUnifiedSearch',
+        'selectExportDestination',
+        'startExport',
+        'cancelExport',
+        'getActiveExportJob',
+        'listExportJobs',
+        'getExportJob',
+        'getExportJobItems',
+        'verifyExportJob',
+        'onExportProgress'
       ].sort()
     )
   })
