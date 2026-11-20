@@ -291,11 +291,11 @@ Status: **Complete (Substages 7A–7F independently accepted; Stage 7 closed in 
 
 ---
 
-## Stage 8: Export, Recovery, Release Validation, Beta, and Public Release (Planned — see STAGES.md)
+## Stage 8: Export, Recovery, Release Validation, Beta, and Public Release (In progress — 8A Slice 1 checkpointed at `a03504c`, Slice 2 awaiting review)
 
-Status: **Planned** (Stage 8A–8E per `STAGES.md`; future planning, not started).
+Status: **In progress** (Stage 8A Slice 1 checkpointed at `a03504c`; Slice 2 implemented and awaiting independent review; Stage 8B–8E future planning).
 
-- [ ] **8A**: Selective export bundles with preserved metadata sidecars.
+- [ ] **8A**: Selective export bundles with preserved metadata sidecars (Slice 1 export core & schemas **Complete — accepted & checkpointed at `a03504c`**, retaining non-blocking orphaned-sidecar observation in `inspectExportBundleStatus` for follow-up; Slice 2 Migration 16 & `ExportRepository` **Implemented — awaiting independent review**; IPC/preload/UI remaining).
 - [ ] **8B**: Backup, restore, and catalog recovery from vault manifests.
 - [ ] **8C**: Release scope, security, performance, cross-platform installers, and documentation.
 - [ ] **8D**: Beta testing, defect resolution, and release candidate acceptance.

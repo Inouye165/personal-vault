@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 15
+export const CURRENT_SCHEMA_VERSION = 16
 
 export interface Migration {
   readonly version: number
@@ -1342,6 +1342,74 @@ export const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_doc_classify_job_items_status
           ON document_classification_job_items(job_id, status, file_location_id);
+      `)
+    }
+  },
+  {
+    version: 16,
+    name: 'export_jobs_and_items',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS export_jobs (
+          id TEXT PRIMARY KEY,
+          bundle_dir TEXT NOT NULL,
+          bundle_folder_name TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (
+            status IN ('running', 'completed', 'cancelled', 'interrupted', 'failed')
+          ),
+          include_original_paths INTEGER NOT NULL DEFAULT 0 CHECK (include_original_paths IN (0, 1)),
+          include_extracted_text INTEGER NOT NULL DEFAULT 0 CHECK (include_extracted_text IN (0, 1)),
+          manifest_published INTEGER NOT NULL DEFAULT 0 CHECK (manifest_published IN (0, 1)),
+          bundle_verified INTEGER NOT NULL DEFAULT 0 CHECK (bundle_verified IN (0, 1)),
+          total_items INTEGER NOT NULL DEFAULT 0 CHECK (total_items >= 0),
+          exported_items INTEGER NOT NULL DEFAULT 0 CHECK (exported_items >= 0),
+          failed_items INTEGER NOT NULL DEFAULT 0 CHECK (failed_items >= 0),
+          cancelled_items INTEGER NOT NULL DEFAULT 0 CHECK (cancelled_items >= 0),
+          vault_integrity_warnings INTEGER NOT NULL DEFAULT 0 CHECK (vault_integrity_warnings >= 0),
+          error_code TEXT,
+          error_message TEXT,
+          incomplete_reasons_json TEXT,
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_export_jobs_started
+          ON export_jobs(started_at_ms DESC, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_export_jobs_status
+          ON export_jobs(status, started_at_ms DESC);
+
+        CREATE TABLE IF NOT EXISTS export_job_items (
+          job_id TEXT NOT NULL REFERENCES export_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          hash_observation_id INTEGER NOT NULL,
+          category TEXT NOT NULL CHECK (category IN ('photo', 'document')),
+          original_file_name TEXT NOT NULL,
+          expected_sha256 TEXT NOT NULL CHECK (length(expected_sha256) = 64),
+          expected_byte_size INTEGER NOT NULL CHECK (expected_byte_size >= 0),
+          status TEXT NOT NULL CHECK (
+            status IN ('pending', 'completed', 'failed', 'cancelled', 'interrupted')
+          ),
+          exported_file_name TEXT,
+          sidecar_file_name TEXT,
+          byte_source_used TEXT CHECK (
+            byte_source_used IS NULL OR
+            byte_source_used IN ('vault_copy', 'source_file', 'source_fallback_after_vault_warning')
+          ),
+          vault_integrity_warning TEXT CHECK (
+            vault_integrity_warning IS NULL OR
+            vault_integrity_warning IN ('vault_copy_missing', 'vault_copy_hash_mismatch')
+          ),
+          error_code TEXT,
+          error_message TEXT,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (job_id, file_location_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_export_job_items_status
+          ON export_job_items(job_id, status, file_location_id);
       `)
     }
   }

@@ -41,6 +41,20 @@ export {
   type DocClassificationOverrideRecord,
   type EffectiveDocumentClassification
 } from './document-classification-repository'
+export {
+  ExportRepository,
+  type CreateExportJobInput,
+  type CreateExportJobItemInput,
+  type ExportJobItemRecord,
+  type ExportJobItemStatus,
+  type ExportJobRecord,
+  type ExportJobStatus,
+  type FinalizeExportJobInput,
+  type ListExportJobItemsOptions,
+  type ListExportJobsOptions,
+  type PaginatedExportResult,
+  type RecordExportItemOutcomeInput
+} from './export-repository'
 export { DocumentRepository, buildDocumentContentRevision } from './document-repository'
 export {
   DocumentOcrRepository,

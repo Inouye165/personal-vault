@@ -116,7 +116,7 @@ describe('Stage 7E Slice 2 — Migration 15 & DocumentClassificationRepository',
   }
 
   it('applies Migration 15 tables and indexes cleanly', () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(15)
+    expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(15)
     const tables = catalog
       .getRawDb()
       .prepare(

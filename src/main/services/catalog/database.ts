@@ -19,6 +19,7 @@ import { DocumentRepository } from './document-repository'
 import { DocumentOcrRepository } from './document-ocr-repository'
 import { DocumentSemanticRepository } from './document-semantic-repository'
 import { DocumentClassificationRepository } from './document-classification-repository'
+import { ExportRepository } from './export-repository'
 import type {
   DocumentDetailItem,
   GetDocumentExtensionFacetsRequest,
@@ -401,6 +402,7 @@ export class CatalogDatabase {
   private documentSemanticMutationSeq = 0
   private readonly documentClassificationRepository: DocumentClassificationRepository
   private documentClassificationMutationSeq = 0
+  private readonly exportRepository: ExportRepository
 
   private constructor(
     db: DatabaseSync,
@@ -441,6 +443,9 @@ export class CatalogDatabase {
         this.bumpDocumentClassificationMutationSeq()
       }
     })
+    this.exportRepository = new ExportRepository({
+      getDb: () => this.getRawDb()
+    })
   }
 
   public bumpDocumentClassificationMutationSeq(): number {
@@ -458,6 +463,11 @@ export class CatalogDatabase {
   public getDocumentClassificationRepository(): DocumentClassificationRepository {
     this.assertOpen()
     return this.documentClassificationRepository
+  }
+
+  public getExportRepository(): ExportRepository {
+    this.assertOpen()
+    return this.exportRepository
   }
 
   public bumpDocumentSemanticMutationSeq(): number {
