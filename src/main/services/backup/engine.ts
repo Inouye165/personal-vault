@@ -10,25 +10,32 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import {
   BACKUP_CHUNK_SIZE_BYTES,
   BACKUP_FORMAT_VERSION,
   BackupRepositoryIdentityV1Schema,
   BackupSnapshotCompleteMarkerV1Schema,
   BackupSnapshotManifestV1Schema,
+  BackupStagingManifestV1Schema,
   EMPTY_SHA256_HEX,
   type BackupChunkRef,
   type BackupFileEntry,
   type BackupRepositoryIdentityV1,
   type BackupSnapshotCompleteMarkerV1,
+  type BackupSnapshotInProgressMarkerV1,
   type BackupSnapshotManifestV1,
+  type BackupStagingManifestV1,
   type BackupVerificationScope
 } from '../../../shared/validation/backup-schemas'
 import { PlaintextObjectCodec, type BackupObjectCodec } from './codec'
-import { validateBackupDestinationPath } from './containment'
+import { validateBackupDestinationPath, validateBackupStagingDir } from './containment'
 import { BackupSnapshotError } from './errors'
 import { TransferRateLimiter } from './rate-limiter'
-import { captureConsistentBackupSnapshot } from './snapshot-capture'
+import {
+  captureConsistentBackupSnapshot,
+  type CaptureConsistentBackupSnapshotResult
+} from './snapshot-capture'
 import {
   BACKUP_OBJECTS_DIR,
   BACKUP_REPO_IDENTITY_FILE,
@@ -57,6 +64,8 @@ export interface RunLocalBackupOptions {
   readonly workerScriptPath?: string
   readonly appPath?: string | null
   readonly isPackaged?: boolean
+  readonly onRepositoryResolved?: (repositoryId: string) => void
+  readonly onChunkVerified?: (chunk: BackupChunkRef, action: 'written' | 'reused') => void
 }
 
 export interface RunLocalBackupResult {
@@ -215,6 +224,7 @@ interface TransferChunkContext {
   readonly codec: BackupObjectCodec
   readonly signal?: AbortSignal
   readonly uploadedInThisRun: Map<string, BackupChunkRef>
+  readonly onChunkVerified?: (chunk: BackupChunkRef, action: 'written' | 'reused') => void
   writtenChunkCount: number
   reusedChunkCount: number
 }
@@ -374,6 +384,7 @@ async function processFileInChunks(
         plaintextSha256
       }
       ctx.uploadedInThisRun.set(objectId, ref)
+      ctx.onChunkVerified?.(ref, reused ? 'reused' : 'written')
       chunks.push(ref)
       offset += chunkLen
       chunkIndex++
@@ -395,6 +406,178 @@ async function processFileInChunks(
     byteSize: expectedByteSize,
     sha256: expectedSha256.toLowerCase(),
     chunks
+  }
+}
+
+async function sha256StreamFile(filePath: string): Promise<{ sha256: string; byteSize: number }> {
+  const hash = createHash('sha256')
+  const handle = await open(filePath, 'r')
+  let total = 0
+  try {
+    const buf = Buffer.allocUnsafe(64 * 1024)
+    while (true) {
+      const { bytesRead } = await handle.read(buf, 0, buf.length, null)
+      if (bytesRead <= 0) break
+      hash.update(bytesRead === buf.length ? buf : buf.subarray(0, bytesRead))
+      total += bytesRead
+    }
+  } finally {
+    await handle.close()
+  }
+  return { sha256: hash.digest('hex'), byteSize: total }
+}
+
+async function assertStagedFileMatches(
+  filePath: string,
+  expectedByteSize: number,
+  expectedSha256: string,
+  label: string
+): Promise<void> {
+  if (!existsSync(filePath)) {
+    throw new BackupSnapshotError(
+      'backup_staging_error',
+      `Staged ${label} is missing: "${filePath}"`
+    )
+  }
+  const st = statSync(filePath)
+  if (st.size !== expectedByteSize) {
+    throw new BackupSnapshotError(
+      'backup_staging_error',
+      `Staged ${label} size mismatch: expected ${expectedByteSize}, got ${st.size}`
+    )
+  }
+  const actual = await sha256StreamFile(filePath)
+  if (actual.sha256.toLowerCase() !== expectedSha256.toLowerCase()) {
+    throw new BackupSnapshotError('backup_staging_error', `Staged ${label} SHA-256 mismatch`)
+  }
+}
+
+export interface VerifyCapturedStagingOptions {
+  readonly jobId: string
+  readonly snapshotId: string
+  readonly stagingDir: string
+  readonly userDataDir: string
+  readonly sourceRoots: readonly string[]
+  readonly vaultRoots: readonly string[]
+}
+
+export async function verifyCapturedStagingIntegrity(
+  options: VerifyCapturedStagingOptions
+): Promise<CaptureConsistentBackupSnapshotResult> {
+  const canonicalStagingDir = validateBackupStagingDir({
+    stagingDir: options.stagingDir,
+    userDataDir: options.userDataDir,
+    sourceRoots: options.sourceRoots,
+    vaultRoots: options.vaultRoots
+  })
+
+  const stagingManifestPath = join(canonicalStagingDir, 'staging-manifest.json')
+  if (!existsSync(stagingManifestPath)) {
+    throw new BackupSnapshotError(
+      'backup_staging_error',
+      `Missing staging-manifest.json in "${canonicalStagingDir}"`
+    )
+  }
+
+  let sm: BackupStagingManifestV1
+  try {
+    sm = BackupStagingManifestV1Schema.parse(JSON.parse(readFileSync(stagingManifestPath, 'utf8')))
+  } catch (err) {
+    throw new BackupSnapshotError(
+      'backup_staging_error',
+      `Invalid staging-manifest.json: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+
+  if (sm.jobId !== options.jobId || sm.snapshotId !== options.snapshotId) {
+    throw new BackupSnapshotError(
+      'backup_staging_error',
+      `Staging manifest identity mismatch: expected (${options.jobId}, ${options.snapshotId}), got (${sm.jobId}, ${sm.snapshotId})`
+    )
+  }
+
+  const stagedCatalogPath = join(canonicalStagingDir, sm.catalog.stagedRelativePath)
+  await assertStagedFileMatches(
+    stagedCatalogPath,
+    sm.catalog.byteSize,
+    sm.catalog.sha256,
+    'vault-catalog.sqlite'
+  )
+
+  let db: DatabaseSync | null = null
+  try {
+    db = new DatabaseSync(stagedCatalogPath, { readOnly: true, timeout: 5000 })
+    const integrity = db.prepare('PRAGMA integrity_check;').get() as
+      { integrity_check?: string } | undefined
+    if (integrity?.integrity_check !== 'ok') {
+      throw new BackupSnapshotError(
+        'backup_staging_error',
+        `Staged SQLite PRAGMA integrity_check failed: ${integrity?.integrity_check ?? 'unknown'}`
+      )
+    }
+    const fkRows = db.prepare('PRAGMA foreign_key_check;').all()
+    if (fkRows.length > 0) {
+      throw new BackupSnapshotError(
+        'backup_staging_error',
+        `Staged SQLite PRAGMA foreign_key_check failed with ${fkRows.length} violation(s)`
+      )
+    }
+  } catch (err) {
+    if (err instanceof BackupSnapshotError) throw err
+    throw new BackupSnapshotError(
+      'backup_staging_error',
+      `Failed to verify staged SQLite database: ${err instanceof Error ? err.message : String(err)}`
+    )
+  } finally {
+    try {
+      db?.close()
+    } catch {
+      // ignore
+    }
+  }
+
+  if (sm.annotations) {
+    await assertStagedFileMatches(
+      join(canonicalStagingDir, sm.annotations.ownerMarkerRelativePath),
+      sm.annotations.ownerMarkerByteSize,
+      sm.annotations.ownerMarkerSha256,
+      '.pv_annotations_owner'
+    )
+    await assertStagedFileMatches(
+      join(canonicalStagingDir, sm.annotations.journalRelativePath),
+      sm.annotations.journalByteSize,
+      sm.annotations.journalSha256,
+      'review-journal.jsonl'
+    )
+  }
+
+  if (sm.vault) {
+    await assertStagedFileMatches(
+      join(canonicalStagingDir, sm.vault.identityRelativePath),
+      sm.vault.identityByteSize,
+      sm.vault.identitySha256,
+      'vault.json'
+    )
+    for (const copy of sm.vault.copies) {
+      await assertStagedFileMatches(
+        join(canonicalStagingDir, copy.stagedManifestRelativePath),
+        copy.manifestByteSize,
+        copy.manifestSha256,
+        `staged manifest (${copy.sourceManifestRelativePath})`
+      )
+      await assertStagedFileMatches(
+        join(sm.vault.sourceVaultPath, copy.sourcePayloadRelativePath),
+        copy.byteSize,
+        copy.sha256,
+        `source vault payload (${copy.sourcePayloadRelativePath})`
+      )
+    }
+  }
+
+  return {
+    canonicalStagingDir,
+    stagingManifestPath,
+    stagingManifest: sm
   }
 }
 
@@ -426,6 +609,31 @@ export async function runLocalBackup(
 
   await hooks?.onAfterSnapshotCapture?.(options.snapshotId)
 
+  return executeTransferFromStaging(options, canonicalDest, captured, false, hooks)
+}
+
+export async function resumeLocalBackupFromStaging(
+  options: RunLocalBackupOptions,
+  captured: CaptureConsistentBackupSnapshotResult,
+  hooks?: LocalBackupTestHooks
+): Promise<RunLocalBackupResult> {
+  const canonicalDest = validateBackupDestinationPath({
+    destinationDir: options.backupRepoDir,
+    sourceRoots: options.sourceRoots,
+    vaultRoots: options.vaultRoots,
+    userDataDir: options.userDataDir
+  })
+
+  return executeTransferFromStaging(options, canonicalDest, captured, true, hooks)
+}
+
+async function executeTransferFromStaging(
+  options: RunLocalBackupOptions,
+  canonicalDest: string,
+  captured: CaptureConsistentBackupSnapshotResult,
+  isResume: boolean,
+  hooks?: LocalBackupTestHooks
+): Promise<RunLocalBackupResult> {
   const codec = options.codec ?? new PlaintextObjectCodec()
   const transport = new LocalFsTransport({
     repositoryDir: canonicalDest,
@@ -453,18 +661,22 @@ export async function runLocalBackup(
     )
   }
 
-  await transport.writeSnapshotInProgress(
-    options.snapshotId,
-    {
-      formatVersion: BACKUP_FORMAT_VERSION,
-      schema: 'pv_backup_in_progress_v1',
-      jobId: options.jobId,
-      snapshotId: options.snapshotId,
-      repositoryId: repoIdentity.repositoryId,
-      startedAtMs: Date.now()
-    },
-    options.signal
-  )
+  options.onRepositoryResolved?.(repoIdentity.repositoryId)
+
+  const marker: BackupSnapshotInProgressMarkerV1 = {
+    formatVersion: BACKUP_FORMAT_VERSION,
+    schema: 'pv_backup_in_progress_v1',
+    jobId: options.jobId,
+    snapshotId: options.snapshotId,
+    repositoryId: repoIdentity.repositoryId,
+    startedAtMs: Date.now()
+  }
+
+  if (isResume) {
+    await transport.claimOrResumeSnapshotInProgress(options.snapshotId, marker, options.signal)
+  } else {
+    await transport.writeSnapshotInProgress(options.snapshotId, marker, options.signal)
+  }
 
   const ctx: TransferChunkContext = {
     jobId: options.jobId,
@@ -472,6 +684,7 @@ export async function runLocalBackup(
     codec,
     signal: options.signal,
     uploadedInThisRun: new Map(),
+    onChunkVerified: options.onChunkVerified,
     writtenChunkCount: 0,
     reusedChunkCount: 0
   }

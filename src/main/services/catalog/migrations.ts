@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 16
+export const CURRENT_SCHEMA_VERSION = 17
 
 export interface Migration {
   readonly version: number
@@ -1410,6 +1410,140 @@ export const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_export_job_items_status
           ON export_job_items(job_id, status, file_location_id);
+      `)
+    }
+  },
+  {
+    version: 17,
+    name: 'backup_persistence_tables',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS backup_destinations (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('local_fs', 'google_drive', 'drive_for_desktop')),
+          target_path TEXT,
+          max_bytes_per_second INTEGER CHECK (
+            max_bytes_per_second IS NULL OR max_bytes_per_second >= 65536
+          ),
+          daily_budget_bytes INTEGER CHECK (
+            daily_budget_bytes IS NULL OR daily_budget_bytes >= 16777216
+          ),
+          encryption_mode TEXT NOT NULL DEFAULT 'none' CHECK (
+            encryption_mode IN ('none', 'aes-256-gcm-v1')
+          ),
+          repository_id TEXT,
+          is_enabled INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0, 1)),
+          last_verified_snapshot_id TEXT,
+          last_verified_at_ms INTEGER,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backup_destinations_enabled
+          ON backup_destinations(is_enabled, updated_at_ms DESC);
+
+        CREATE TABLE IF NOT EXISTS backup_jobs (
+          id TEXT PRIMARY KEY,
+          destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+          snapshot_id TEXT NOT NULL,
+          repository_id TEXT,
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'queued_destination_unavailable',
+              'capturing',
+              'running',
+              'paused',
+              'interrupted',
+              'completed',
+              'cancelled',
+              'failed',
+              'abandoned'
+            )
+          ),
+          pause_reason TEXT CHECK (
+            pause_reason IS NULL OR
+            pause_reason IN (
+              'destination_unavailable',
+              'user_paused',
+              'daily_budget_exhausted',
+              'provider_quota',
+              'metered_network'
+            )
+          ),
+          staging_dir TEXT,
+          verification_scope TEXT CHECK (
+            verification_scope IS NULL OR
+            verification_scope IN ('full_readback', 'incremental_new_chunks_verified')
+          ),
+          total_object_count INTEGER NOT NULL DEFAULT 0 CHECK (total_object_count >= 0),
+          completed_object_count INTEGER NOT NULL DEFAULT 0 CHECK (completed_object_count >= 0),
+          written_chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (written_chunk_count >= 0),
+          reused_chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (reused_chunk_count >= 0),
+          total_logical_bytes INTEGER NOT NULL DEFAULT 0 CHECK (total_logical_bytes >= 0),
+          total_stored_bytes INTEGER NOT NULL DEFAULT 0 CHECK (total_stored_bytes >= 0),
+          transferred_bytes INTEGER NOT NULL DEFAULT 0 CHECK (transferred_bytes >= 0),
+          manifest_sha256 TEXT,
+          abandoned_from_job_id TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          created_at_ms INTEGER NOT NULL,
+          started_at_ms INTEGER,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backup_jobs_dest_created
+          ON backup_jobs(destination_id, created_at_ms DESC, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_backup_jobs_status
+          ON backup_jobs(status, updated_at_ms DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_backup_jobs_snapshot
+          ON backup_jobs(destination_id, snapshot_id);
+
+        CREATE TABLE IF NOT EXISTS backup_job_units (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL REFERENCES backup_jobs(id) ON DELETE CASCADE,
+          unit_kind TEXT NOT NULL CHECK (unit_kind IN ('chunk', 'manifest', 'complete_marker')),
+          object_id TEXT NOT NULL,
+          plaintext_sha256 TEXT,
+          plaintext_byte_size INTEGER NOT NULL DEFAULT 0 CHECK (plaintext_byte_size >= 0),
+          stored_byte_size INTEGER NOT NULL DEFAULT 0 CHECK (stored_byte_size >= 0),
+          status TEXT NOT NULL CHECK (
+            status IN ('pending', 'in_progress', 'verified', 'reused', 'failed', 'cancelled')
+          ),
+          retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+          resume_session_uri TEXT,
+          uploaded_offset_bytes INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_offset_bytes >= 0),
+          updated_at_ms INTEGER NOT NULL,
+          UNIQUE (job_id, unit_kind, object_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backup_job_units_job_status
+          ON backup_job_units(job_id, status);
+
+        CREATE TABLE IF NOT EXISTS backup_destination_objects (
+          destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+          object_id TEXT NOT NULL,
+          stored_byte_size INTEGER NOT NULL CHECK (stored_byte_size >= 0),
+          plaintext_sha256 TEXT,
+          verified_at_ms INTEGER NOT NULL,
+          last_snapshot_id TEXT,
+          PRIMARY KEY (destination_id, object_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS backup_bandwidth_ledger (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+          job_id TEXT REFERENCES backup_jobs(id) ON DELETE SET NULL,
+          unit_id INTEGER REFERENCES backup_job_units(id) ON DELETE SET NULL,
+          bytes_reserved INTEGER NOT NULL CHECK (bytes_reserved >= 0),
+          recorded_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backup_bandwidth_ledger_dest_time
+          ON backup_bandwidth_ledger(destination_id, recorded_at_ms DESC);
       `)
     }
   }

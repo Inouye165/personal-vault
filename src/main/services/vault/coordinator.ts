@@ -22,8 +22,11 @@ import {
 } from './copier'
 import { loadVaultIdentity } from './identity'
 
+import type { BackupCaptureGuard } from '../backup/capture-guard'
+
 export interface VaultImportCoordinatorOptions {
   readonly catalog: CatalogDatabase
+  readonly captureGuard?: BackupCaptureGuard
 }
 
 export interface StartImportOptions {
@@ -33,6 +36,7 @@ export interface StartImportOptions {
 
 export class VaultImportCoordinator {
   private readonly catalog: CatalogDatabase
+  private captureGuard?: BackupCaptureGuard
   private readonly events = new EventEmitter()
   private activeJob: CatalogVaultImportJobRecord | null = null
   private abortController: AbortController | null = null
@@ -43,6 +47,11 @@ export class VaultImportCoordinator {
 
   constructor(options: VaultImportCoordinatorOptions) {
     this.catalog = options.catalog
+    this.captureGuard = options.captureGuard
+  }
+
+  public setCaptureGuard(guard: BackupCaptureGuard | undefined): void {
+    this.captureGuard = guard
   }
 
   public async initialize(): Promise<void> {
@@ -242,58 +251,70 @@ export class VaultImportCoordinator {
           status: 'copying'
         })
 
-        const result = await copyAndVerifyFileToVault({
-          vaultPath,
-          vaultId: job.vaultId,
-          importJobId: job.id,
-          source: {
-            fileLocationId: item.fileLocationId,
-            discoveryObservationId: item.discoveryObservationId,
-            originalPath: item.originalPath,
-            fileName: item.fileName,
-            extension: item.extension,
-            category: item.category,
-            recordedFacts: {
-              byteSize: item.byteSize,
-              filesystemBirthtimeMs: item.filesystemBirthtimeMs,
-              filesystemMtimeMs: item.filesystemMtimeMs,
-              firstDiscoveredAtMs: item.firstDiscoveredAtMs || Date.now(),
-              lastSeenAtMs: item.lastSeenAtMs || Date.now(),
-              hashObservationId: item.hashObservationId ?? 0,
-              hashVerifiedAtMs: item.hashVerifiedAtMs || Date.now()
+        const runImportStep = async () =>
+          copyAndVerifyFileToVault({
+            vaultPath,
+            vaultId: job.vaultId,
+            importJobId: job.id,
+            source: {
+              fileLocationId: item.fileLocationId,
+              discoveryObservationId: item.discoveryObservationId,
+              originalPath: item.originalPath,
+              fileName: item.fileName,
+              extension: item.extension,
+              category: item.category,
+              recordedFacts: {
+                byteSize: item.byteSize,
+                filesystemBirthtimeMs: item.filesystemBirthtimeMs,
+                filesystemMtimeMs: item.filesystemMtimeMs,
+                firstDiscoveredAtMs: item.firstDiscoveredAtMs || Date.now(),
+                lastSeenAtMs: item.lastSeenAtMs || Date.now(),
+                hashObservationId: item.hashObservationId ?? 0,
+                hashVerifiedAtMs: item.hashVerifiedAtMs || Date.now()
+              },
+              inferredMetadata: {
+                inferredCaptureTimeMs: item.inferredCaptureTimeMs
+              },
+              reviewDecisions: {
+                isPreferred: item.isPreferred ?? false,
+                duplicateReviewStatus: null
+              },
+              expectedSha256: item.sha256,
+              expectedByteSize: item.byteSize
             },
-            inferredMetadata: {
-              inferredCaptureTimeMs: item.inferredCaptureTimeMs
-            },
-            reviewDecisions: {
-              isPreferred: item.isPreferred ?? false,
-              duplicateReviewStatus: null
-            },
-            expectedSha256: item.sha256,
-            expectedByteSize: item.byteSize
-          },
-          signal: this.abortController?.signal
-        })
+            signal: this.abortController?.signal
+          })
+
+        const runWithCommit = async () => {
+          const result = await runImportStep()
+          if (result.status === 'success') {
+            // Record managed copy in catalog while holding captureGuard so
+            // manifest.json and SQLite vault_copies stay mutually consistent.
+            const copy = this.catalog.recordVaultCopy({
+              vaultId: job.vaultId,
+              sha256: result.sha256,
+              byteSize: result.byteSize,
+              relativePath: result.relativePath,
+              manifestRelativePath: result.manifestRelativePath,
+              verifiedAtMs: Date.now()
+            })
+
+            this.catalog.updateVaultImportItem({
+              jobId: job.id,
+              fileLocationId: item.fileLocationId,
+              status: 'completed',
+              vaultCopyId: copy.id,
+              completedAtMs: Date.now()
+            })
+          }
+          return result
+        }
+
+        const result = this.captureGuard
+          ? await this.captureGuard.runExclusive(runWithCommit)
+          : await runWithCommit()
 
         if (result.status === 'success') {
-          // Record managed copy in catalog
-          const copy = this.catalog.recordVaultCopy({
-            vaultId: job.vaultId,
-            sha256: result.sha256,
-            byteSize: result.byteSize,
-            relativePath: result.relativePath,
-            manifestRelativePath: result.manifestRelativePath,
-            verifiedAtMs: Date.now()
-          })
-
-          this.catalog.updateVaultImportItem({
-            jobId: job.id,
-            fileLocationId: item.fileLocationId,
-            status: 'completed',
-            vaultCopyId: copy.id,
-            completedAtMs: Date.now()
-          })
-
           copiedFiles++
           copiedBytes += item.byteSize
           verifiedFiles++

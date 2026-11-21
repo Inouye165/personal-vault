@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import {
   BackupRepositoryIdentityV1Schema,
   BackupSnapshotCompleteMarkerV1Schema,
+  BackupSnapshotInProgressMarkerV1Schema,
   type BackupRepositoryIdentityV1,
   type BackupSnapshotCompleteMarkerV1,
   type BackupSnapshotInProgressMarkerV1
@@ -58,6 +59,11 @@ export interface BackupTransport {
     options?: { readonly replaceIfCorrupt?: boolean; readonly signal?: AbortSignal }
   ): Promise<void>
   writeSnapshotInProgress(
+    snapshotId: string,
+    marker: BackupSnapshotInProgressMarkerV1,
+    signal?: AbortSignal
+  ): Promise<void>
+  claimOrResumeSnapshotInProgress(
     snapshotId: string,
     marker: BackupSnapshotInProgressMarkerV1,
     signal?: AbortSignal
@@ -299,6 +305,58 @@ export class LocalFsTransport implements BackupTransport {
       await this.writePacedFileFsync(markerPath, bytes, 'wx', signal)
     } catch (err) {
       this.wrapFsError(err)
+    }
+  }
+
+  public async claimOrResumeSnapshotInProgress(
+    snapshotId: string,
+    marker: BackupSnapshotInProgressMarkerV1,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const snapDir = this.getSnapshotDir(snapshotId)
+    if (!existsSync(snapDir)) {
+      await this.writeSnapshotInProgress(snapshotId, marker, signal)
+      return
+    }
+
+    const completePath = join(snapDir, BACKUP_SNAPSHOT_COMPLETE_FILE)
+    if (existsSync(completePath)) {
+      throw new BackupSnapshotError(
+        'destination_collision',
+        `Cannot resume snapshot "${snapshotId}": complete.json already exists`
+      )
+    }
+
+    const markerPath = join(snapDir, BACKUP_SNAPSHOT_IN_PROGRESS_FILE)
+    if (!existsSync(markerPath)) {
+      throw new BackupSnapshotError(
+        'destination_collision',
+        `Cannot resume snapshot "${snapshotId}": missing ownership marker .pv-snapshot-in-progress.json`
+      )
+    }
+
+    let existing: BackupSnapshotInProgressMarkerV1
+    try {
+      existing = BackupSnapshotInProgressMarkerV1Schema.parse(
+        JSON.parse(readFileSync(markerPath, 'utf8'))
+      )
+    } catch (err) {
+      if (err instanceof BackupSnapshotError) throw err
+      throw new BackupSnapshotError(
+        'destination_collision',
+        `Cannot resume snapshot "${snapshotId}": invalid ownership marker (${err instanceof Error ? err.message : String(err)})`
+      )
+    }
+
+    if (
+      existing.jobId !== marker.jobId ||
+      existing.snapshotId !== marker.snapshotId ||
+      existing.repositoryId !== marker.repositoryId
+    ) {
+      throw new BackupSnapshotError(
+        'destination_collision',
+        `Cannot resume snapshot "${snapshotId}": snapshot directory is owned by another job/repository`
+      )
     }
   }
 

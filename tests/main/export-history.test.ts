@@ -237,15 +237,15 @@ describe('Stage 8A Slice 2: Migration 16 & ExportRepository', () => {
     rmSync(tempRoot, { recursive: true, force: true })
   })
 
-  it('creates Migration 16 tables on a fresh database and sets CURRENT_SCHEMA_VERSION = 16', () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(16)
+  it('creates Migration 16 tables on a fresh database and sets CURRENT_SCHEMA_VERSION >= 16', () => {
+    expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(16)
     const catalog = CatalogDatabase.open({ catalogPath: dbPath })
     try {
       const versionRow = catalog
         .getRawDb()
         .prepare('SELECT MAX(version) AS max_version FROM schema_migrations;')
         .get() as { max_version: number }
-      expect(versionRow.max_version).toBe(16)
+      expect(versionRow.max_version).toBeGreaterThanOrEqual(16)
 
       const tables = catalog
         .getRawDb()
@@ -307,7 +307,7 @@ describe('Stage 8A Slice 2: Migration 16 & ExportRepository', () => {
         .getRawDb()
         .prepare('SELECT MAX(version) AS max_version FROM schema_migrations;')
         .get() as { max_version: number }
-      expect(versionRow.max_version).toBe(16)
+      expect(versionRow.max_version).toBeGreaterThanOrEqual(16)
 
       const existingLoc = catalog
         .getRawDb()
