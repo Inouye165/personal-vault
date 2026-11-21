@@ -33,6 +33,7 @@ export const BackupEncryptionKdfParamsSchema = z
     keyLenBytes: z.literal(32)
   })
   .strict()
+export type BackupEncryptionKdfParams = z.infer<typeof BackupEncryptionKdfParamsSchema>
 
 export const BackupEncryptionMetadataSchema = z
   .object({
@@ -46,6 +47,7 @@ export const BackupEncryptionMetadataSchema = z
     keyId: z.string().min(1)
   })
   .strict()
+export type BackupEncryptionMetadata = z.infer<typeof BackupEncryptionMetadataSchema>
 
 export const BackupRepositoryIdentityV1Schema = z
   .object({

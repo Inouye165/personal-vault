@@ -20,6 +20,8 @@ import {
   BackupStagingManifestV1Schema,
   EMPTY_SHA256_HEX,
   type BackupChunkRef,
+  type BackupEncryptionKdfParams,
+  type BackupEncryptionMode,
   type BackupFileEntry,
   type BackupRepositoryIdentityV1,
   type BackupSnapshotCompleteMarkerV1,
@@ -28,7 +30,7 @@ import {
   type BackupStagingManifestV1,
   type BackupVerificationScope
 } from '../../../shared/validation/backup-schemas'
-import { PlaintextObjectCodec, type BackupObjectCodec } from './codec'
+import { Aes256GcmObjectCodec, PlaintextObjectCodec, type BackupObjectCodec } from './codec'
 import { validateBackupDestinationPath, validateBackupStagingDir } from './containment'
 import { BackupSnapshotError } from './errors'
 import { TransferRateLimiter } from './rate-limiter'
@@ -40,6 +42,7 @@ import {
   BACKUP_OBJECTS_DIR,
   BACKUP_REPO_IDENTITY_FILE,
   BACKUP_SNAPSHOT_COMPLETE_FILE,
+  BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE,
   BACKUP_SNAPSHOT_IN_PROGRESS_FILE,
   BACKUP_SNAPSHOT_MANIFEST_FILE,
   BACKUP_SNAPSHOTS_DIR,
@@ -60,6 +63,9 @@ export interface RunLocalBackupOptions {
   readonly verifyAllChunks?: boolean
   readonly rateLimiter?: TransferRateLimiter
   readonly codec?: BackupObjectCodec
+  readonly encryptionMode?: BackupEncryptionMode
+  readonly recoverySecret?: string
+  readonly kdfParams?: BackupEncryptionKdfParams
   readonly signal?: AbortSignal
   readonly workerScriptPath?: string
   readonly appPath?: string | null
@@ -93,8 +99,19 @@ export type RecoveryPointIncompleteReason =
   | 'missing_object'
   | 'object_size_mismatch'
 
+export type RecoveryPointIntegrityStatus =
+  'structurally_complete' | 'sealed_unverified' | 'incomplete'
+
+export interface RecoveryPointCheckedStages {
+  readonly completionMarker: boolean
+  readonly manifestChecksum: boolean
+  readonly objectPresenceAndSizes: boolean
+}
+
 export interface RecoveryPointInspectionResult {
   readonly isComplete: boolean
+  readonly integrityStatus: RecoveryPointIntegrityStatus
+  readonly checked: RecoveryPointCheckedStages
   readonly reasons: readonly RecoveryPointIncompleteReason[]
   readonly completeMarker: BackupSnapshotCompleteMarkerV1 | null
 }
@@ -121,7 +138,8 @@ function collectManifestChunks(manifest: BackupSnapshotManifestV1): BackupChunkR
 
 export function inspectRecoveryPointStatus(
   backupRepoDir: string,
-  snapshotId: string
+  snapshotId: string,
+  options?: { readonly manifest?: BackupSnapshotManifestV1 }
 ): RecoveryPointInspectionResult {
   const reasons: RecoveryPointIncompleteReason[] = []
 
@@ -142,7 +160,17 @@ export function inspectRecoveryPointStatus(
   const snapDir = join(backupRepoDir, BACKUP_SNAPSHOTS_DIR, snapshotId)
   if (!existsSync(snapDir)) {
     reasons.push('snapshot_dir_missing')
-    return { isComplete: false, reasons, completeMarker: null }
+    return {
+      isComplete: false,
+      integrityStatus: 'incomplete',
+      checked: {
+        completionMarker: false,
+        manifestChecksum: false,
+        objectPresenceAndSizes: false
+      },
+      reasons,
+      completeMarker: null
+    }
   }
 
   if (existsSync(join(snapDir, BACKUP_SNAPSHOT_IN_PROGRESS_FILE))) {
@@ -161,7 +189,11 @@ export function inspectRecoveryPointStatus(
       if (completeMarker.snapshotId !== snapshotId) {
         reasons.push('completion_marker_invalid')
       }
-      if (repoIdentity && completeMarker.repositoryId !== repoIdentity.repositoryId) {
+      if (
+        repoIdentity &&
+        (completeMarker.repositoryId !== repoIdentity.repositoryId ||
+          completeMarker.encryptionMode !== repoIdentity.encryptionMode)
+      ) {
         reasons.push('completion_marker_invalid')
       }
     } catch {
@@ -169,30 +201,52 @@ export function inspectRecoveryPointStatus(
     }
   }
 
-  const manifestPath = join(snapDir, BACKUP_SNAPSHOT_MANIFEST_FILE)
-  let manifest: BackupSnapshotManifestV1 | null = null
+  const encryptionMode: BackupEncryptionMode =
+    repoIdentity?.encryptionMode ?? completeMarker?.encryptionMode ?? 'none'
+  const manifestFileName =
+    encryptionMode === 'aes-256-gcm-v1'
+      ? BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE
+      : BACKUP_SNAPSHOT_MANIFEST_FILE
+  const manifestPath = join(snapDir, manifestFileName)
+  let manifest: BackupSnapshotManifestV1 | null = options?.manifest ?? null
   if (!existsSync(manifestPath)) {
     reasons.push('manifest_missing')
   } else {
     try {
       const rawBytes = readFileSync(manifestPath)
       const actualSha = sha256Hex(rawBytes)
-      manifest = BackupSnapshotManifestV1Schema.parse(JSON.parse(rawBytes.toString('utf8')))
-      if (manifest.snapshotId !== snapshotId) {
-        reasons.push('manifest_invalid')
-      }
       if (
         completeMarker &&
         actualSha.toLowerCase() !== completeMarker.manifestSha256.toLowerCase()
       ) {
         reasons.push('manifest_hash_mismatch')
       }
+      if (encryptionMode === 'none') {
+        manifest = BackupSnapshotManifestV1Schema.parse(JSON.parse(rawBytes.toString('utf8')))
+        if (manifest.snapshotId !== snapshotId) {
+          reasons.push('manifest_invalid')
+        }
+      } else {
+        if (rawBytes.length < 28) {
+          reasons.push('manifest_invalid')
+        }
+        if (
+          manifest &&
+          (manifest.snapshotId !== snapshotId ||
+            (repoIdentity && manifest.repositoryId !== repoIdentity.repositoryId))
+        ) {
+          reasons.push('manifest_invalid')
+        }
+      }
     } catch {
       reasons.push('manifest_invalid')
     }
   }
 
+  const manifestChecksumChecked = completeMarker !== null && existsSync(manifestPath)
+  let objectsChecked = false
   if (manifest) {
+    objectsChecked = true
     const seenObjectIds = new Set<string>()
     for (const chunk of collectManifestChunks(manifest)) {
       const lower = chunk.objectId.toLowerCase()
@@ -211,8 +265,21 @@ export function inspectRecoveryPointStatus(
     }
   }
 
+  const isComplete = reasons.length === 0
+  const integrityStatus: RecoveryPointIntegrityStatus = !isComplete
+    ? 'incomplete'
+    : objectsChecked
+      ? 'structurally_complete'
+      : 'sealed_unverified'
+
   return {
-    isComplete: reasons.length === 0,
+    isComplete,
+    integrityStatus,
+    checked: {
+      completionMarker: existsSync(completePath),
+      manifestChecksum: manifestChecksumChecked,
+      objectPresenceAndSizes: objectsChecked
+    },
     reasons,
     completeMarker
   }
@@ -634,7 +701,6 @@ async function executeTransferFromStaging(
   isResume: boolean,
   hooks?: LocalBackupTestHooks
 ): Promise<RunLocalBackupResult> {
-  const codec = options.codec ?? new PlaintextObjectCodec()
   const transport = new LocalFsTransport({
     repositoryDir: canonicalDest,
     rateLimiter: options.rateLimiter,
@@ -643,22 +709,86 @@ async function executeTransferFromStaging(
 
   await transport.ensureRepositoryLayout()
   let repoIdentity = await transport.readRepositoryIdentity()
+  let codec: BackupObjectCodec
   if (!repoIdentity) {
-    repoIdentity = {
-      formatVersion: BACKUP_FORMAT_VERSION,
-      repositoryId: randomUUID(),
-      createdAtMs: Date.now(),
-      appVersion: options.appVersion,
-      chunkSizeBytes: BACKUP_CHUNK_SIZE_BYTES,
-      encryptionMode: codec.encryptionMode,
-      encryption: null
+    const requestedMode: BackupEncryptionMode =
+      options.codec?.encryptionMode ?? options.encryptionMode ?? 'none'
+    const repositoryId = randomUUID()
+    if (requestedMode === 'aes-256-gcm-v1') {
+      if (options.codec) {
+        throw new BackupSnapshotError(
+          'destination_corrupt',
+          'Cannot initialize a new encrypted repository without encryption metadata; pass encryptionMode + recoverySecret'
+        )
+      }
+      const created = await Aes256GcmObjectCodec.createForNewRepository({
+        repositoryId,
+        recoverySecret: options.recoverySecret ?? '',
+        kdfParams: options.kdfParams
+      })
+      codec = created.codec
+      repoIdentity = {
+        formatVersion: BACKUP_FORMAT_VERSION,
+        repositoryId,
+        createdAtMs: Date.now(),
+        appVersion: options.appVersion,
+        chunkSizeBytes: BACKUP_CHUNK_SIZE_BYTES,
+        encryptionMode: 'aes-256-gcm-v1',
+        encryption: created.encryptionMetadata
+      }
+    } else {
+      codec = options.codec ?? new PlaintextObjectCodec()
+      repoIdentity = {
+        formatVersion: BACKUP_FORMAT_VERSION,
+        repositoryId,
+        createdAtMs: Date.now(),
+        appVersion: options.appVersion,
+        chunkSizeBytes: BACKUP_CHUNK_SIZE_BYTES,
+        encryptionMode: 'none',
+        encryption: null
+      }
     }
     await transport.writeRepositoryIdentity(repoIdentity, options.signal)
-  } else if (repoIdentity.encryptionMode !== codec.encryptionMode) {
-    throw new BackupSnapshotError(
-      'destination_corrupt',
-      `Repository encryptionMode "${repoIdentity.encryptionMode}" does not match codec "${codec.encryptionMode}"`
-    )
+  } else if (repoIdentity.encryptionMode === 'aes-256-gcm-v1') {
+    if (options.encryptionMode && options.encryptionMode !== 'aes-256-gcm-v1') {
+      throw new BackupSnapshotError(
+        'destination_corrupt',
+        `Repository encryptionMode "${repoIdentity.encryptionMode}" does not match requested "${options.encryptionMode}"`
+      )
+    }
+    if (options.codec) {
+      if (
+        !(options.codec instanceof Aes256GcmObjectCodec) ||
+        !options.codec.matchesRepositoryEncryption(
+          repoIdentity.repositoryId,
+          repoIdentity.encryption
+        )
+      ) {
+        throw new BackupSnapshotError(
+          'wrong_recovery_secret',
+          `Supplied encryption codec is not bound to destination repository "${repoIdentity.repositoryId}"`
+        )
+      }
+      codec = options.codec
+    } else {
+      codec = await Aes256GcmObjectCodec.unlockFromRepository({
+        repositoryId: repoIdentity.repositoryId,
+        encryption: repoIdentity.encryption,
+        recoverySecret: options.recoverySecret,
+        errorDomain: 'backup'
+      })
+    }
+  } else {
+    codec = options.codec ?? new PlaintextObjectCodec()
+    if (
+      codec.encryptionMode !== repoIdentity.encryptionMode ||
+      (options.encryptionMode && options.encryptionMode !== repoIdentity.encryptionMode)
+    ) {
+      throw new BackupSnapshotError(
+        'destination_corrupt',
+        `Repository encryptionMode "${repoIdentity.encryptionMode}" does not match codec "${codec.encryptionMode}"`
+      )
+    }
   }
 
   options.onRepositoryResolved?.(repoIdentity.repositoryId)
@@ -778,17 +908,23 @@ async function executeTransferFromStaging(
     vault
   })
 
-  const manifestBytes = Buffer.from(JSON.stringify(snapshotManifest, null, 2), 'utf8')
-  const manifestSha256 = sha256Hex(manifestBytes)
+  const plaintextManifestBytes = Buffer.from(JSON.stringify(snapshotManifest, null, 2), 'utf8')
+  const storedManifestBytes = await codec.encodeManifest(plaintextManifestBytes, options.snapshotId)
+  const manifestSha256 = sha256Hex(storedManifestBytes)
 
   await transport.writeSnapshotManifest(
     options.snapshotId,
-    manifestBytes,
+    storedManifestBytes,
     options.jobId,
-    options.signal
+    options.signal,
+    codec.manifestFileName
   )
 
-  const readBackManifest = await transport.readSnapshotManifest(options.snapshotId, options.signal)
+  const readBackManifest = await transport.readSnapshotManifest(
+    options.snapshotId,
+    options.signal,
+    codec.manifestFileName
+  )
   if (!readBackManifest || sha256Hex(readBackManifest) !== manifestSha256) {
     throw new BackupSnapshotError(
       'destination_corrupt',

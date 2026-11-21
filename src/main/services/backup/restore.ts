@@ -55,7 +55,7 @@ import { CURRENT_SCHEMA_VERSION } from '../catalog/migrations'
 import { normalizePathForLookup } from '../catalog/path-normalization'
 import { assertPathContainedInVault } from '../vault/containment'
 import { VaultManifestSchema } from '../vault/manifest-schema'
-import { PlaintextObjectCodec, type BackupObjectCodec } from './codec'
+import { Aes256GcmObjectCodec, PlaintextObjectCodec, type BackupObjectCodec } from './codec'
 import { validateRestoreTargetPaths } from './containment'
 import { inspectRecoveryPointStatus } from './engine'
 import { BackupRestoreError, BackupSnapshotError } from './errors'
@@ -63,6 +63,7 @@ import {
   BACKUP_OBJECTS_DIR,
   BACKUP_REPO_IDENTITY_FILE,
   BACKUP_SNAPSHOT_COMPLETE_FILE,
+  BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE,
   BACKUP_SNAPSHOT_IN_PROGRESS_FILE,
   BACKUP_SNAPSHOT_MANIFEST_FILE,
   BACKUP_SNAPSHOTS_DIR
@@ -97,6 +98,7 @@ export interface VerifyRecoveryPointOptions {
   readonly backupRepoDir: string
   readonly snapshotId: string
   readonly codec?: BackupObjectCodec
+  readonly recoverySecret?: string
   readonly signal?: AbortSignal
 }
 
@@ -120,6 +122,7 @@ export interface RestoreRecoveryPointOptions {
   readonly activeVaultRoots?: readonly string[]
   readonly restoreJobId?: string
   readonly codec?: BackupObjectCodec
+  readonly recoverySecret?: string
   readonly signal?: AbortSignal
   readonly hooks?: LocalRestoreTestHooks
 }
@@ -190,12 +193,17 @@ interface LoadedRecoveryPoint {
   readonly repository: BackupRepositoryIdentityV1
   readonly completeMarker: BackupSnapshotCompleteMarkerV1
   readonly manifest: BackupSnapshotManifestV1
+  readonly codec: BackupObjectCodec
 }
 
-function loadAndValidateRecoveryPointMetadata(
+async function loadAndValidateRecoveryPointMetadata(
   backupRepoDir: string,
-  snapshotId: string
-): LoadedRecoveryPoint {
+  snapshotId: string,
+  options?: {
+    readonly codec?: BackupObjectCodec
+    readonly recoverySecret?: string
+  }
+): Promise<LoadedRecoveryPoint> {
   const repoPath = join(backupRepoDir, BACKUP_REPO_IDENTITY_FILE)
   if (!existsSync(repoPath)) {
     throw new BackupRestoreError(
@@ -234,11 +242,42 @@ function loadAndValidateRecoveryPointMetadata(
     )
   }
   const repository = repoParsed.data
-  if (repository.encryptionMode !== 'none') {
+  if (repository.encryptionMode !== 'none' && repository.encryptionMode !== 'aes-256-gcm-v1') {
     throw new BackupRestoreError(
       'unsupported_format_version',
-      `Unsupported encryptionMode "${repository.encryptionMode}" for local Slice 1 restore`
+      `Unsupported encryptionMode "${repository.encryptionMode}"`
     )
+  }
+
+  let codec: BackupObjectCodec
+  if (repository.encryptionMode === 'aes-256-gcm-v1') {
+    if (options?.codec) {
+      if (
+        !(options.codec instanceof Aes256GcmObjectCodec) ||
+        !options.codec.matchesRepositoryEncryption(repository.repositoryId, repository.encryption)
+      ) {
+        throw new BackupRestoreError(
+          'wrong_recovery_secret',
+          `Provided codec is not bound to repository "${repository.repositoryId}"`
+        )
+      }
+      codec = options.codec
+    } else {
+      codec = await Aes256GcmObjectCodec.unlockFromRepository({
+        repositoryId: repository.repositoryId,
+        encryption: repository.encryption,
+        recoverySecret: options?.recoverySecret,
+        errorDomain: 'restore'
+      })
+    }
+  } else {
+    codec = options?.codec ?? new PlaintextObjectCodec()
+    if (codec.encryptionMode !== 'none') {
+      throw new BackupRestoreError(
+        'repository_invalid',
+        `Provided codec encryptionMode "${codec.encryptionMode}" does not match repository "none"`
+      )
+    }
   }
 
   const snapDir = join(backupRepoDir, BACKUP_SNAPSHOTS_DIR, snapshotId)
@@ -276,7 +315,8 @@ function loadAndValidateRecoveryPointMetadata(
   }
   if (
     completeMarker.snapshotId !== snapshotId ||
-    completeMarker.repositoryId !== repository.repositoryId
+    completeMarker.repositoryId !== repository.repositoryId ||
+    completeMarker.encryptionMode !== repository.encryptionMode
   ) {
     throw new BackupRestoreError(
       'recovery_point_incomplete',
@@ -284,36 +324,52 @@ function loadAndValidateRecoveryPointMetadata(
     )
   }
 
-  const manifestPath = join(snapDir, BACKUP_SNAPSHOT_MANIFEST_FILE)
+  const manifestFileName =
+    repository.encryptionMode === 'aes-256-gcm-v1'
+      ? BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE
+      : BACKUP_SNAPSHOT_MANIFEST_FILE
+  const manifestPath = join(snapDir, manifestFileName)
   if (!existsSync(manifestPath)) {
     throw new BackupRestoreError(
       'manifest_missing',
-      `snapshot.json missing for recovery point "${snapshotId}"`
+      `${manifestFileName} missing for recovery point "${snapshotId}"`
     )
   }
 
-  const manifestBytes = readFileSync(manifestPath)
-  const actualManifestSha = sha256Hex(manifestBytes)
+  const storedManifestBytes = readFileSync(manifestPath)
+  const actualManifestSha = sha256Hex(storedManifestBytes)
   if (actualManifestSha.toLowerCase() !== completeMarker.manifestSha256.toLowerCase()) {
     throw new BackupRestoreError(
       'manifest_hash_mismatch',
-      `snapshot.json SHA-256 mismatch for "${snapshotId}"`
+      `${manifestFileName} SHA-256 mismatch for "${snapshotId}"`
+    )
+  }
+
+  let plaintextManifestBytes: Buffer
+  try {
+    plaintextManifestBytes = await codec.decodeManifest(storedManifestBytes, snapshotId)
+  } catch (err) {
+    throw new BackupRestoreError(
+      'manifest_invalid',
+      `Failed to decrypt ${manifestFileName} for "${snapshotId}": ${(err as Error).message}`
     )
   }
 
   let manifest: BackupSnapshotManifestV1
   try {
-    manifest = BackupSnapshotManifestV1Schema.parse(JSON.parse(manifestBytes.toString('utf8')))
+    manifest = BackupSnapshotManifestV1Schema.parse(
+      JSON.parse(plaintextManifestBytes.toString('utf8'))
+    )
   } catch (err) {
     throw new BackupRestoreError(
       'manifest_invalid',
-      `Invalid snapshot.json for "${snapshotId}": ${(err as Error).message}`
+      `Invalid ${manifestFileName} for "${snapshotId}": ${(err as Error).message}`
     )
   }
   if (manifest.snapshotId !== snapshotId || manifest.repositoryId !== repository.repositoryId) {
     throw new BackupRestoreError(
       'manifest_invalid',
-      `snapshot.json identity mismatch for "${snapshotId}"`
+      `${manifestFileName} identity mismatch for "${snapshotId}"`
     )
   }
   if (manifest.schemaVersion > CURRENT_SCHEMA_VERSION) {
@@ -323,15 +379,21 @@ function loadAndValidateRecoveryPointMetadata(
     )
   }
 
-  const status = inspectRecoveryPointStatus(backupRepoDir, snapshotId)
-  if (!status.isComplete) {
+  const status = inspectRecoveryPointStatus(backupRepoDir, snapshotId, { manifest })
+  if (
+    !status.isComplete ||
+    status.integrityStatus !== 'structurally_complete' ||
+    !status.checked.completionMarker ||
+    !status.checked.manifestChecksum ||
+    !status.checked.objectPresenceAndSizes
+  ) {
     throw new BackupRestoreError(
       'recovery_point_incomplete',
-      `Recovery point "${snapshotId}" failed completeness check: ${status.reasons.join(', ')}`
+      `Recovery point "${snapshotId}" failed structural preflight check: ${status.reasons.join(', ')}`
     )
   }
 
-  return { repository, completeMarker, manifest }
+  return { repository, completeMarker, manifest, codec }
 }
 
 async function decodeVerifiedChunk(
@@ -708,10 +770,10 @@ function rebindRestoredCatalogSqlite(
 export async function verifyRecoveryPoint(
   options: VerifyRecoveryPointOptions
 ): Promise<VerifyRecoveryPointResult> {
-  const codec = options.codec ?? new PlaintextObjectCodec()
-  const { repository, manifest } = loadAndValidateRecoveryPointMetadata(
+  const { repository, manifest, codec } = await loadAndValidateRecoveryPointMetadata(
     options.backupRepoDir,
-    options.snapshotId
+    options.snapshotId,
+    { codec: options.codec, recoverySecret: options.recoverySecret }
   )
 
   const tempDir = mkdtempSync(join(tmpdir(), 'pv-8b-verify-'))
@@ -812,7 +874,6 @@ export async function restoreRecoveryPointToIsolatedProfile(
   options: RestoreRecoveryPointOptions
 ): Promise<RestoreRecoveryPointResult> {
   checkCancelled(options.signal)
-  const codec = options.codec ?? new PlaintextObjectCodec()
 
   // 1. Validate target paths (isolated, empty, symlink-free, disjoint)
   const validatedPaths = validateRestoreTargetPaths({
@@ -824,10 +885,12 @@ export async function restoreRecoveryPointToIsolatedProfile(
     activeVaultRoots: options.activeVaultRoots ?? []
   })
 
-  // 2. Pre-flight recovery point validation
-  const { repository, manifest } = loadAndValidateRecoveryPointMetadata(
+  // 2. Pre-flight recovery point validation (including key unwrap & manifest decryption)
+  // Must fail closed before creating any target profile/vault directories.
+  const { repository, manifest, codec } = await loadAndValidateRecoveryPointMetadata(
     validatedPaths.backupRepoDir,
-    options.snapshotId
+    options.snapshotId,
+    { codec: options.codec, recoverySecret: options.recoverySecret }
   )
 
   if (manifest.vault !== null && validatedPaths.targetVaultDir === null) {
@@ -1334,6 +1397,7 @@ export function listRecoveryPoints(backupRepoDir: string): BackupListRecoveryPoi
     summaries.push({
       snapshotId,
       isComplete: inspection.isComplete,
+      integrityStatus: inspection.integrityStatus,
       reasons: [...inspection.reasons],
       repositoryId: inspection.completeMarker?.repositoryId ?? repositoryId,
       createdAtMs,

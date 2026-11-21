@@ -36,6 +36,7 @@ export const BACKUP_OBJECTS_DIR = 'objects'
 export const BACKUP_SNAPSHOTS_DIR = 'snapshots'
 export const BACKUP_SNAPSHOT_IN_PROGRESS_FILE = '.pv-snapshot-in-progress.json'
 export const BACKUP_SNAPSHOT_MANIFEST_FILE = 'snapshot.json'
+export const BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE = 'snapshot.pvenc'
 export const BACKUP_SNAPSHOT_COMPLETE_FILE = 'complete.json'
 
 export interface LocalBackupTestHooks {
@@ -73,9 +74,14 @@ export interface BackupTransport {
     snapshotId: string,
     manifestBytes: Buffer,
     jobId: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    fileName?: string
   ): Promise<void>
-  readSnapshotManifest(snapshotId: string, signal?: AbortSignal): Promise<Buffer | null>
+  readSnapshotManifest(
+    snapshotId: string,
+    signal?: AbortSignal,
+    fileName?: string
+  ): Promise<Buffer | null>
   writeSnapshotCompleteMarker(
     snapshotId: string,
     marker: BackupSnapshotCompleteMarkerV1,
@@ -375,10 +381,11 @@ export class LocalFsTransport implements BackupTransport {
     snapshotId: string,
     manifestBytes: Buffer,
     jobId: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    fileName = BACKUP_SNAPSHOT_MANIFEST_FILE
   ): Promise<void> {
     const snapDir = this.getSnapshotDir(snapshotId)
-    const manifestPath = join(snapDir, BACKUP_SNAPSHOT_MANIFEST_FILE)
+    const manifestPath = join(snapDir, fileName)
     const tempPath = join(this.getTempDir(), `snap_${jobId}_${snapshotId}_${randomUUID()}.tmp`)
     try {
       await this.hooks?.onBeforeSnapshotManifest?.(snapshotId)
@@ -397,9 +404,10 @@ export class LocalFsTransport implements BackupTransport {
 
   public async readSnapshotManifest(
     snapshotId: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    fileName = BACKUP_SNAPSHOT_MANIFEST_FILE
   ): Promise<Buffer | null> {
-    const manifestPath = join(this.getSnapshotDir(snapshotId), BACKUP_SNAPSHOT_MANIFEST_FILE)
+    const manifestPath = join(this.getSnapshotDir(snapshotId), fileName)
     if (!existsSync(manifestPath)) {
       return null
     }

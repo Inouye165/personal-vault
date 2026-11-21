@@ -16,6 +16,8 @@ export type BackupSnapshotErrorCode =
   | 'destination_write_failed'
   | 'destination_corrupt'
   | 'destination_collision'
+  | 'recovery_secret_required'
+  | 'wrong_recovery_secret'
   | 'backup_cancelled'
 
 export type BackupRestoreErrorCode =
@@ -38,6 +40,8 @@ export type BackupRestoreErrorCode =
   | 'restore_incomplete'
   | 'restore_cancelled'
   | 'restore_cleanup_refused'
+  | 'recovery_secret_required'
+  | 'wrong_recovery_secret'
 
 export class BackupRestoreError extends Error {
   public readonly code: BackupRestoreErrorCode

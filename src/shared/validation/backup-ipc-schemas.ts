@@ -161,6 +161,9 @@ export const BackupRecoveryPointSummarySchema = z
   .object({
     snapshotId: z.string().min(1),
     isComplete: z.boolean(),
+    integrityStatus: z
+      .enum(['structurally_complete', 'sealed_unverified', 'incomplete'])
+      .optional(),
     reasons: z.array(z.string()),
     repositoryId: z.string().nullable(),
     createdAtMs: z.number().int().nonnegative().nullable(),
