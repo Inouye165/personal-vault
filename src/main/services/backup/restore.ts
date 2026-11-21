@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -40,6 +41,10 @@ import {
   type BackupSnapshotCompleteMarkerV1,
   type BackupSnapshotManifestV1
 } from '../../../shared/validation/backup-schemas'
+import type {
+  BackupListRecoveryPointsResponse,
+  BackupRecoveryPointSummary
+} from '../../../shared/validation/backup-ipc-schemas'
 import {
   AnnotationJournalEntrySchema,
   VaultIdentitySchema
@@ -1280,5 +1285,78 @@ export function cleanupInterruptedRestoreTarget(options: CleanupInterruptedResto
         rmSync(p, { recursive: true, force: true })
       }
     }
+  }
+}
+
+export function listRecoveryPoints(backupRepoDir: string): BackupListRecoveryPointsResponse {
+  const canonicalRepoDir = resolve(backupRepoDir)
+  let repositoryId: string | null = null
+  const repoPath = join(canonicalRepoDir, BACKUP_REPO_IDENTITY_FILE)
+  if (existsSync(repoPath)) {
+    try {
+      const parsedRepo = BackupRepositoryIdentityV1Schema.parse(
+        JSON.parse(readFileSync(repoPath, 'utf8'))
+      )
+      repositoryId = parsedRepo.repositoryId
+    } catch {
+      repositoryId = null
+    }
+  }
+
+  const snapshotsDir = join(canonicalRepoDir, BACKUP_SNAPSHOTS_DIR)
+  if (!existsSync(snapshotsDir)) {
+    return { backupRepoDir: canonicalRepoDir, repositoryId, recoveryPoints: [] }
+  }
+
+  const entries = readdirSync(snapshotsDir, { withFileTypes: true }).filter((d) => d.isDirectory())
+  const summaries: BackupRecoveryPointSummary[] = []
+
+  for (const entry of entries) {
+    const snapshotId = entry.name
+    const inspection = inspectRecoveryPointStatus(canonicalRepoDir, snapshotId)
+    const manifestPath = join(snapshotsDir, snapshotId, BACKUP_SNAPSHOT_MANIFEST_FILE)
+    let createdAtMs: number | null = null
+    let vaultName: string | null = null
+    let vaultCopyCount: number | null = null
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = BackupSnapshotManifestV1Schema.parse(
+          JSON.parse(readFileSync(manifestPath, 'utf8'))
+        )
+        createdAtMs = manifest.createdAtMs
+        vaultName = manifest.vault?.vaultName ?? null
+        vaultCopyCount = manifest.vault ? manifest.vault.copies.length : 0
+      } catch {
+        // Leave manifest fields null when unreadable/corrupt
+      }
+    }
+
+    summaries.push({
+      snapshotId,
+      isComplete: inspection.isComplete,
+      reasons: [...inspection.reasons],
+      repositoryId: inspection.completeMarker?.repositoryId ?? repositoryId,
+      createdAtMs,
+      completedAtMs: inspection.completeMarker?.completedAtMs ?? null,
+      verificationScope: inspection.completeMarker?.verificationScope ?? null,
+      totalObjectCount: inspection.completeMarker?.totalObjectCount ?? null,
+      totalLogicalBytes: inspection.completeMarker?.totalLogicalBytes ?? null,
+      totalStoredBytes: inspection.completeMarker?.totalStoredBytes ?? null,
+      vaultName,
+      vaultCopyCount
+    })
+  }
+
+  summaries.sort((a, b) => {
+    const timeA = a.completedAtMs ?? a.createdAtMs ?? 0
+    const timeB = b.completedAtMs ?? b.createdAtMs ?? 0
+    if (timeB !== timeA) return timeB - timeA
+    return b.snapshotId.localeCompare(a.snapshotId)
+  })
+
+  return {
+    backupRepoDir: canonicalRepoDir,
+    repositoryId,
+    recoveryPoints: summaries
   }
 }

@@ -198,6 +198,8 @@ export interface ListBackupJobsOptions {
 export interface PaginatedBackupResult<T> {
   readonly items: readonly T[]
   readonly total: number
+  readonly limit: number
+  readonly offset: number
 }
 
 function mapDestinationRow(row: Record<string, unknown>): BackupDestinationRecord {
@@ -482,7 +484,9 @@ export class BackupRepository {
 
     return {
       items: rows.map(mapJobRow),
-      total: Number(totalRow.cnt)
+      total: Number(totalRow.cnt),
+      limit,
+      offset
     }
   }
 

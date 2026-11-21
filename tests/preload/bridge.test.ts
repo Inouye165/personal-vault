@@ -167,7 +167,21 @@ describe('preload bridge', () => {
         'getExportJob',
         'getExportJobItems',
         'verifyExportJob',
-        'onExportProgress'
+        'onExportProgress',
+        'selectBackupDirectory',
+        'configureBackupDestination',
+        'listBackupDestinations',
+        'startBackup',
+        'pauseBackup',
+        'resumeBackup',
+        'cancelBackup',
+        'getActiveBackupJob',
+        'listBackupJobs',
+        'getBackupJob',
+        'listRecoveryPoints',
+        'verifyRecoveryPoint',
+        'restoreRecoveryPoint',
+        'onBackupProgress'
       ].sort()
     )
   })

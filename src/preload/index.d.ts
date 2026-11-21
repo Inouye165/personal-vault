@@ -1,4 +1,24 @@
 import type {
+  BackupConfigureDestinationRequest,
+  BackupDestinationRecordDto,
+  BackupJobActionResponse,
+  BackupJobRecordDto,
+  BackupListDestinationsRequest,
+  BackupListDestinationsResponse,
+  BackupListJobsRequest,
+  BackupListJobsResponse,
+  BackupListRecoveryPointsRequest,
+  BackupListRecoveryPointsResponse,
+  BackupProgressEvent,
+  BackupRestoreRequest,
+  BackupRestoreResponse,
+  BackupSelectDirectoryRequest,
+  BackupSelectDirectoryResponse,
+  BackupStartRequest,
+  BackupVerifyRecoveryPointRequest,
+  BackupVerifyRecoveryPointResponse
+} from '../shared/validation/backup-ipc-schemas.js'
+import type {
   ExportCancelResponse,
   ExportGetJobItemsRequest,
   ExportJobItemsResponse,
@@ -9,6 +29,26 @@ import type {
   ExportSelectDestinationResponse,
   ExportStartRequest
 } from '../shared/validation/export-schemas.js'
+import type {
+  BackupConfigureDestinationRequest,
+  BackupDestinationRecordDto,
+  BackupJobActionResponse,
+  BackupJobRecordDto,
+  BackupListDestinationsRequest,
+  BackupListDestinationsResponse,
+  BackupListJobsRequest,
+  BackupListJobsResponse,
+  BackupListRecoveryPointsRequest,
+  BackupListRecoveryPointsResponse,
+  BackupProgressEvent,
+  BackupRestoreRequest,
+  BackupRestoreResponse,
+  BackupSelectDirectoryRequest,
+  BackupSelectDirectoryResponse,
+  BackupStartRequest,
+  BackupVerifyRecoveryPointRequest,
+  BackupVerifyRecoveryPointResponse
+} from '../shared/validation/backup-ipc-schemas.js'
 import type {
   AppInfo,
   NavigationTab,
@@ -310,6 +350,30 @@ export interface VaultApi {
   getExportJobItems: (request: ExportGetJobItemsRequest) => Promise<ExportJobItemsResponse>
   verifyExportJob: (jobId: string) => Promise<ExportJobRecordDto | null>
   onExportProgress: (listener: (event: ExportProgressEvent) => void) => () => void
+  selectBackupDirectory: (
+    request?: BackupSelectDirectoryRequest
+  ) => Promise<BackupSelectDirectoryResponse>
+  configureBackupDestination: (
+    request: BackupConfigureDestinationRequest
+  ) => Promise<BackupDestinationRecordDto>
+  listBackupDestinations: (
+    request?: BackupListDestinationsRequest
+  ) => Promise<BackupListDestinationsResponse>
+  startBackup: (request: BackupStartRequest) => Promise<BackupJobRecordDto>
+  pauseBackup: (jobId: string) => Promise<BackupJobActionResponse>
+  resumeBackup: (jobId: string) => Promise<BackupJobRecordDto>
+  cancelBackup: (jobId: string) => Promise<BackupJobActionResponse>
+  getActiveBackupJob: () => Promise<BackupJobRecordDto | null>
+  listBackupJobs: (request?: BackupListJobsRequest) => Promise<BackupListJobsResponse>
+  getBackupJob: (jobId: string) => Promise<BackupJobRecordDto | null>
+  listRecoveryPoints: (
+    request: BackupListRecoveryPointsRequest
+  ) => Promise<BackupListRecoveryPointsResponse>
+  verifyRecoveryPoint: (
+    request: BackupVerifyRecoveryPointRequest
+  ) => Promise<BackupVerifyRecoveryPointResponse>
+  restoreRecoveryPoint: (request: BackupRestoreRequest) => Promise<BackupRestoreResponse>
+  onBackupProgress: (listener: (event: BackupProgressEvent) => void) => () => void
 }
 
 declare global {

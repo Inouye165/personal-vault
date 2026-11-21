@@ -231,6 +231,7 @@ async function main() {
     else {
       const expectMethods = [
         'addCollectionMember',
+        'cancelBackup',
         'cancelDocSemanticModel',
         'cancelDocumentClassification',
         'cancelDocumentExtraction',
@@ -249,17 +250,20 @@ async function main() {
         'cancelThumbnail',
         'cancelUnifiedSearch',
         'classifySelectedDocuments',
+        'configureBackupDestination',
         'createCollection',
         'dismissScanJob',
         'downloadDocSemanticModel',
         'downloadOcrModel',
         'downloadSemanticModel',
         'extractSelectedDocuments',
+        'getActiveBackupJob',
         'getActiveExportJob',
         'getActiveImportJob',
         'getActiveScanJob',
         'getActiveVault',
         'getAppInfo',
+        'getBackupJob',
         'getDocSemanticModelStatus',
         'getDocumentClassificationFacets',
         'getDocumentClassificationProgress',
@@ -299,9 +303,13 @@ async function main() {
         'importSemanticModelFromFolder',
         'indexSelectedDocuments',
         'initializeVault',
+        'listBackupDestinations',
+        'listBackupJobs',
         'listCollections',
         'listExportJobs',
+        'listRecoveryPoints',
         'ocrSelectedDocuments',
+        'onBackupProgress',
         'onDocumentClassificationProgress',
         'onDocumentExtractionProgress',
         'onDocumentOcrProgress',
@@ -312,6 +320,7 @@ async function main() {
         'onScanProgress',
         'onSemanticIndexProgress',
         'onSemanticModelStatus',
+        'pauseBackup',
         'pauseDocumentClassification',
         'pauseDocumentExtraction',
         'pauseDocumentOcr',
@@ -325,6 +334,8 @@ async function main() {
         'removeCollectionMember',
         'renameCollection',
         'resetDocumentClassificationOverride',
+        'restoreRecoveryPoint',
+        'resumeBackup',
         'resumeDocumentClassification',
         'resumeDocumentExtraction',
         'resumeDocumentOcr',
@@ -338,6 +349,7 @@ async function main() {
         'searchPhotosSemantic',
         'searchUnifiedDocuments',
         'searchUnifiedPhotos',
+        'selectBackupDirectory',
         'selectExportDestination',
         'selectRoots',
         'selectVaultDirectory',
@@ -347,6 +359,7 @@ async function main() {
         'setPhotoAnnotation',
         'setSimilarityDecision',
         'setTab',
+        'startBackup',
         'startDocumentClassification',
         'startDocumentExtraction',
         'startDocumentOcr',
@@ -357,7 +370,8 @@ async function main() {
         'startScan',
         'startSemanticIndexing',
         'startSimilarityAnalysis',
-        'verifyExportJob'
+        'verifyExportJob',
+        'verifyRecoveryPoint'
       ]
       if (JSON.stringify(bridge.methods) !== JSON.stringify(expectMethods)) {
         fail(`window.api methods were ${JSON.stringify(bridge.methods)}`)
@@ -391,7 +405,14 @@ async function main() {
       fail(`empty heading was ${dom.emptyHeading}`)
     if (
       JSON.stringify(dom.navigation) !==
-      JSON.stringify(['All Items', 'Photos', 'Documents', 'Review', 'Duplicates'])
+      JSON.stringify([
+        'All Items',
+        'Photos',
+        'Documents',
+        'Review',
+        'Duplicates',
+        'Backup & Restore'
+      ])
     ) {
       fail(`navigation was ${JSON.stringify(dom.navigation)}`)
     }

@@ -158,9 +158,11 @@ import type {
 } from '../services/documents/semantic'
 import { UnifiedSearchCoordinator } from '../services/unified-search'
 import type { ExportCoordinator } from '../services/export/coordinator'
+import type { BackupCoordinator } from '../services/backup/coordinator'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 import { registerDocumentIpcHandlers } from './document-handlers'
 import { registerExportIpcHandlers } from './export-handlers'
+import { registerBackupIpcHandlers } from './backup-handlers'
 
 export interface IpcHandlerOptions {
   readonly validateSender: SenderValidator
@@ -182,6 +184,8 @@ export interface IpcHandlerOptions {
   readonly unifiedSearchCoordinator?: UnifiedSearchCoordinator
   readonly documentClassificationCoordinator?: DocumentClassificationCoordinator
   readonly exportCoordinator?: ExportCoordinator
+  readonly backupCoordinator?: BackupCoordinator
+  readonly userDataDir?: string
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDocSemanticModelDirectory?: () => Promise<string | null>
   readonly selectDirectories?: () => Promise<{ cancelled: boolean; filePaths: string[] }>
@@ -189,6 +193,10 @@ export interface IpcHandlerOptions {
   readonly selectDirectory?: () => Promise<string | null>
   readonly selectOcrModelDirectory?: () => Promise<string | null>
   readonly selectExportDestinationDirectory?: () => Promise<{
+    canceled: boolean
+    directoryPath: string | null
+  }>
+  readonly selectBackupDirectory?: (title?: string) => Promise<{
     canceled: boolean
     directoryPath: string | null
   }>
@@ -214,13 +222,16 @@ export function registerIpcHandlers({
   unifiedSearchCoordinator,
   documentClassificationCoordinator,
   exportCoordinator,
+  backupCoordinator,
+  userDataDir,
   getMainWindow,
   selectDirectories,
   selectDocSemanticModelDirectory,
   selectVaultDirectory,
   selectDirectory,
   selectOcrModelDirectory,
-  selectExportDestinationDirectory
+  selectExportDestinationDirectory,
+  selectBackupDirectory
 }: IpcHandlerOptions): void {
   const resolvedUnifiedSearchCoordinator =
     unifiedSearchCoordinator ??
@@ -1667,5 +1678,14 @@ export function registerIpcHandlers({
     exportCoordinator,
     getMainWindow,
     selectDestinationDirectory: selectExportDestinationDirectory
+  })
+
+  registerBackupIpcHandlers({
+    handle,
+    backupCoordinator,
+    catalog,
+    userDataDir,
+    getMainWindow,
+    selectBackupDirectory
   })
 }

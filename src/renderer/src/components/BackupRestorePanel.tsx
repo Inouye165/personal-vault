@@ -1,0 +1,1561 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  FolderOpen,
+  HardDrive,
+  MapPin,
+  Pause,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
+  XCircle
+} from 'lucide-react'
+import type {
+  BackupDestinationRecordDto,
+  BackupJobRecordDto,
+  BackupJobStatusDto,
+  BackupRecoveryPointSummary,
+  BackupRestoreResponse,
+  BackupVerifyRecoveryPointResponse
+} from '../../../shared/validation/backup-ipc-schemas'
+
+type StorageType = 'usb' | 'nas'
+type RepoLoadState = 'idle' | 'loading' | 'loaded' | 'error'
+
+interface VerifiedSnapshotInfo {
+  readonly verifiedAtMs: number
+  readonly result: BackupVerifyRecoveryPointResponse
+}
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`
+}
+
+function formatTimestamp(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return '—'
+  return new Date(ms).toLocaleString()
+}
+
+function formatVaultFileCount(count: number | null | undefined): string {
+  if (count === null || count === undefined) return 'File count unavailable'
+  if (count === 0) return '0 vault files (catalog only)'
+  return `${count} ${count === 1 ? 'vault file' : 'vault files'}`
+}
+
+function hasInitializedVault(rp: BackupRecoveryPointSummary | null): boolean {
+  return (
+    rp !== null && (rp.vaultName !== null || (rp.vaultCopyCount !== null && rp.vaultCopyCount > 0))
+  )
+}
+
+function joinChildPath(parentDir: string, childName: string): string {
+  const trimmed = parentDir.trim().replace(/[\\/]+$/, '')
+  if (!trimmed) return ''
+  const sep = trimmed.includes('\\') || /^[a-zA-Z]:/.test(trimmed) ? '\\' : '/'
+  return `${trimmed}${sep}${childName}`
+}
+
+function getPlainJobHeadline(job: BackupJobRecordDto): string {
+  if (
+    job.status === 'queued_destination_unavailable' ||
+    (job.status === 'paused' && job.pauseReason === 'destination_unavailable')
+  ) {
+    return 'Backup paused — destination disconnected'
+  }
+  switch (job.status) {
+    case 'capturing':
+      return 'Preparing backup…'
+    case 'running':
+      return 'Backup in progress'
+    case 'paused':
+      return 'Backup paused'
+    case 'interrupted':
+      return 'Backup interrupted'
+    case 'completed':
+      return 'Backup completed successfully'
+    case 'cancelled':
+      return 'Backup cancelled'
+    case 'failed':
+      return 'Backup failed'
+    case 'abandoned':
+      return 'Backup could not resume'
+  }
+}
+
+function getPlainPauseOrFailureDetail(job: BackupJobRecordDto): string | null {
+  if (
+    job.status === 'queued_destination_unavailable' ||
+    (job.status === 'paused' && job.pauseReason === 'destination_unavailable')
+  ) {
+    return 'The backup drive or network folder is disconnected. Reconnect it, then click Resume.'
+  }
+  if (job.status === 'paused') {
+    if (job.pauseReason === 'daily_budget_exhausted') {
+      return 'Paused because the daily transfer limit was reached.'
+    }
+    if (job.pauseReason === 'metered_network') {
+      return 'Paused while on a metered network connection.'
+    }
+    if (job.pauseReason === 'provider_quota') {
+      return 'Paused because the destination storage quota was reached.'
+    }
+    return 'Backup is paused. Click Resume when you are ready to continue.'
+  }
+  if (job.status === 'interrupted') {
+    return 'This backup was interrupted before finishing. Click Resume to continue from where it stopped.'
+  }
+  if (job.status === 'failed') {
+    return job.errorMessage ?? 'An unexpected error prevented the backup from finishing.'
+  }
+  if (job.status === 'abandoned') {
+    return job.errorMessage ?? 'This backup could not be resumed. Start a new backup instead.'
+  }
+  return null
+}
+
+function getStatusPillClass(status: BackupJobStatusDto): string {
+  if (status === 'completed') return 'backup-status-pill backup-status-pill-success'
+  if (status === 'failed' || status === 'abandoned') {
+    return 'backup-status-pill backup-status-pill-error'
+  }
+  if (
+    status === 'paused' ||
+    status === 'interrupted' ||
+    status === 'queued_destination_unavailable'
+  ) {
+    return 'backup-status-pill backup-status-pill-warn'
+  }
+  return 'backup-status-pill'
+}
+
+export function BackupRestorePanel() {
+  const [storageType, setStorageType] = useState<StorageType>('usb')
+  const [destName, setDestName] = useState<string>('USB Backup Drive')
+  const [destPath, setDestPath] = useState<string>('')
+  const [nasRateCapMiB, setNasRateCapMiB] = useState<string>('10')
+  const [isEditingLocation, setIsEditingLocation] = useState<boolean>(false)
+
+  const [destinations, setDestinations] = useState<readonly BackupDestinationRecordDto[]>([])
+  const [selectedDestId, setSelectedDestId] = useState<string>('')
+  const [jobs, setJobs] = useState<readonly BackupJobRecordDto[]>([])
+  const [activeJob, setActiveJob] = useState<BackupJobRecordDto | null>(null)
+  const [requestedJob, setRequestedJob] = useState<BackupJobRecordDto | null>(null)
+  const refreshVersion = useRef(0)
+
+  const [repoDir, setRepoDir] = useState<string>('')
+  const [repoLoadState, setRepoLoadState] = useState<RepoLoadState>('idle')
+  const [repoLoadError, setRepoLoadError] = useState<string | null>(null)
+  const [recoveryPoints, setRecoveryPoints] = useState<readonly BackupRecoveryPointSummary[]>([])
+  const [verifiedByKey, setVerifiedByKey] = useState<Record<string, VerifiedSnapshotInfo>>({})
+  const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({})
+
+  // Guided Restore state
+  const [restoreRepoDir, setRestoreRepoDir] = useState<string>('')
+  const [restoreLoadedRepoDir, setRestoreLoadedRepoDir] = useState<string>('')
+  const [useCustomRestoreSource, setUseCustomRestoreSource] = useState<boolean>(false)
+  const [restoreRecoveryPoints, setRestoreRecoveryPoints] = useState<
+    readonly BackupRecoveryPointSummary[]
+  >([])
+  const [selectedRestoreSnapshotId, setSelectedRestoreSnapshotId] = useState<string>('')
+  const [restoreLocationDir, setRestoreLocationDir] = useState<string>('')
+  const [restoreResult, setRestoreResult] = useState<BackupRestoreResponse | null>(null)
+  const [copiedCommand, setCopiedCommand] = useState<boolean>(false)
+
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [isBusy, setIsBusy] = useState<boolean>(false)
+  const lastCompletedJobIdRef = useRef<string | null>(null)
+  const repoLoadSeqRef = useRef(0)
+  const restoreLoadSeqRef = useRef(0)
+
+  const loadRecoveryPointsForDir = useCallback(
+    async (dir: string, forRestoreOnly = false) => {
+      const trimmed = dir.trim()
+      const repoSeq = !forRestoreOnly ? ++repoLoadSeqRef.current : null
+      const restoreSeq =
+        forRestoreOnly || !useCustomRestoreSource ? ++restoreLoadSeqRef.current : null
+
+      if (!trimmed || typeof window.api?.listRecoveryPoints !== 'function') {
+        if (repoSeq !== null && repoSeq === repoLoadSeqRef.current) {
+          setRecoveryPoints([])
+          setRepoLoadState('idle')
+          setRepoLoadError(null)
+        }
+        if (restoreSeq !== null && restoreSeq === restoreLoadSeqRef.current) {
+          setRestoreRecoveryPoints([])
+          setRestoreLoadedRepoDir('')
+          setSelectedRestoreSnapshotId('')
+        }
+        return
+      }
+      if (repoSeq !== null) {
+        setRepoLoadState('loading')
+        setRepoLoadError(null)
+      }
+      try {
+        const res = await window.api.listRecoveryPoints({ backupRepoDir: trimmed })
+        if (repoSeq !== null && repoSeq === repoLoadSeqRef.current) {
+          setRecoveryPoints(res.recoveryPoints)
+          setRepoLoadState('loaded')
+          setRepoLoadError(null)
+        }
+        if (restoreSeq !== null && restoreSeq === restoreLoadSeqRef.current) {
+          setRestoreRecoveryPoints(res.recoveryPoints)
+          setRestoreLoadedRepoDir(trimmed)
+          setSelectedRestoreSnapshotId((prev) => {
+            if (prev && res.recoveryPoints.some((rp) => rp.snapshotId === prev && rp.isComplete)) {
+              return prev
+            }
+            return res.recoveryPoints.find((rp) => rp.isComplete)?.snapshotId ?? ''
+          })
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Backup destination cannot be read'
+        if (repoSeq !== null && repoSeq === repoLoadSeqRef.current) {
+          setRecoveryPoints([])
+          setRepoLoadState('error')
+          setRepoLoadError(msg)
+        }
+        if (restoreSeq !== null && restoreSeq === restoreLoadSeqRef.current) {
+          setRestoreRecoveryPoints([])
+          setRestoreLoadedRepoDir('')
+          setSelectedRestoreSnapshotId('')
+        }
+        if (forRestoreOnly && restoreSeq === restoreLoadSeqRef.current) {
+          setErrorMessage(msg)
+        }
+      }
+    },
+    [useCustomRestoreSource]
+  )
+
+  const refreshState = useCallback(
+    async (signal?: AbortSignal) => {
+      if (
+        signal?.aborted ||
+        typeof window.api?.listBackupDestinations !== 'function' ||
+        typeof window.api?.listBackupJobs !== 'function'
+      ) {
+        return
+      }
+      const version = ++refreshVersion.current
+      try {
+        const [destList, jobPage, currentActive] = await Promise.all([
+          window.api.listBackupDestinations(),
+          window.api.listBackupJobs({ limit: 25, offset: 0 }),
+          typeof window.api?.getActiveBackupJob === 'function'
+            ? window.api.getActiveBackupJob()
+            : Promise.resolve(null)
+        ])
+        if (signal?.aborted || version !== refreshVersion.current) return
+        setDestinations(destList)
+        setJobs(jobPage.items)
+        setActiveJob(currentActive)
+
+        let nextRepo = repoDir
+        if (destList.length > 0 && !selectedDestId) {
+          const first = destList[0]!
+          setSelectedDestId(first.id)
+          if (first.targetPath) {
+            nextRepo = first.targetPath
+            setRepoDir(first.targetPath)
+            if (!useCustomRestoreSource) {
+              setRestoreRepoDir(first.targetPath)
+            }
+          }
+        } else if (selectedDestId) {
+          const currentDest = destList.find((d) => d.id === selectedDestId)
+          if (currentDest?.targetPath && currentDest.targetPath !== repoDir) {
+            nextRepo = currentDest.targetPath
+            setRepoDir(currentDest.targetPath)
+          }
+        }
+
+        const newestCompleted = jobPage.items.find((j) => j.status === 'completed')
+        if (
+          newestCompleted &&
+          newestCompleted.id !== lastCompletedJobIdRef.current &&
+          nextRepo &&
+          nextRepo === repoDir
+        ) {
+          lastCompletedJobIdRef.current = newestCompleted.id
+          void loadRecoveryPointsForDir(nextRepo)
+        } else if (newestCompleted) {
+          lastCompletedJobIdRef.current = newestCompleted.id
+        }
+      } catch (err) {
+        if (signal?.aborted || version !== refreshVersion.current) return
+        setErrorMessage(err instanceof Error ? err.message : 'Failed to load backup state')
+      }
+    },
+    [loadRecoveryPointsForDir, repoDir, selectedDestId, useCustomRestoreSource]
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    queueMicrotask(() => void refreshState(controller.signal))
+    const unsubscribe = window.api?.onBackupProgress?.(({ job }) => {
+      setActiveJob(job.status === 'capturing' || job.status === 'running' ? job : null)
+      setRequestedJob((previous) => (previous?.id === job.id ? job : previous))
+      void refreshState(controller.signal)
+    })
+    return () => {
+      controller.abort()
+      unsubscribe?.()
+    }
+  }, [refreshState])
+
+  useEffect(() => {
+    if (!repoDir.trim()) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) {
+        void loadRecoveryPointsForDir(repoDir)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [repoDir, loadRecoveryPointsForDir])
+
+  const handleBrowseFolder = async (
+    title: string,
+    setter: (dir: string) => void
+  ): Promise<void> => {
+    if (typeof window.api?.selectBackupDirectory !== 'function') return
+    setErrorMessage(null)
+    try {
+      const res = await window.api.selectBackupDirectory({ title })
+      if (!res.canceled && res.directoryPath) {
+        setter(res.directoryPath)
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to select folder')
+    }
+  }
+
+  const handleSaveDestination = async (): Promise<void> => {
+    if (typeof window.api?.configureBackupDestination !== 'function') return
+    setErrorMessage(null)
+    if (!destName.trim() || !destPath.trim()) {
+      setErrorMessage('Please enter a destination name and folder path.')
+      return
+    }
+    let maxBytesPerSecond: number | null = null
+    if (storageType === 'nas' && nasRateCapMiB.trim() !== '') {
+      const parsedMiB = Number(nasRateCapMiB)
+      if (!Number.isFinite(parsedMiB) || parsedMiB <= 0) {
+        setErrorMessage('NAS transfer rate limit must be a positive number (MiB/s).')
+        return
+      }
+      maxBytesPerSecond = Math.max(65536, Math.round(parsedMiB * 1024 * 1024))
+    }
+
+    setIsBusy(true)
+    try {
+      const created = await window.api.configureBackupDestination({
+        name: destName.trim(),
+        kind: 'local_fs',
+        targetPath: destPath.trim(),
+        maxBytesPerSecond
+      })
+      setRequestedJob(null)
+      setSelectedDestId(created.id)
+      const nextPath = created.targetPath ?? ''
+      setRepoDir(nextPath)
+      if (!useCustomRestoreSource) {
+        restoreLoadSeqRef.current += 1
+        setRestoreRepoDir(nextPath)
+        if (nextPath.trim() !== restoreLoadedRepoDir.trim()) {
+          setRestoreRecoveryPoints([])
+          setRestoreLoadedRepoDir('')
+          setSelectedRestoreSnapshotId('')
+        }
+      }
+      setIsEditingLocation(false)
+      await refreshState()
+      if (nextPath) {
+        await loadRecoveryPointsForDir(nextPath)
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to save destination')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handleSelectDestination = (dest: BackupDestinationRecordDto): void => {
+    setRequestedJob(null)
+    setSelectedDestId(dest.id)
+    const nextPath = dest.targetPath ?? ''
+    setRepoDir(nextPath)
+    if (!useCustomRestoreSource) {
+      restoreLoadSeqRef.current += 1
+      setRestoreRepoDir(nextPath)
+      if (nextPath.trim() !== restoreLoadedRepoDir.trim()) {
+        setRestoreRecoveryPoints([])
+        setRestoreLoadedRepoDir('')
+        setSelectedRestoreSnapshotId('')
+      }
+    }
+  }
+
+  const handleStartBackup = async (): Promise<void> => {
+    if (typeof window.api?.startBackup !== 'function' || !selectedDestId) return
+    setErrorMessage(null)
+    setIsBusy(true)
+    try {
+      const job = await window.api.startBackup({ destinationId: selectedDestId })
+      setRequestedJob(job)
+      await refreshState()
+      if (job.status === 'completed' && repoDir.trim()) {
+        await loadRecoveryPointsForDir(repoDir)
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to start backup')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handlePauseJob = async (jobId: string): Promise<void> => {
+    if (typeof window.api?.pauseBackup !== 'function') return
+    setErrorMessage(null)
+    try {
+      await window.api.pauseBackup(jobId)
+      await refreshState()
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to pause backup')
+    }
+  }
+
+  const handleResumeJob = async (jobId: string): Promise<void> => {
+    if (typeof window.api?.resumeBackup !== 'function') return
+    setErrorMessage(null)
+    setIsBusy(true)
+    try {
+      const job = await window.api.resumeBackup(jobId)
+      setRequestedJob(job)
+      await refreshState()
+      if (job.status === 'completed' && repoDir.trim()) {
+        await loadRecoveryPointsForDir(repoDir)
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to resume backup')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handleCancelJob = async (jobId: string): Promise<void> => {
+    if (typeof window.api?.cancelBackup !== 'function') return
+    setErrorMessage(null)
+    try {
+      await window.api.cancelBackup(jobId)
+      await refreshState()
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to cancel backup')
+    }
+  }
+
+  const handleVerifyRecoveryPoint = async (
+    snapshotId: string,
+    targetRepoDir = repoDir
+  ): Promise<void> => {
+    const trimmedRepo = targetRepoDir.trim()
+    if (typeof window.api?.verifyRecoveryPoint !== 'function' || !trimmedRepo) return
+    const key = `${trimmedRepo}::${snapshotId}`
+    setErrorMessage(null)
+    setIsBusy(true)
+    try {
+      const res = await window.api.verifyRecoveryPoint({
+        backupRepoDir: trimmedRepo,
+        snapshotId
+      })
+      setVerifiedByKey((prev) => ({
+        ...prev,
+        [key]: { verifiedAtMs: Date.now(), result: res }
+      }))
+    } catch (err) {
+      setVerifiedByKey((prev) => {
+        if (!(key in prev)) return prev
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
+      setErrorMessage(err instanceof Error ? err.message : 'Backup verification failed')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handleRestoreFiles = async (): Promise<void> => {
+    if (typeof window.api?.restoreRecoveryPoint !== 'function') return
+    const activeRestoreRepo = restoreLoadedRepoDir.trim()
+    if (!isRestoreSourceSynced || !activeRestoreRepo || !selectedRestoreSnapshotId) {
+      setErrorMessage(
+        restoreSourceNeedsReload
+          ? 'Backup folder changed. Click Load backups before restoring.'
+          : 'Please choose a backup to restore.'
+      )
+      return
+    }
+    if (!restoreLocationDir.trim()) {
+      setErrorMessage('Please choose an empty restore location.')
+      return
+    }
+
+    const chosenRp =
+      restoreRecoveryPoints.find((rp) => rp.snapshotId === selectedRestoreSnapshotId) ?? null
+    const targetProfileDir = joinChildPath(restoreLocationDir, 'profile')
+    const targetVaultDir = hasInitializedVault(chosenRp)
+      ? joinChildPath(restoreLocationDir, 'vault')
+      : null
+
+    setErrorMessage(null)
+    setRestoreResult(null)
+    setCopiedCommand(false)
+    setIsBusy(true)
+    try {
+      const res = await window.api.restoreRecoveryPoint({
+        backupRepoDir: activeRestoreRepo,
+        snapshotId: selectedRestoreSnapshotId,
+        targetProfileDir,
+        targetVaultDir
+      })
+      setRestoreResult(res)
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Restore failed')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const selectedDestination = useMemo(
+    () => destinations.find((d) => d.id === selectedDestId) ?? null,
+    [destinations, selectedDestId]
+  )
+
+  const destJobs = useMemo(
+    () => jobs.filter((job) => !selectedDestId || job.destinationId === selectedDestId),
+    [jobs, selectedDestId]
+  )
+
+  const latestJob = useMemo(() => {
+    if (activeJob && (!selectedDestId || activeJob.destinationId === selectedDestId)) {
+      return activeJob
+    }
+    if (requestedJob && (!selectedDestId || requestedJob.destinationId === selectedDestId)) {
+      return destJobs.find((j) => j.id === requestedJob.id) ?? requestedJob
+    }
+    return destJobs[0] ?? null
+  }, [activeJob, destJobs, requestedJob, selectedDestId])
+
+  const latestRecoveryPoint = recoveryPoints[0] ?? null
+  const matchedLatestRecoveryPoint = latestJob
+    ? (recoveryPoints.find((rp) => rp.snapshotId === latestJob.snapshotId) ?? null)
+    : latestRecoveryPoint
+
+  const latestSnapshotId =
+    latestJob?.status === 'completed'
+      ? latestJob.snapshotId
+      : latestRecoveryPoint?.isComplete
+        ? latestRecoveryPoint.snapshotId
+        : null
+
+  const latestVerifiedInfo =
+    latestSnapshotId && repoDir.trim()
+      ? (verifiedByKey[`${repoDir.trim()}::${latestSnapshotId}`] ?? null)
+      : null
+
+  const isLatestRunning = latestJob?.status === 'capturing' || latestJob?.status === 'running'
+  const isLatestResumable =
+    latestJob?.status === 'paused' ||
+    latestJob?.status === 'interrupted' ||
+    latestJob?.status === 'queued_destination_unavailable'
+  const isLatestFailed = latestJob?.status === 'failed' || latestJob?.status === 'abandoned'
+  const isLatestCompleted =
+    latestJob?.status === 'completed' || (!latestJob && Boolean(latestRecoveryPoint?.isComplete))
+
+  const latestDestination =
+    destinations.find((d) => d.id === latestJob?.destinationId) ?? selectedDestination
+
+  const isDestinationDisconnected =
+    repoLoadState === 'error' ||
+    (isLatestCompleted && repoLoadState === 'loaded' && matchedLatestRecoveryPoint === null)
+
+  const latestVaultCopyCount: number | null = isDestinationDisconnected
+    ? null
+    : (matchedLatestRecoveryPoint?.vaultCopyCount ?? null)
+
+  const latestTimestampMs =
+    latestJob?.completedAtMs ??
+    latestJob?.updatedAtMs ??
+    latestJob?.createdAtMs ??
+    latestRecoveryPoint?.completedAtMs ??
+    latestRecoveryPoint?.createdAtMs ??
+    null
+
+  const progressPercent =
+    latestJob && latestJob.totalObjectCount > 0
+      ? Math.min(
+          100,
+          Math.round((latestJob.completedObjectCount / latestJob.totalObjectCount) * 100)
+        )
+      : 0
+
+  const showLocationEditor = destinations.length === 0 || isEditingLocation
+
+  const effectiveRestoreRepoDir = (useCustomRestoreSource ? restoreRepoDir : repoDir).trim()
+  const isRestoreSourceSynced =
+    Boolean(effectiveRestoreRepoDir) && effectiveRestoreRepoDir === restoreLoadedRepoDir.trim()
+
+  const completeRestoreChoices = useMemo(
+    () => (isRestoreSourceSynced ? restoreRecoveryPoints.filter((rp) => rp.isComplete) : []),
+    [isRestoreSourceSynced, restoreRecoveryPoints]
+  )
+  const selectedRestoreChoice = useMemo(
+    () => completeRestoreChoices.find((rp) => rp.snapshotId === selectedRestoreSnapshotId) ?? null,
+    [completeRestoreChoices, selectedRestoreSnapshotId]
+  )
+
+  const preparedProfilePreview = restoreLocationDir.trim()
+    ? joinChildPath(restoreLocationDir, 'profile')
+    : ''
+  const preparedVaultPreview =
+    restoreLocationDir.trim() && hasInitializedVault(selectedRestoreChoice)
+      ? joinChildPath(restoreLocationDir, 'vault')
+      : ''
+  const restoreSourceNeedsReload =
+    useCustomRestoreSource && restoreRepoDir.trim() !== restoreLoadedRepoDir.trim()
+
+  const historyItems = useMemo(() => {
+    const bySnapshot = new Map<
+      string,
+      {
+        key: string
+        snapshotId: string
+        job: BackupJobRecordDto | null
+        rp: BackupRecoveryPointSummary | null
+        timestampMs: number
+        destinationName: string
+      }
+    >()
+
+    for (const job of destJobs) {
+      const dest = destinations.find((d) => d.id === job.destinationId)
+      const rp = recoveryPoints.find((r) => r.snapshotId === job.snapshotId) ?? null
+      bySnapshot.set(job.snapshotId, {
+        key: job.id,
+        snapshotId: job.snapshotId,
+        job,
+        rp,
+        timestampMs: job.completedAtMs ?? job.updatedAtMs ?? job.createdAtMs,
+        destinationName: dest?.name ?? selectedDestination?.name ?? 'Backup destination'
+      })
+    }
+
+    for (const rp of recoveryPoints) {
+      if (!bySnapshot.has(rp.snapshotId)) {
+        bySnapshot.set(rp.snapshotId, {
+          key: rp.snapshotId,
+          snapshotId: rp.snapshotId,
+          job: null,
+          rp,
+          timestampMs: rp.completedAtMs ?? rp.createdAtMs ?? 0,
+          destinationName: selectedDestination?.name ?? repoDir
+        })
+      }
+    }
+
+    return Array.from(bySnapshot.values()).sort((a, b) => b.timestampMs - a.timestampMs)
+  }, [destJobs, destinations, recoveryPoints, repoDir, selectedDestination])
+
+  const launchCommand = restoreResult
+    ? `--user-data-dir="${restoreResult.restoredProfilePath}"`
+    : ''
+
+  return (
+    <div className="backup-restore-scroll">
+      <section className="backup-restore-panel" aria-labelledby="backup-restore-heading">
+        <header className="backup-page-header">
+          <div>
+            <div className="backup-page-title-row">
+              <HardDrive size={22} aria-hidden="true" />
+              <h2 id="backup-restore-heading">Backup &amp; Restore</h2>
+            </div>
+            <p className="backup-page-subtitle">
+              Keep a safe copy of your vault photos, documents, and catalog on a USB drive or
+              network folder.
+            </p>
+          </div>
+        </header>
+
+        {errorMessage && (
+          <div className="notice notice-error backup-callout backup-callout-error" role="alert">
+            <XCircle size={18} aria-hidden="true" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
+
+        {/* 1. Latest Backup Summary Card */}
+        <article className="backup-card backup-summary-card" aria-label="Latest backup summary">
+          <div className="backup-card-header">
+            <div className="backup-summary-status-block">
+              {latestJob ? (
+                <div
+                  className={`backup-summary-headline backup-job-notice${
+                    isLatestFailed
+                      ? ' backup-summary-headline-error'
+                      : isLatestCompleted
+                        ? ' backup-summary-headline-success backup-job-notice-success'
+                        : isLatestResumable
+                          ? ' backup-summary-headline-warn'
+                          : ''
+                  }`}
+                  role={isLatestFailed ? 'alert' : 'status'}
+                >
+                  {isLatestCompleted && <CheckCircle2 size={20} aria-hidden="true" />}
+                  {isLatestFailed && <XCircle size={20} aria-hidden="true" />}
+                  {isLatestResumable && <AlertTriangle size={20} aria-hidden="true" />}
+                  <span>{getPlainJobHeadline(latestJob)}</span>
+                </div>
+              ) : isLatestCompleted ? (
+                <div
+                  className="backup-summary-headline backup-summary-headline-success backup-job-notice backup-job-notice-success"
+                  role="status"
+                >
+                  <CheckCircle2 size={20} aria-hidden="true" />
+                  <span>Backup completed successfully</span>
+                </div>
+              ) : selectedDestination ? (
+                <div className="backup-summary-headline">
+                  <span>No backups run yet</span>
+                </div>
+              ) : (
+                <div className="backup-summary-headline">
+                  <span>Set up a backup destination to get started</span>
+                </div>
+              )}
+
+              {latestVerifiedInfo && (
+                <div>
+                  <span className="backup-verified-pill">
+                    <ShieldCheck size={14} aria-hidden="true" />
+                    Verified on {formatTimestamp(latestVerifiedInfo.verifiedAtMs)}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="backup-summary-actions">
+              {isLatestRunning && latestJob && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void handlePauseJob(latestJob.id)}
+                  >
+                    <Pause size={14} aria-hidden="true" /> Pause
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void handleCancelJob(latestJob.id)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+
+              {isLatestResumable && latestJob && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={isBusy || Boolean(activeJob)}
+                    onClick={() => void handleResumeJob(latestJob.id)}
+                  >
+                    <Play size={14} aria-hidden="true" /> Resume
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void handleCancelJob(latestJob.id)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+
+              {selectedDestination && !isLatestRunning && !isLatestResumable && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={isBusy || !selectedDestId || Boolean(activeJob)}
+                    onClick={() => void handleStartBackup()}
+                  >
+                    <Play size={14} aria-hidden="true" /> Back up now
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={
+                      isBusy || !latestSnapshotId || !repoDir.trim() || isDestinationDisconnected
+                    }
+                    onClick={() =>
+                      latestSnapshotId && void handleVerifyRecoveryPoint(latestSnapshotId)
+                    }
+                  >
+                    <ShieldCheck size={14} aria-hidden="true" /> Verify backup
+                  </button>
+                </>
+              )}
+
+              {destinations.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setIsEditingLocation((prev) => !prev)}
+                >
+                  <MapPin size={14} aria-hidden="true" />{' '}
+                  {isEditingLocation ? 'Close location settings' : 'Change backup location'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {isLatestRunning && latestJob && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div className="backup-progress-bar-track" aria-hidden="true">
+                <div
+                  className="backup-progress-bar-fill"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <div className="backup-metric-sub">
+                {latestJob.totalObjectCount > 0
+                  ? `${latestJob.completedObjectCount} of ${latestJob.totalObjectCount} items backed up (${formatBytes(latestJob.transferredBytes)})`
+                  : 'Preparing catalog and vault files…'}
+              </div>
+            </div>
+          )}
+
+          {latestJob && getPlainPauseOrFailureDetail(latestJob) && (
+            <div
+              className={`backup-callout ${
+                isLatestFailed ? 'backup-callout-error' : 'backup-callout-warning'
+              }`}
+            >
+              {isLatestFailed ? (
+                <XCircle size={16} aria-hidden="true" />
+              ) : (
+                <AlertTriangle size={16} aria-hidden="true" />
+              )}
+              <span>{getPlainPauseOrFailureDetail(latestJob)}</span>
+            </div>
+          )}
+
+          {selectedDestination && (latestJob || latestRecoveryPoint) && (
+            <div className="backup-summary-grid">
+              <div className="backup-metric">
+                <span className="backup-metric-label">Latest backup</span>
+                <span className="backup-metric-value">{formatTimestamp(latestTimestampMs)}</span>
+                {isLatestCompleted && !latestVerifiedInfo && (
+                  <span className="backup-metric-sub">
+                    Not yet verified — run Verify backup to check every file
+                  </span>
+                )}
+              </div>
+
+              <div className="backup-metric">
+                <span className="backup-metric-label">Destination</span>
+                <span className="backup-metric-value">
+                  {latestDestination?.name ?? selectedDestination.name}
+                </span>
+                <span className="backup-metric-sub">
+                  {latestDestination?.targetPath ?? selectedDestination.targetPath ?? '—'}
+                </span>
+              </div>
+
+              <div className="backup-metric">
+                <span className="backup-metric-label">Vault files included</span>
+                {isDestinationDisconnected || latestVaultCopyCount === null ? (
+                  <>
+                    <span className="backup-metric-value">File count unavailable</span>
+                    <span className="backup-metric-sub">
+                      {repoLoadState === 'loading'
+                        ? 'Checking backup destination…'
+                        : 'Destination is disconnected or cannot be read.'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="backup-metric-value">
+                      {latestVaultCopyCount === 0
+                        ? '0 vault files'
+                        : `${latestVaultCopyCount} ${latestVaultCopyCount === 1 ? 'vault file' : 'vault files'}`}
+                    </span>
+                    {matchedLatestRecoveryPoint?.vaultName && (
+                      <span className="backup-metric-sub">
+                        Vault: {matchedLatestRecoveryPoint.vaultName}
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {isLatestCompleted && !isDestinationDisconnected && latestVaultCopyCount === 0 && (
+            <div className="backup-callout backup-callout-warning" role="status">
+              <AlertTriangle size={18} aria-hidden="true" />
+              <div>
+                <strong>No photos or documents were backed up.</strong> Scanned files must be
+                imported into the vault to be included in backups. This backup saved your catalog
+                and annotations only.
+              </div>
+            </div>
+          )}
+
+          {selectedDestination && !latestJob && !latestRecoveryPoint && (
+            <div className="backup-summary-grid">
+              <div className="backup-metric">
+                <span className="backup-metric-label">Destination</span>
+                <span className="backup-metric-value">{selectedDestination.name}</span>
+                <span className="backup-metric-sub">{selectedDestination.targetPath ?? '—'}</span>
+              </div>
+              <div className="backup-metric">
+                <span className="backup-metric-label">Status</span>
+                <span className="backup-metric-value">Ready</span>
+                <span className="backup-metric-sub">
+                  Click Back up now to create your first backup.
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Collapsible Setup / Change Backup Location */}
+          {showLocationEditor && (
+            <div className="backup-location-panel" aria-label="Backup location settings">
+              {destinations.length > 0 && (
+                <div>
+                  <strong style={{ display: 'block', marginBottom: '8px' }}>
+                    Saved backup locations
+                  </strong>
+                  <ul className="backup-dest-list">
+                    {destinations.map((d) => (
+                      <li key={d.id}>
+                        <label className="backup-dest-item">
+                          <input
+                            type="radio"
+                            name="selected-backup-destination"
+                            checked={selectedDestId === d.id}
+                            onChange={() => handleSelectDestination(d)}
+                          />
+                          <span>
+                            <strong>{d.name}</strong> — <code>{d.targetPath ?? '(cloud)'}</code>{' '}
+                            {d.maxBytesPerSecond !== null
+                              ? `(${formatBytes(d.maxBytesPerSecond)}/s limit)`
+                              : '(full speed)'}
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="backup-form-grid">
+                <strong style={{ color: 'var(--text-main)' }}>
+                  {destinations.length === 0
+                    ? 'Choose where to store your backups'
+                    : 'Add or update backup location'}
+                </strong>
+
+                <div className="backup-radio-group">
+                  <label className="backup-radio-option">
+                    <input
+                      type="radio"
+                      name="backup-storage-type"
+                      checked={storageType === 'usb'}
+                      onChange={() => {
+                        setStorageType('usb')
+                        if (destName === 'NAS Backup Share') setDestName('USB Backup Drive')
+                      }}
+                    />
+                    USB Drive (Full speed)
+                  </label>
+                  <label className="backup-radio-option">
+                    <input
+                      type="radio"
+                      name="backup-storage-type"
+                      checked={storageType === 'nas'}
+                      onChange={() => {
+                        setStorageType('nas')
+                        if (destName === 'USB Backup Drive') setDestName('NAS Backup Share')
+                      }}
+                    />
+                    NAS / Network Share (Speed-limited)
+                  </label>
+                </div>
+
+                <label>
+                  Destination Name
+                  <input
+                    type="text"
+                    value={destName}
+                    onChange={(e) => setDestName(e.target.value)}
+                    placeholder="e.g. USB Backup Drive or \\NAS\Backups\PersonalVault"
+                    style={{ width: '100%' }}
+                  />
+                </label>
+
+                <div className="backup-field-row">
+                  <label style={{ flex: 1, minWidth: '220px' }}>
+                    Destination Folder (Local drive or UNC path)
+                    <input
+                      type="text"
+                      value={destPath}
+                      onChange={(e) => setDestPath(e.target.value)}
+                      placeholder="E:\PersonalVaultBackup or \\NAS\Backups\PersonalVault"
+                      style={{ width: '100%' }}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() =>
+                      void handleBrowseFolder('Select Backup Destination Folder', setDestPath)
+                    }
+                  >
+                    <FolderOpen size={14} aria-hidden="true" /> Browse…
+                  </button>
+                </div>
+
+                {storageType === 'nas' && (
+                  <label>
+                    NAS Transfer Speed Limit (MiB/s, min 64 KiB/s)
+                    <input
+                      type="number"
+                      min="0.0625"
+                      step="0.5"
+                      value={nasRateCapMiB}
+                      onChange={(e) => setNasRateCapMiB(e.target.value)}
+                      style={{ width: '180px' }}
+                    />
+                  </label>
+                )}
+
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={isBusy}
+                    onClick={() => void handleSaveDestination()}
+                  >
+                    Save destination
+                  </button>
+                  {destinations.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setIsEditingLocation(false)}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="backup-scope-footnote" role="note">
+            <ShieldAlert size={15} aria-hidden="true" />
+            <span>
+              <strong>Files outside the vault are excluded:</strong> backups save your catalog,
+              annotations/collections, and imported vault files only. Original source folders,
+              thumbnails, and offline AI models are not copied.
+            </span>
+          </div>
+        </article>
+
+        {/* 2. Backup History */}
+        <article className="backup-card" aria-labelledby="backup-history-heading">
+          <div className="backup-card-header">
+            <div>
+              <h3 id="backup-history-heading">Backup History</h3>
+              <p className="backup-card-subtitle">
+                {selectedDestination
+                  ? `Backups for ${selectedDestination.name}`
+                  : 'Your past backups will appear here.'}
+              </p>
+            </div>
+            {selectedDestination && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={repoLoadState === 'loading'}
+                onClick={() => {
+                  void refreshState()
+                  if (repoDir.trim()) void loadRecoveryPointsForDir(repoDir)
+                }}
+                aria-label="Refresh backup history"
+              >
+                <RefreshCw size={14} aria-hidden="true" /> Refresh
+              </button>
+            )}
+          </div>
+
+          {repoLoadState === 'error' && repoLoadError && (
+            <div className="backup-callout backup-callout-warning">
+              <AlertTriangle size={16} aria-hidden="true" />
+              <span>
+                Backup destination is disconnected or unavailable ({repoLoadError}). Reconnect it to
+                inspect backed-up file counts or verify recovery points.
+              </span>
+            </div>
+          )}
+
+          {historyItems.length === 0 ? (
+            <p style={{ color: 'var(--text-muted)', margin: 0 }}>No backups recorded yet.</p>
+          ) : (
+            <ul className="backup-history-list">
+              {historyItems.map((item) => {
+                const { job, rp, snapshotId } = item
+                const isRunning = job?.status === 'capturing' || job?.status === 'running'
+                const isResumable =
+                  job?.status === 'paused' ||
+                  job?.status === 'interrupted' ||
+                  job?.status === 'queued_destination_unavailable'
+                const isExpanded = Boolean(expandedDetails[item.key])
+                const verifiedInfo = repoDir.trim()
+                  ? (verifiedByKey[`${repoDir.trim()}::${snapshotId}`] ?? null)
+                  : null
+                const canVerify =
+                  Boolean(rp?.isComplete) && !isRunning && !isResumable && Boolean(repoDir.trim())
+
+                return (
+                  <li key={item.key} className="backup-history-item">
+                    <div className="backup-history-row">
+                      <div className="backup-history-primary">
+                        <div className="backup-history-title">
+                          <span>{formatTimestamp(item.timestampMs)}</span>
+                          {job ? (
+                            <span
+                              className={`${getStatusPillClass(job.status)} backup-status-pill-cap`}
+                              data-testid={`backup-job-status-${job.id}`}
+                            >
+                              {job.status}
+                            </span>
+                          ) : (
+                            <span
+                              className={
+                                rp?.isComplete
+                                  ? 'backup-status-pill backup-status-pill-success'
+                                  : 'backup-status-pill backup-status-pill-warn'
+                              }
+                            >
+                              {rp?.isComplete ? 'Completed' : 'Incomplete'}
+                            </span>
+                          )}
+                          {verifiedInfo && (
+                            <span className="backup-verified-pill">
+                              <ShieldCheck size={12} aria-hidden="true" />
+                              Verified on {formatTimestamp(verifiedInfo.verifiedAtMs)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="backup-history-meta">
+                          {item.destinationName} •{' '}
+                          {rp ? formatVaultFileCount(rp.vaultCopyCount) : 'File count unavailable'}
+                        </div>
+                      </div>
+
+                      <div className="backup-history-actions">
+                        {isRunning && job && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => void handlePauseJob(job.id)}
+                          >
+                            <Pause size={14} aria-hidden="true" /> Pause
+                          </button>
+                        )}
+                        {isResumable && job && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={isBusy || Boolean(activeJob)}
+                            onClick={() => void handleResumeJob(job.id)}
+                          >
+                            <Play size={14} aria-hidden="true" /> Resume
+                          </button>
+                        )}
+                        {(isRunning || isResumable) && job && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => void handleCancelJob(job.id)}
+                          >
+                            Cancel
+                          </button>
+                        )}
+                        {canVerify && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={isBusy}
+                            onClick={() => void handleVerifyRecoveryPoint(snapshotId)}
+                          >
+                            <ShieldCheck size={14} aria-hidden="true" /> Verify
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          aria-expanded={isExpanded}
+                          onClick={() =>
+                            setExpandedDetails((prev) => ({
+                              ...prev,
+                              [item.key]: !prev[item.key]
+                            }))
+                          }
+                        >
+                          {isExpanded ? (
+                            <ChevronDown size={14} aria-hidden="true" />
+                          ) : (
+                            <ChevronRight size={14} aria-hidden="true" />
+                          )}
+                          Details
+                        </button>
+                      </div>
+                    </div>
+
+                    {job?.errorMessage && (
+                      <div style={{ color: '#ff8787', fontSize: '13px' }}>{job.errorMessage}</div>
+                    )}
+
+                    {isExpanded && (
+                      <div className="backup-details-drawer">
+                        <div>
+                          <span>Snapshot ID: </span>
+                          <code>{snapshotId}</code>
+                        </div>
+                        <div>
+                          <span>Backup chunks: </span>
+                          <code>
+                            {job
+                              ? `${job.completedObjectCount}/${job.totalObjectCount}`
+                              : (rp?.totalObjectCount ?? '—')}
+                          </code>
+                        </div>
+                        {job && (
+                          <div>
+                            <span>Written / Reused: </span>
+                            <code>
+                              written: {job.writtenChunkCount}, reused: {job.reusedChunkCount}
+                            </code>
+                          </div>
+                        )}
+                        <div>
+                          <span>Logical size: </span>
+                          <code>
+                            {formatBytes(job?.totalLogicalBytes ?? rp?.totalLogicalBytes ?? null)}
+                          </code>
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </article>
+
+        {/* 3. Guided Restore Flow */}
+        <article className="backup-card" aria-labelledby="restore-files-heading">
+          <div className="backup-card-header">
+            <div>
+              <h3 id="restore-files-heading">Restore Files</h3>
+              <p className="backup-card-subtitle">
+                Recover your catalog and vault files into a separate folder without modifying your
+                current library.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => {
+                setUseCustomRestoreSource((prev) => {
+                  const next = !prev
+                  restoreLoadSeqRef.current += 1
+                  if (!next) {
+                    setRestoreRepoDir(repoDir)
+                    if (repoLoadState === 'loaded' && repoDir.trim()) {
+                      setRestoreRecoveryPoints(recoveryPoints)
+                      setRestoreLoadedRepoDir(repoDir.trim())
+                      setSelectedRestoreSnapshotId(
+                        recoveryPoints.find((rp) => rp.isComplete)?.snapshotId ?? ''
+                      )
+                    } else {
+                      setRestoreRecoveryPoints([])
+                      setRestoreLoadedRepoDir('')
+                      setSelectedRestoreSnapshotId('')
+                    }
+                  } else if (restoreRepoDir.trim() !== restoreLoadedRepoDir.trim()) {
+                    setRestoreRecoveryPoints([])
+                    setRestoreLoadedRepoDir('')
+                    setSelectedRestoreSnapshotId('')
+                  }
+                  return next
+                })
+              }}
+            >
+              {useCustomRestoreSource
+                ? 'Use configured destination'
+                : 'Choose another backup folder'}
+            </button>
+          </div>
+
+          {useCustomRestoreSource && (
+            <div className="backup-field-row">
+              <label style={{ flex: 1, minWidth: '220px' }}>
+                Backup Repository Folder
+                <input
+                  type="text"
+                  value={restoreRepoDir}
+                  onChange={(e) => {
+                    const nextVal = e.target.value
+                    setRestoreRepoDir(nextVal)
+                    if (nextVal.trim() !== restoreLoadedRepoDir.trim()) {
+                      restoreLoadSeqRef.current += 1
+                      setRestoreRecoveryPoints([])
+                      setRestoreLoadedRepoDir('')
+                      setSelectedRestoreSnapshotId('')
+                    }
+                  }}
+                  placeholder="Path to backup folder"
+                  style={{ width: '100%' }}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() =>
+                  void handleBrowseFolder('Select Backup Folder to Restore From', (dir) => {
+                    setRestoreRepoDir(dir)
+                    setRestoreRecoveryPoints([])
+                    setRestoreLoadedRepoDir('')
+                    setSelectedRestoreSnapshotId('')
+                    void loadRecoveryPointsForDir(dir, true)
+                  })
+                }
+              >
+                <FolderOpen size={14} aria-hidden="true" /> Browse…
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={isBusy || !restoreRepoDir.trim()}
+                onClick={() => void loadRecoveryPointsForDir(restoreRepoDir, true)}
+              >
+                Load backups
+              </button>
+            </div>
+          )}
+
+          <div className="backup-restore-steps">
+            {/* Step 1: Choose a backup */}
+            <div className="backup-restore-step">
+              <div className="backup-restore-step-header">
+                <span className="backup-step-badge">1</span>
+                <span>Choose a backup</span>
+              </div>
+
+              {restoreSourceNeedsReload && (
+                <div className="backup-callout backup-callout-warning">
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <span>
+                    Backup folder changed. Click <strong>Load backups</strong> to load backups from
+                    the new folder before restoring.
+                  </span>
+                </div>
+              )}
+
+              {completeRestoreChoices.length === 0 ? (
+                <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '13px' }}>
+                  No complete backups found at this location yet.
+                </p>
+              ) : (
+                <div className="backup-restore-choice-list">
+                  {completeRestoreChoices.map((rp) => {
+                    const isSelected = selectedRestoreSnapshotId === rp.snapshotId
+                    const activeRestoreRepo = restoreLoadedRepoDir.trim()
+                    const verifiedInfo = activeRestoreRepo
+                      ? verifiedByKey[`${activeRestoreRepo}::${rp.snapshotId}`]
+                      : null
+
+                    return (
+                      <label
+                        key={rp.snapshotId}
+                        className={`backup-restore-choice${
+                          isSelected ? ' backup-restore-choice-selected' : ''
+                        }`}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <input
+                            type="radio"
+                            name="restore-backup-choice"
+                            checked={isSelected}
+                            onChange={() => setSelectedRestoreSnapshotId(rp.snapshotId)}
+                          />
+                          <div>
+                            <div style={{ fontWeight: 500, color: 'var(--text-main)' }}>
+                              {formatTimestamp(rp.completedAtMs ?? rp.createdAtMs)}
+                            </div>
+                            <div style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
+                              {formatVaultFileCount(rp.vaultCopyCount)}
+                              {rp.vaultName ? ` (${rp.vaultName})` : ''} •{' '}
+                              {formatBytes(rp.totalLogicalBytes)}
+                            </div>
+                          </div>
+                        </div>
+                        {verifiedInfo && (
+                          <span className="backup-verified-pill">
+                            <ShieldCheck size={12} aria-hidden="true" />
+                            Verified
+                          </span>
+                        )}
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Step 2: Choose one restore location */}
+            <div className="backup-restore-step">
+              <div className="backup-restore-step-header">
+                <span className="backup-step-badge">2</span>
+                <span>Choose one restore location</span>
+              </div>
+              <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '13px' }}>
+                Pick one new or empty folder. Personal Vault will prepare separate{' '}
+                <code>profile</code> and <code>vault</code> subfolders inside it, keeping your
+                current library untouched.
+              </p>
+
+              <div className="backup-field-row">
+                <label style={{ flex: 1, minWidth: '240px' }}>
+                  Restore Location (empty folder)
+                  <input
+                    type="text"
+                    value={restoreLocationDir}
+                    onChange={(e) => setRestoreLocationDir(e.target.value)}
+                    placeholder="e.g. D:\RestoredVault"
+                    style={{ width: '100%' }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() =>
+                    void handleBrowseFolder('Select Empty Restore Location', setRestoreLocationDir)
+                  }
+                >
+                  <FolderOpen size={14} aria-hidden="true" /> Browse…
+                </button>
+              </div>
+
+              {preparedProfilePreview && (
+                <div className="backup-restore-subfolders">
+                  <div>
+                    Profile subfolder: <code>{preparedProfilePreview}</code>
+                  </div>
+                  {preparedVaultPreview ? (
+                    <div>
+                      Vault subfolder: <code>{preparedVaultPreview}</code>
+                    </div>
+                  ) : (
+                    <div>No vault subfolder needed (this backup contains catalog data only).</div>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={
+                    isBusy ||
+                    !isRestoreSourceSynced ||
+                    !selectedRestoreSnapshotId ||
+                    !restoreLocationDir.trim()
+                  }
+                  onClick={() => void handleRestoreFiles()}
+                >
+                  <RotateCcw size={14} aria-hidden="true" /> Restore files
+                </button>
+              </div>
+            </div>
+
+            {/* Step 3: Where your files went & how to open */}
+            {restoreResult && (
+              <div className="backup-restore-result-box" role="status">
+                <div className="backup-restore-step-header">
+                  <CheckCircle2 size={18} color="#6ed49b" aria-hidden="true" />
+                  <span>Restore complete — {restoreResult.verifiedFileCount} files restored</span>
+                </div>
+
+                {restoreResult.restoredVaultPath && (
+                  <div style={{ fontSize: '13px' }}>
+                    <strong>Restored vault files:</strong>{' '}
+                    <code>{restoreResult.restoredVaultPath}</code>
+                    <div style={{ color: 'var(--text-muted)', marginTop: '2px' }}>
+                      Open this folder in File Explorer to browse and open your restored photos and
+                      documents directly.
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ fontSize: '13px' }}>
+                  <strong>Restored profile:</strong>{' '}
+                  <code>{restoreResult.restoredProfilePath}</code>
+                </div>
+
+                <div style={{ fontSize: '13px' }}>
+                  <strong>How to open the restored copy in Personal Vault:</strong>
+                  <div className="backup-command-row" style={{ marginTop: '6px' }}>
+                    <code className="backup-command-code">{launchCommand}</code>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(launchCommand)
+                        setCopiedCommand(true)
+                      }}
+                    >
+                      <Copy size={14} aria-hidden="true" />{' '}
+                      {copiedCommand ? 'Copied' : 'Copy launch flag'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </article>
+      </section>
+    </div>
+  )
+}

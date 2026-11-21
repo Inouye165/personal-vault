@@ -1,4 +1,4 @@
-import { CheckSquare, Copy, FileText, Image, Layers, ShieldCheck, X } from 'lucide-react'
+import { CheckSquare, Copy, FileText, HardDrive, Image, Layers, ShieldCheck, X } from 'lucide-react'
 import { useRef, type ReactNode } from 'react'
 import type { NavigationTab } from '../../../shared/validation/ipc-schemas'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -19,7 +19,8 @@ const ICONS: Record<NavigationTab, ReactNode> = {
   photos: <Image size={18} aria-hidden="true" />,
   documents: <FileText size={18} aria-hidden="true" />,
   review: <CheckSquare size={18} aria-hidden="true" />,
-  duplicates: <Copy size={18} aria-hidden="true" />
+  duplicates: <Copy size={18} aria-hidden="true" />,
+  backup: <HardDrive size={18} aria-hidden="true" />
 }
 
 export function Sidebar({

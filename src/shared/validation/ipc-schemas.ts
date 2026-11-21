@@ -9,7 +9,14 @@ export const AppInfoSchema = z.object({
 
 export type AppInfo = z.infer<typeof AppInfoSchema>
 
-export const NavigationTabSchema = z.enum(['all', 'photos', 'documents', 'review', 'duplicates'])
+export const NavigationTabSchema = z.enum([
+  'all',
+  'photos',
+  'documents',
+  'review',
+  'duplicates',
+  'backup'
+])
 
 export type NavigationTab = z.infer<typeof NavigationTabSchema>
 

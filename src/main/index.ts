@@ -33,6 +33,9 @@ import {
 } from './services/documents/semantic'
 import { UnifiedSearchCoordinator } from './services/unified-search'
 import { ExportCoordinator } from './services/export'
+import { BackupCoordinator } from './services/backup/coordinator'
+import { RestoreIncompleteError } from './services/backup/errors'
+import { inspectRestoredProfileStatus } from './services/backup/restore'
 import { AppWorkerBudget } from './services/worker-budget'
 
 function logStartup(message: string): void {
@@ -82,6 +85,7 @@ let docSearchCoordinator: DocumentSearchCoordinator | null = null
 let unifiedSearchCoordinator: UnifiedSearchCoordinator | null = null
 let documentClassificationCoordinator: DocumentClassificationCoordinator | null = null
 let exportCoordinator: ExportCoordinator | null = null
+let backupCoordinator: BackupCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -175,7 +179,15 @@ if (!app.requestSingleInstanceLock()) {
       setupSecurityPolicies(location)
       logStartup('setupSecurityPolicies completed')
 
-      const catalogPath = join(app.getPath('userData'), 'vault-catalog.db')
+      const userDataDir = app.getPath('userData')
+      const restoreStatus = inspectRestoredProfileStatus(userDataDir)
+      if (restoreStatus.status === 'interrupted' || restoreStatus.status === 'corrupt') {
+        throw new RestoreIncompleteError(
+          `Refusing startup: restored profile at "${userDataDir}" is ${restoreStatus.status}${restoreStatus.reason ? ` (${restoreStatus.reason})` : ''}`
+        )
+      }
+
+      const catalogPath = join(userDataDir, 'vault-catalog.db')
       logStartup(`Opening catalog at ${catalogPath}`)
       catalog = CatalogDatabase.open({ catalogPath })
       logStartup('CatalogDatabase.open completed')
@@ -392,11 +404,24 @@ if (!app.requestSingleInstanceLock()) {
 
       exportCoordinator = new ExportCoordinator({
         catalog,
-        userDataDir: app.getPath('userData'),
+        userDataDir,
         appVersion: app.getVersion()
       })
       const recoveredExportJobs = exportCoordinator.initialize()
       logStartup(`exportCoordinator initialized (recovered=${recoveredExportJobs})`)
+
+      backupCoordinator = new BackupCoordinator({
+        catalog,
+        userDataDir,
+        appVersion: app.getVersion(),
+        vaultImportCoordinator: vaultCoordinator,
+        appPath: app.getAppPath(),
+        isPackaged: app.isPackaged
+      })
+      const backupInit = backupCoordinator.initialize()
+      logStartup(
+        `backupCoordinator initialized (interrupted=${backupInit.interruptedCount}, cleanedStaging=${backupInit.cleanedStagingDirs.length})`
+      )
 
       registerIpcHandlers({
         validateSender: createSenderValidator({
@@ -421,6 +446,8 @@ if (!app.requestSingleInstanceLock()) {
         unifiedSearchCoordinator,
         documentClassificationCoordinator,
         exportCoordinator,
+        backupCoordinator,
+        userDataDir,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
@@ -437,6 +464,9 @@ if (!app.requestSingleInstanceLock()) {
         `Fatal error during application startup: ${err instanceof Error ? err.stack : String(err)}`
       )
       console.error('Fatal error during application startup:', err)
+      if (err instanceof RestoreIncompleteError) {
+        app.exit(1)
+      }
     })
 
   let isQuitting = false
@@ -521,6 +551,11 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down export coordinator')
             await exportCoordinator.shutdown()
             logStartup('export coordinator shutdown done')
+          }
+          if (backupCoordinator) {
+            logStartup('shutting down backup coordinator')
+            await backupCoordinator.shutdown()
+            logStartup('backup coordinator shutdown done')
           }
         } finally {
           if (catalog && !catalog.isClosed()) {

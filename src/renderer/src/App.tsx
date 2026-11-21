@@ -8,6 +8,7 @@ import { ScanJobsPanel } from './components/ScanJobsPanel'
 import { Sidebar } from './components/Sidebar'
 import { UnifiedSearchPanel } from './components/UnifiedSearchPanel'
 import { VaultImportPanel } from './components/VaultImportPanel'
+import { BackupRestorePanel } from './components/BackupRestorePanel'
 import { useScanJobs } from './hooks/useScanJobs'
 import { useMediaQuery } from './hooks/useMediaQuery'
 import { useUnifiedSearch } from './hooks/useUnifiedSearch'
@@ -112,9 +113,12 @@ export function App() {
               <p>{state.message}</p>
             </div>
           )}
-          {state.phase === 'ready' && state.vaultStatus.sourceCount === 0 && (
-            <EmptyState currentTab={currentTab} scanJobsProps={scanPanelProps} />
-          )}
+          {state.phase === 'ready' && currentTab === 'backup' && <BackupRestorePanel />}
+          {state.phase === 'ready' &&
+            currentTab !== 'backup' &&
+            state.vaultStatus.sourceCount === 0 && (
+              <EmptyState currentTab={currentTab} scanJobsProps={scanPanelProps} />
+            )}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
             currentTab === 'photos' && <PhotosPanel />}
@@ -133,6 +137,7 @@ export function App() {
             currentTab !== 'documents' &&
             currentTab !== 'duplicates' &&
             currentTab !== 'review' &&
+            currentTab !== 'backup' &&
             (unifiedSearch.hasActiveSearch ? (
               <UnifiedSearchPanel
                 search={unifiedSearch}

@@ -1,6 +1,45 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../shared/contracts/channels.js'
 import {
+  BackupConfigureDestinationRequestSchema,
+  BackupDestinationRecordSchema,
+  BackupJobActionRequestSchema,
+  BackupJobActionResponseSchema,
+  BackupJobRecordSchema,
+  BackupListDestinationsRequestSchema,
+  BackupListDestinationsResponseSchema,
+  BackupListJobsRequestSchema,
+  BackupListJobsResponseSchema,
+  BackupListRecoveryPointsRequestSchema,
+  BackupListRecoveryPointsResponseSchema,
+  BackupProgressEventSchema,
+  BackupRestoreRequestSchema,
+  BackupRestoreResponseSchema,
+  BackupSelectDirectoryRequestSchema,
+  BackupSelectDirectoryResponseSchema,
+  BackupStartRequestSchema,
+  BackupVerifyRecoveryPointRequestSchema,
+  BackupVerifyRecoveryPointResponseSchema,
+  type BackupConfigureDestinationRequest,
+  type BackupDestinationRecordDto,
+  type BackupJobActionResponse,
+  type BackupJobRecordDto,
+  type BackupListDestinationsRequest,
+  type BackupListDestinationsResponse,
+  type BackupListJobsRequest,
+  type BackupListJobsResponse,
+  type BackupListRecoveryPointsRequest,
+  type BackupListRecoveryPointsResponse,
+  type BackupProgressEvent,
+  type BackupRestoreRequest,
+  type BackupRestoreResponse,
+  type BackupSelectDirectoryRequest,
+  type BackupSelectDirectoryResponse,
+  type BackupStartRequest,
+  type BackupVerifyRecoveryPointRequest,
+  type BackupVerifyRecoveryPointResponse
+} from '../shared/validation/backup-ipc-schemas.js'
+import {
   ExportCancelRequestSchema,
   ExportCancelResponseSchema,
   ExportGetJobItemsRequestSchema,
@@ -1825,6 +1864,196 @@ const api: VaultApi = {
     ipcRenderer.on(IPC_CHANNELS.EXPORT_PROGRESS_EVENT, wrapped)
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.EXPORT_PROGRESS_EVENT, wrapped)
+    }
+  },
+
+  async selectBackupDirectory(
+    request?: BackupSelectDirectoryRequest
+  ): Promise<BackupSelectDirectoryResponse> {
+    const parsed = validatePayload(BackupSelectDirectoryRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid selectBackupDirectory request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_SELECT_DIRECTORY, parsed.data)
+    const result = validatePayload(BackupSelectDirectoryResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid selectBackupDirectory response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async configureBackupDestination(
+    request: BackupConfigureDestinationRequest
+  ): Promise<BackupDestinationRecordDto> {
+    const parsed = validatePayload(BackupConfigureDestinationRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid configureBackupDestination request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_CONFIGURE_DESTINATION, parsed.data)
+    const result = validatePayload(BackupDestinationRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid configureBackupDestination response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listBackupDestinations(
+    request?: BackupListDestinationsRequest
+  ): Promise<BackupListDestinationsResponse> {
+    const parsed = validatePayload(BackupListDestinationsRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid listBackupDestinations request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_LIST_DESTINATIONS, parsed.data)
+    const result = validatePayload(BackupListDestinationsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listBackupDestinations response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async startBackup(request: BackupStartRequest): Promise<BackupJobRecordDto> {
+    const parsed = validatePayload(BackupStartRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid startBackup request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_START, parsed.data)
+    const result = validatePayload(BackupJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid startBackup response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async pauseBackup(jobId: string): Promise<BackupJobActionResponse> {
+    const parsed = validatePayload(BackupJobActionRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid pauseBackup request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_PAUSE, parsed.data)
+    const result = validatePayload(BackupJobActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid pauseBackup response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async resumeBackup(jobId: string): Promise<BackupJobRecordDto> {
+    const parsed = validatePayload(BackupJobActionRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid resumeBackup request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_RESUME, parsed.data)
+    const result = validatePayload(BackupJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid resumeBackup response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async cancelBackup(jobId: string): Promise<BackupJobActionResponse> {
+    const parsed = validatePayload(BackupJobActionRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid cancelBackup request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_CANCEL, parsed.data)
+    const result = validatePayload(BackupJobActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid cancelBackup response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getActiveBackupJob(): Promise<BackupJobRecordDto | null> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GET_ACTIVE)
+    if (raw === null) return null
+    const result = validatePayload(BackupJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getActiveBackupJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listBackupJobs(request?: BackupListJobsRequest): Promise<BackupListJobsResponse> {
+    const parsed = validatePayload(BackupListJobsRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid listBackupJobs request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_LIST_JOBS, parsed.data)
+    const result = validatePayload(BackupListJobsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listBackupJobs response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getBackupJob(jobId: string): Promise<BackupJobRecordDto | null> {
+    const parsed = validatePayload(BackupJobActionRequestSchema, { jobId })
+    if (!parsed.success) {
+      throw new Error(`Invalid getBackupJob request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GET_JOB, parsed.data)
+    if (raw === null) return null
+    const result = validatePayload(BackupJobRecordSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getBackupJob response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listRecoveryPoints(
+    request: BackupListRecoveryPointsRequest
+  ): Promise<BackupListRecoveryPointsResponse> {
+    const parsed = validatePayload(BackupListRecoveryPointsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid listRecoveryPoints request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_LIST_RECOVERY_POINTS, parsed.data)
+    const result = validatePayload(BackupListRecoveryPointsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listRecoveryPoints response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async verifyRecoveryPoint(
+    request: BackupVerifyRecoveryPointRequest
+  ): Promise<BackupVerifyRecoveryPointResponse> {
+    const parsed = validatePayload(BackupVerifyRecoveryPointRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid verifyRecoveryPoint request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_VERIFY_RECOVERY_POINT, parsed.data)
+    const result = validatePayload(BackupVerifyRecoveryPointResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid verifyRecoveryPoint response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async restoreRecoveryPoint(request: BackupRestoreRequest): Promise<BackupRestoreResponse> {
+    const parsed = validatePayload(BackupRestoreRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid restoreRecoveryPoint request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_RESTORE_RECOVERY_POINT, parsed.data)
+    const result = validatePayload(BackupRestoreResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid restoreRecoveryPoint response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onBackupProgress(listener: (event: BackupProgressEvent) => void): () => void {
+    const wrapped = (_event: Electron.IpcRendererEvent, raw: unknown): void => {
+      const result = validatePayload(BackupProgressEventSchema, raw)
+      if (result.success) {
+        listener(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.BACKUP_PROGRESS_EVENT, wrapped)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.BACKUP_PROGRESS_EVENT, wrapped)
     }
   }
 }

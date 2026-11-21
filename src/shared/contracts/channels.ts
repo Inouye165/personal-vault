@@ -126,7 +126,21 @@ export const IPC_CHANNELS = {
   EXPORT_GET_JOB: 'export:get-job',
   EXPORT_GET_JOB_ITEMS: 'export:get-job-items',
   EXPORT_VERIFY_JOB: 'export:verify-job',
-  EXPORT_PROGRESS_EVENT: 'export:progress-event'
+  EXPORT_PROGRESS_EVENT: 'export:progress-event',
+  BACKUP_SELECT_DIRECTORY: 'backup:select-directory',
+  BACKUP_CONFIGURE_DESTINATION: 'backup:configure-destination',
+  BACKUP_LIST_DESTINATIONS: 'backup:list-destinations',
+  BACKUP_START: 'backup:start',
+  BACKUP_PAUSE: 'backup:pause',
+  BACKUP_RESUME: 'backup:resume',
+  BACKUP_CANCEL: 'backup:cancel',
+  BACKUP_GET_ACTIVE: 'backup:get-active',
+  BACKUP_LIST_JOBS: 'backup:list-jobs',
+  BACKUP_GET_JOB: 'backup:get-job',
+  BACKUP_LIST_RECOVERY_POINTS: 'backup:list-recovery-points',
+  BACKUP_VERIFY_RECOVERY_POINT: 'backup:verify-recovery-point',
+  BACKUP_RESTORE_RECOVERY_POINT: 'backup:restore-recovery-point',
+  BACKUP_PROGRESS_EVENT: 'backup:progress-event'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
