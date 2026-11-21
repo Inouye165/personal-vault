@@ -6,10 +6,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { VaultIdentitySchema, type VaultIdentity } from '../../../shared/validation/ipc-schemas'
+import { RestoreIncompleteError } from '../backup/errors'
 import { VaultInitializationError, VaultNotInitializedError } from './errors'
 import { assertPathContainedInVault } from './containment'
 
 const VAULT_IDENTITY_FILENAME = 'vault.json'
+const RESTORE_IN_PROGRESS_FILENAME = '.pv-restore-in-progress.json'
 const CURRENT_APP_VERSION = '0.1.0'
 
 export function getVaultIdentityPath(vaultPath: string): string {
@@ -17,6 +19,9 @@ export function getVaultIdentityPath(vaultPath: string): string {
 }
 
 export function isVaultDirectory(vaultPath: string): boolean {
+  if (existsSync(join(vaultPath, RESTORE_IN_PROGRESS_FILENAME))) {
+    return false
+  }
   const filePath = getVaultIdentityPath(vaultPath)
   if (!existsSync(filePath)) {
     return false
@@ -32,6 +37,13 @@ export function isVaultDirectory(vaultPath: string): boolean {
 }
 
 export function loadVaultIdentity(vaultPath: string): VaultIdentity {
+  const restoreMarkerPath = join(vaultPath, RESTORE_IN_PROGRESS_FILENAME)
+  assertPathContainedInVault(vaultPath, restoreMarkerPath, 'vault restore marker path')
+  if (existsSync(restoreMarkerPath)) {
+    throw new RestoreIncompleteError(
+      `Vault at "${vaultPath}" has an incomplete restore in progress (${RESTORE_IN_PROGRESS_FILENAME})`
+    )
+  }
   const filePath = getVaultIdentityPath(vaultPath)
   assertPathContainedInVault(vaultPath, filePath, 'vault identity path')
   if (!existsSync(filePath)) {
@@ -60,6 +72,13 @@ export function initializeVault(options: InitializeVaultOptions): VaultIdentity 
   }
   if (!options.vaultName || typeof options.vaultName !== 'string') {
     throw new TypeError('vaultName must be a non-empty string')
+  }
+
+  const restoreMarkerPath = join(options.vaultPath, RESTORE_IN_PROGRESS_FILENAME)
+  if (existsSync(restoreMarkerPath)) {
+    throw new RestoreIncompleteError(
+      `Cannot initialize vault at "${options.vaultPath}" while an incomplete restore marker (${RESTORE_IN_PROGRESS_FILENAME}) is present`
+    )
   }
 
   mkdirSync(options.vaultPath, { recursive: true })

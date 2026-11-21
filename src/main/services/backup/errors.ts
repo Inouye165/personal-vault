@@ -18,6 +18,44 @@ export type BackupSnapshotErrorCode =
   | 'destination_collision'
   | 'backup_cancelled'
 
+export type BackupRestoreErrorCode =
+  | 'recovery_point_incomplete'
+  | 'repository_missing'
+  | 'repository_invalid'
+  | 'unsupported_format_version'
+  | 'unsupported_schema_version'
+  | 'manifest_missing'
+  | 'manifest_invalid'
+  | 'manifest_hash_mismatch'
+  | 'chunk_missing'
+  | 'chunk_corrupt'
+  | 'file_hash_mismatch'
+  | 'catalog_corrupt'
+  | 'journal_corrupt'
+  | 'vault_identity_invalid'
+  | 'vault_manifest_invalid'
+  | 'restore_target_invalid'
+  | 'restore_incomplete'
+  | 'restore_cancelled'
+  | 'restore_cleanup_refused'
+
+export class BackupRestoreError extends Error {
+  public readonly code: BackupRestoreErrorCode
+
+  public constructor(code: BackupRestoreErrorCode, message: string) {
+    super(message)
+    this.name = 'BackupRestoreError'
+    this.code = code
+  }
+}
+
+export class RestoreIncompleteError extends BackupRestoreError {
+  public constructor(message: string) {
+    super('restore_incomplete', message)
+    this.name = 'RestoreIncompleteError'
+  }
+}
+
 export class BackupContainmentError extends Error {
   public readonly code: BackupSnapshotErrorCode = 'backup_containment_error'
 

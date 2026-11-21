@@ -176,3 +176,115 @@ export function validateBackupDestinationPath(params: ValidateBackupDestinationP
 
   return canonicalDest
 }
+
+export interface ValidateRestoreTargetPathsParams {
+  readonly targetProfileDir: string
+  readonly targetVaultDir: string | null
+  readonly backupRepoDir: string
+  readonly activeUserDataDir?: string
+  readonly activeSourceRoots: readonly string[]
+  readonly activeVaultRoots: readonly string[]
+}
+
+export interface ValidatedRestoreTargetPaths {
+  readonly targetProfileDir: string
+  readonly targetVaultDir: string | null
+  readonly backupRepoDir: string
+}
+
+function validateIsolatedEmptyTargetDir(targetDir: string, label: string): string {
+  if (!targetDir || typeof targetDir !== 'string') {
+    throw new BackupContainmentError(`${label} must be a non-empty path`)
+  }
+  const resolved = resolve(targetDir)
+  assertNoSymlinkOrJunctionInChain(resolved, label)
+
+  if (existsSync(resolved)) {
+    const st = lstatSync(resolved)
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new BackupContainmentError(`${label} must be a regular directory`)
+    }
+    const canonical = realpathSync(resolved)
+    if (readdirSync(canonical).length > 0) {
+      throw new BackupContainmentError(
+        `${label} "${targetDir}" must be a fresh or strictly empty directory`
+      )
+    }
+    return canonical
+  }
+
+  try {
+    return canonicalizeWithAncestorPolicySync(resolved)
+  } catch (err) {
+    throw new BackupContainmentError(
+      `Failed to resolve canonical ${label}: ${(err as Error).message}`
+    )
+  }
+}
+
+export function validateRestoreTargetPaths(
+  params: ValidateRestoreTargetPathsParams
+): ValidatedRestoreTargetPaths {
+  if (!params.backupRepoDir || typeof params.backupRepoDir !== 'string') {
+    throw new BackupContainmentError('Backup repository directory must be a non-empty path')
+  }
+  const resolvedRepo = resolve(params.backupRepoDir)
+  assertNoSymlinkOrJunctionInChain(resolvedRepo, 'backup repository directory')
+  const canonicalRepo = existsSync(resolvedRepo)
+    ? realpathSync(resolvedRepo)
+    : isUncPath(resolvedRepo)
+      ? resolvedRepo
+      : canonicalizeWithAncestorPolicySync(resolvedRepo)
+
+  const canonicalProfile = validateIsolatedEmptyTargetDir(
+    params.targetProfileDir,
+    'restore target profile directory'
+  )
+  const canonicalVault =
+    params.targetVaultDir !== null
+      ? validateIsolatedEmptyTargetDir(params.targetVaultDir, 'restore target vault directory')
+      : null
+
+  const assertDisjoint = (a: string, b: string, labelA: string, labelB: string): void => {
+    if (isSameOrDescendantPath(a, b) || isSameOrDescendantPath(b, a)) {
+      throw new BackupContainmentError(`${labelA} overlaps with ${labelB}`)
+    }
+  }
+
+  if (canonicalVault !== null) {
+    assertDisjoint(
+      canonicalProfile,
+      canonicalVault,
+      'restore target profile directory',
+      'restore target vault directory'
+    )
+  }
+
+  const checkAgainstProtected = (protectedPath: string, kind: string): void => {
+    if (!protectedPath) return
+    const canonicalProtected = isUncPath(protectedPath)
+      ? resolve(protectedPath)
+      : canonicalizeWithAncestorPolicySync(protectedPath)
+    assertDisjoint(canonicalProfile, canonicalProtected, 'restore target profile directory', kind)
+    if (canonicalVault !== null) {
+      assertDisjoint(canonicalVault, canonicalProtected, 'restore target vault directory', kind)
+    }
+  }
+
+  checkAgainstProtected(canonicalRepo, 'the backup repository')
+  if (params.activeUserDataDir) {
+    checkAgainstProtected(params.activeUserDataDir, 'active app userData')
+  }
+  for (const src of params.activeSourceRoots) {
+    checkAgainstProtected(src, 'a registered source root')
+  }
+  for (const vault of params.activeVaultRoots) {
+    checkAgainstProtected(vault, 'a registered vault')
+  }
+
+  return {
+    targetProfileDir: canonicalProfile,
+    targetVaultDir: canonicalVault,
+    backupRepoDir: canonicalRepo
+  }
+}
