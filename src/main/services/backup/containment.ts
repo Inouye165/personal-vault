@@ -6,11 +6,19 @@
  * registered source roots and vaults.
  */
 
-import { existsSync, lstatSync, realpathSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { BackupRepositoryIdentityV1Schema } from '../../../shared/validation/backup-schemas'
 import { canonicalizeWithAncestorPolicySync } from '../annotations/journal'
 import { isSameOrDescendantPath } from '../catalog/path-normalization'
 import { BackupContainmentError } from './errors'
+
+export interface ValidateBackupDestinationPathParams {
+  readonly destinationDir: string
+  readonly sourceRoots: readonly string[]
+  readonly vaultRoots: readonly string[]
+  readonly userDataDir: string
+}
 
 export interface ValidateBackupStagingDirParams {
   readonly stagingDir: string
@@ -106,4 +114,65 @@ export function validateBackupStagingDir(params: ValidateBackupStagingDirParams)
   }
 
   return canonicalStaging
+}
+
+function isUncPath(targetPath: string): boolean {
+  return /^\\\\[^\\]+\\[^\\]+/.test(targetPath)
+}
+
+export function validateBackupDestinationPath(params: ValidateBackupDestinationPathParams): string {
+  if (!params.destinationDir || typeof params.destinationDir !== 'string') {
+    throw new BackupContainmentError('Backup destination directory must be a non-empty path')
+  }
+
+  const resolvedDest = resolve(params.destinationDir)
+  assertNoSymlinkOrJunctionInChain(resolvedDest, 'backup destination directory')
+
+  let canonicalDest: string
+  if (existsSync(resolvedDest)) {
+    const st = lstatSync(resolvedDest)
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new BackupContainmentError('Backup destination path must be a regular directory')
+    }
+    canonicalDest = realpathSync(resolvedDest)
+
+    const entries = readdirSync(canonicalDest)
+    if (entries.length > 0) {
+      const repoJsonPath = join(canonicalDest, 'repository.json')
+      if (!existsSync(repoJsonPath)) {
+        throw new BackupContainmentError(
+          'Backup destination directory is non-empty and does not contain a valid repository.json'
+        )
+      }
+      try {
+        const raw = readFileSync(repoJsonPath, 'utf8')
+        BackupRepositoryIdentityV1Schema.parse(JSON.parse(raw))
+      } catch (err) {
+        throw new BackupContainmentError(
+          `Existing backup destination repository.json is invalid: ${(err as Error).message}`
+        )
+      }
+    }
+  } else {
+    canonicalDest = isUncPath(resolvedDest)
+      ? resolvedDest
+      : canonicalizeWithAncestorPolicySync(resolvedDest)
+  }
+
+  const checkProtected = (protectedPath: string, kind: string): void => {
+    if (!protectedPath) return
+    const canonicalProtected = canonicalizeWithAncestorPolicySync(protectedPath)
+    if (
+      isSameOrDescendantPath(canonicalProtected, canonicalDest) ||
+      isSameOrDescendantPath(canonicalDest, canonicalProtected)
+    ) {
+      throw new BackupContainmentError(`Backup destination directory overlaps with ${kind}`)
+    }
+  }
+
+  for (const src of params.sourceRoots) checkProtected(src, 'a registered source root')
+  for (const vault of params.vaultRoots) checkProtected(vault, 'a registered vault')
+  checkProtected(params.userDataDir, 'app-owned data storage')
+
+  return canonicalDest
 }
