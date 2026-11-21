@@ -20,6 +20,7 @@ import type {
   BackupDestinationRecordDto,
   BackupJobRecordDto,
   BackupJobStatusDto,
+  BackupRecoverCatalogResponse,
   BackupRecoveryPointSummary,
   BackupRestoreResponse,
   BackupVerifyRecoveryPointResponse
@@ -170,6 +171,12 @@ export function BackupRestorePanel() {
   const [restoreLocationDir, setRestoreLocationDir] = useState<string>('')
   const [restoreResult, setRestoreResult] = useState<BackupRestoreResponse | null>(null)
   const [copiedCommand, setCopiedCommand] = useState<boolean>(false)
+
+  // Recover catalog from an existing vault state
+  const [recoverVaultDir, setRecoverVaultDir] = useState<string>('')
+  const [recoverTargetProfileDir, setRecoverTargetProfileDir] = useState<string>('')
+  const [recoverResult, setRecoverResult] = useState<BackupRecoverCatalogResponse | null>(null)
+  const [copiedRecoverCommand, setCopiedRecoverCommand] = useState<boolean>(false)
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState<boolean>(false)
@@ -326,6 +333,35 @@ export function BackupRestorePanel() {
       cancelled = true
     }
   }, [repoDir, loadRecoveryPointsForDir])
+
+  const handleRecoverFromVault = async (): Promise<void> => {
+    if (typeof window.api?.recoverCatalogFromVault !== 'function') return
+    const sourceVaultDir = recoverVaultDir.trim()
+    const targetProfileDir = recoverTargetProfileDir.trim()
+    if (!sourceVaultDir || !targetProfileDir) {
+      setErrorMessage(
+        'Please choose both the surviving vault folder and a new empty profile folder.'
+      )
+      return
+    }
+    setErrorMessage(null)
+    setRecoverResult(null)
+    setCopiedRecoverCommand(false)
+    setIsBusy(true)
+    try {
+      const res = await window.api.recoverCatalogFromVault({
+        sourceVaultDir,
+        targetProfileDir
+      })
+      setRecoverResult(res)
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Failed to recover catalog from existing vault'
+      )
+    } finally {
+      setIsBusy(false)
+    }
+  }
 
   const handleBrowseFolder = async (
     title: string,
@@ -619,14 +655,11 @@ export function BackupRestorePanel() {
   const isRestoreSourceSynced =
     Boolean(effectiveRestoreRepoDir) && effectiveRestoreRepoDir === restoreLoadedRepoDir.trim()
 
-  const completeRestoreChoices = useMemo(
-    () => (isRestoreSourceSynced ? restoreRecoveryPoints.filter((rp) => rp.isComplete) : []),
-    [isRestoreSourceSynced, restoreRecoveryPoints]
-  )
-  const selectedRestoreChoice = useMemo(
-    () => completeRestoreChoices.find((rp) => rp.snapshotId === selectedRestoreSnapshotId) ?? null,
-    [completeRestoreChoices, selectedRestoreSnapshotId]
-  )
+  const completeRestoreChoices = isRestoreSourceSynced
+    ? restoreRecoveryPoints.filter((rp) => rp.isComplete)
+    : []
+  const selectedRestoreChoice =
+    completeRestoreChoices.find((rp) => rp.snapshotId === selectedRestoreSnapshotId) ?? null
 
   const preparedProfilePreview = restoreLocationDir.trim()
     ? joinChildPath(restoreLocationDir, 'profile')
@@ -1548,6 +1581,146 @@ export function BackupRestorePanel() {
                     >
                       <Copy size={14} aria-hidden="true" />{' '}
                       {copiedCommand ? 'Copied' : 'Copy launch flag'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </article>
+
+        {/* Recover catalog from an existing surviving vault */}
+        <article
+          className="backup-card"
+          aria-label="Recover from an existing vault"
+          data-testid="recover-from-vault-section"
+          style={{ marginTop: '16px' }}
+        >
+          <div className="backup-card-header">
+            <h2 className="backup-card-title">
+              <ShieldCheck size={18} aria-hidden="true" /> Recover from an existing vault
+            </h2>
+          </div>
+          <div className="backup-restore-body">
+            <p className="backup-card-subtitle" style={{ marginTop: 0 }}>
+              Rebuild a catalog of <strong>imported files</strong> in a new, empty profile directly
+              from a surviving vault&apos;s manifests. The surviving vault is verified and bound{' '}
+              <strong>read-only</strong> without modifying it or your active profile.
+            </p>
+            <div className="backup-notice-box" role="note">
+              <AlertTriangle size={16} aria-hidden="true" />
+              <span>
+                <strong>Scope note:</strong> Recovering from an existing vault rebuilds imported
+                vault files and recorded provenance only. Use <strong>Restore from Backup</strong>{' '}
+                above to recover ratings, collections, duplicate reviews, similarity decisions,
+                document overrides, and other user edits.
+              </span>
+            </div>
+
+            <div className="backup-form-field">
+              <label htmlFor="recover-vault-dir-input">Surviving vault folder</label>
+              <div className="backup-path-row">
+                <input
+                  id="recover-vault-dir-input"
+                  data-testid="recover-vault-dir-input"
+                  type="text"
+                  className="backup-input"
+                  placeholder="E:\PersonalVault"
+                  value={recoverVaultDir}
+                  onChange={(e) => setRecoverVaultDir(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() =>
+                    void handleBrowseFolder('Select Surviving Vault Folder', setRecoverVaultDir)
+                  }
+                >
+                  <FolderOpen size={14} aria-hidden="true" /> Browse…
+                </button>
+              </div>
+            </div>
+
+            <div className="backup-form-field">
+              <label htmlFor="recover-profile-dir-input">New empty profile folder</label>
+              <div className="backup-path-row">
+                <input
+                  id="recover-profile-dir-input"
+                  data-testid="recover-profile-dir-input"
+                  type="text"
+                  className="backup-input"
+                  placeholder="C:\Users\You\RecoveredProfile"
+                  value={recoverTargetProfileDir}
+                  onChange={(e) => setRecoverTargetProfileDir(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() =>
+                    void handleBrowseFolder(
+                      'Select New Empty Profile Folder',
+                      setRecoverTargetProfileDir
+                    )
+                  }
+                >
+                  <FolderOpen size={14} aria-hidden="true" /> Browse…
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="recover-catalog-submit-btn"
+                disabled={isBusy || !recoverVaultDir.trim() || !recoverTargetProfileDir.trim()}
+                onClick={() => void handleRecoverFromVault()}
+              >
+                <RotateCcw size={14} aria-hidden="true" /> Recover from an existing vault
+              </button>
+            </div>
+
+            {recoverResult && (
+              <div
+                className="backup-restore-result-box"
+                role="status"
+                data-testid="recover-catalog-result"
+              >
+                <div className="backup-restore-step-header">
+                  <CheckCircle2 size={18} color="#6ed49b" aria-hidden="true" />
+                  <span>
+                    Catalog rebuilt — {recoverResult.recoveredVaultCopies} verified vault copies (
+                    {recoverResult.recoveredFileLocations} locations)
+                  </span>
+                </div>
+                <div style={{ fontSize: '13px' }}>
+                  <strong>Surviving vault (read-only):</strong>{' '}
+                  <code>{recoverResult.sourceVaultDir}</code>
+                </div>
+                <div style={{ fontSize: '13px' }}>
+                  <strong>New recovered profile:</strong>{' '}
+                  <code>{recoverResult.targetProfileDir}</code>
+                </div>
+                <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                  Ratings, collections, duplicate reviews, similarity decisions, and document
+                  overrides were not present in vault manifests and require a full backup restore.
+                </div>
+                <div style={{ fontSize: '13px' }}>
+                  <strong>How to open the recovered profile in Personal Vault:</strong>
+                  <div className="backup-command-row" style={{ marginTop: '6px' }}>
+                    <code className="backup-command-code">{`--user-data-dir="${recoverResult.targetProfileDir}"`}</code>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(
+                          `--user-data-dir="${recoverResult.targetProfileDir}"`
+                        )
+                        setCopiedRecoverCommand(true)
+                      }}
+                    >
+                      <Copy size={14} aria-hidden="true" />{' '}
+                      {copiedRecoverCommand ? 'Copied' : 'Copy launch flag'}
                     </button>
                   </div>
                 </div>

@@ -159,6 +159,7 @@ import type {
 import { UnifiedSearchCoordinator } from '../services/unified-search'
 import type { ExportCoordinator } from '../services/export/coordinator'
 import type { BackupCoordinator } from '../services/backup/coordinator'
+import { resolveReadableFileLocation } from '../services/backup/recovered-file-resolver'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 import { registerDocumentIpcHandlers } from './document-handlers'
 import { registerExportIpcHandlers } from './export-handlers'
@@ -830,14 +831,46 @@ export function registerIpcHandlers({
       }
     }
 
+    const resolved = resolveReadableFileLocation(catalog, locationId, { verifyPayloadHash: false })
+    if (!resolved.ok) {
+      const failureResult =
+        resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
+        resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
+          ? {
+              status: 'error' as const,
+              locationId,
+              code: resolved.errorCode,
+              message: resolved.errorMessage
+            }
+          : {
+              status: 'missing' as const,
+              locationId,
+              reason: resolved.errorMessage
+            }
+      const validatedErr = validatePayload(ThumbnailResultSchema, failureResult)
+      if (!validatedErr.success) {
+        throw new Error(`Invalid outgoing ThumbnailResult in main: ${validatedErr.error}`)
+      }
+      return validatedErr.data
+    }
+
     const res = await thumbnailCoordinator.requestThumbnail({
       locationId,
-      sourcePath: fileRecord.originalPath,
-      expectedByteSize: expectedByteSize ?? fileRecord.byteSize,
+      sourcePath: resolved.filePath,
+      expectedByteSize:
+        resolved.mode === 'vault_copy'
+          ? resolved.expectedByteSize
+          : (expectedByteSize ?? resolved.expectedByteSize),
       expectedMtimeMs:
-        expectedMtimeMs !== undefined ? expectedMtimeMs : fileRecord.filesystemMtimeMs,
-      expectedSha256: fileRecord.activeHash,
-      priority
+        resolved.mode === 'vault_copy'
+          ? resolved.expectedMtimeMs
+          : expectedMtimeMs !== undefined
+            ? expectedMtimeMs
+            : resolved.expectedMtimeMs,
+      expectedSha256: resolved.expectedSha256,
+      priority,
+      approvedRootsOverride: resolved.mode === 'vault_copy' ? resolved.approvedRoots : undefined,
+      verifySourceBeforeCacheHit: resolved.mode === 'vault_copy'
     })
 
     const validated = validatePayload(ThumbnailResultSchema, res)

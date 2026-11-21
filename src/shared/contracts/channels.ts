@@ -140,6 +140,7 @@ export const IPC_CHANNELS = {
   BACKUP_LIST_RECOVERY_POINTS: 'backup:list-recovery-points',
   BACKUP_VERIFY_RECOVERY_POINT: 'backup:verify-recovery-point',
   BACKUP_RESTORE_RECOVERY_POINT: 'backup:restore-recovery-point',
+  BACKUP_RECOVER_CATALOG_FROM_VAULT: 'backup:recover-catalog-from-vault',
   BACKUP_PROGRESS_EVENT: 'backup:progress-event'
 } as const
 

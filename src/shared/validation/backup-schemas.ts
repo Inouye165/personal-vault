@@ -269,6 +269,39 @@ export const BackupRestoreCompleteMarkerV1Schema = z
   .strict()
 export type BackupRestoreCompleteMarkerV1 = z.infer<typeof BackupRestoreCompleteMarkerV1Schema>
 
+export const CatalogRecoveryInProgressMarkerV1Schema = z
+  .object({
+    formatVersion: z.literal(BACKUP_FORMAT_VERSION),
+    schema: z.literal('pv_recovery_in_progress_v1'),
+    recoveryJobId: z.string().min(1),
+    vaultId: z.string().min(1),
+    sourceVaultDir: z.string().min(1),
+    targetProfileDir: z.string().min(1),
+    stagedCatalogSha256: BackupSha256HexSchema.nullable(),
+    startedAtMs: z.number().int().positive()
+  })
+  .strict()
+export type CatalogRecoveryInProgressMarkerV1 = z.infer<
+  typeof CatalogRecoveryInProgressMarkerV1Schema
+>
+
+export const CatalogRecoveryCompleteMarkerV1Schema = z
+  .object({
+    formatVersion: z.literal(BACKUP_FORMAT_VERSION),
+    schema: z.literal('pv_recovery_complete_v1'),
+    recoveryJobId: z.string().min(1),
+    vaultId: z.string().min(1),
+    sourceVaultDir: z.string().min(1),
+    targetProfileDir: z.string().min(1),
+    catalogSha256: BackupSha256HexSchema,
+    recoveredVaultCopies: z.number().int().nonnegative(),
+    recoveredFileLocations: z.number().int().nonnegative(),
+    recoveredObservations: z.number().int().nonnegative(),
+    recoveredAtMs: z.number().int().positive()
+  })
+  .strict()
+export type CatalogRecoveryCompleteMarkerV1 = z.infer<typeof CatalogRecoveryCompleteMarkerV1Schema>
+
 export function assertSafeRelativePath(relPath: string): void {
   if (isAbsolute(relPath) || relPath.startsWith('..') || relPath.includes(`..${sep}`)) {
     throw new Error(`Unsafe relative path: ${relPath}`)

@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 17
+export const CURRENT_SCHEMA_VERSION = 18
 
 export interface Migration {
   readonly version: number
@@ -1545,6 +1545,25 @@ export const MIGRATIONS: readonly Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_backup_bandwidth_ledger_dest_time
           ON backup_bandwidth_ledger(destination_id, recorded_at_ms DESC);
       `)
+    }
+  },
+  {
+    version: 18,
+    name: 'catalog_recovery_source_and_readonly_vault',
+    up: (db: DatabaseSync) => {
+      const vaultCols = getTableColumns(db, 'vaults')
+      if (!vaultCols.includes('is_read_only')) {
+        db.exec(
+          'ALTER TABLE vaults ADD COLUMN is_read_only INTEGER NOT NULL DEFAULT 0 CHECK (is_read_only IN (0, 1));'
+        )
+      }
+
+      const sourceCols = getTableColumns(db, 'sources')
+      if (!sourceCols.includes('source_kind')) {
+        db.exec(
+          "ALTER TABLE sources ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'user' CHECK (source_kind IN ('user', 'recovery_manifest'));"
+        )
+      }
     }
   }
 ]

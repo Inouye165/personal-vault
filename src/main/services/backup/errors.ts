@@ -56,6 +56,36 @@ export class RestoreIncompleteError extends BackupRestoreError {
   }
 }
 
+export type CatalogRecoveryErrorCode =
+  | 'recovery_target_invalid'
+  | 'recovery_source_vault_invalid'
+  | 'recovery_manifest_missing'
+  | 'recovery_manifest_corrupt'
+  | 'recovery_payload_containment_error'
+  | 'recovery_payload_missing'
+  | 'recovery_payload_hash_mismatch'
+  | 'recovery_conflicting_normalized_path'
+  | 'recovery_incomplete'
+  | 'recovery_cancelled'
+  | 'recovery_cleanup_refused'
+
+export class CatalogRecoveryError extends Error {
+  public readonly code: CatalogRecoveryErrorCode
+
+  public constructor(code: CatalogRecoveryErrorCode, message: string) {
+    super(message)
+    this.name = 'CatalogRecoveryError'
+    this.code = code
+  }
+}
+
+export class RecoveryIncompleteError extends CatalogRecoveryError {
+  public constructor(message: string) {
+    super('recovery_incomplete', message)
+    this.name = 'RecoveryIncompleteError'
+  }
+}
+
 export class BackupContainmentError extends Error {
   public readonly code: BackupSnapshotErrorCode = 'backup_containment_error'
 

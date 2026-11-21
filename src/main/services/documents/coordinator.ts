@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type { CatalogDatabase } from '../catalog/database'
+import { resolveReadableFileLocation } from '../backup/recovered-file-resolver'
 import type { DocumentPreviewPayload } from '../../../shared/validation/document-schemas'
 import { resolveMainWorkerScriptPath } from '../worker-path'
 import { AppWorkerBudget, type WorkerBudgetReservation } from '../worker-budget'
@@ -545,11 +546,40 @@ export class DocumentExtractionCoordinator {
           this.activeFileLocationId = candidate.fileLocationId
           this.emitProgress()
 
-          const approvedRoots = this.catalog
-            .listSources({ offset: 0, limit: 1000 })
-            .items.map((s) => s.rootPath)
-          const effectiveRoots =
-            approvedRoots.length > 0 ? approvedRoots : [candidate.sourceRootPath]
+          const resolved = resolveReadableFileLocation(this.catalog, candidate.fileLocationId, {
+            verifyPayloadHash: false
+          })
+          if (!resolved.ok) {
+            this.activeFileLocationId = null
+            const commitRes = repo.upsertDocumentExtraction({
+              fileLocationId: candidate.fileLocationId,
+              expectedDiscoveryObservationId: candidate.discoveryObservationId,
+              expectedContentRevision: candidate.contentRevision,
+              contentSha256: candidate.activeHash ?? '0'.repeat(64),
+              observedByteSize: candidate.byteSize,
+              observedMtimeMs: candidate.filesystemMtimeMs,
+              recipeVersion: DOCUMENT_EXTRACTION_RECIPE_VERSION,
+              extractionStatus: 'corrupt_or_failed',
+              statusDetail: resolved.errorMessage,
+              extractedText: null,
+              extractedCharCount: 0,
+              pageCount: null,
+              truncated: false,
+              truncationReason: null,
+              detectedEncoding: null
+            })
+            this.invalidatePreviewCacheForFile(candidate.fileLocationId)
+            repo.recordDocumentExtractionJobItemResult({
+              jobId,
+              fileLocationId: candidate.fileLocationId,
+              status: commitRes.committed ? 'corrupt_or_failed' : 'skipped_stale',
+              errorMessage: resolved.errorMessage
+            })
+            this.emitProgress()
+            continue
+          }
+
+          const effectiveRoots = resolved.approvedRoots
 
           const reusableCandidate =
             !forceReextract && candidate.activeHash !== null
@@ -563,12 +593,12 @@ export class DocumentExtractionCoordinator {
           if (reusableCandidate && candidate.activeHash !== null) {
             const verifyRes = await this.runWorkerRequest({
               action: 'verify_source',
-              sourcePath: candidate.originalPath,
+              sourcePath: resolved.filePath,
               approvedRoots: effectiveRoots,
               extension: candidate.extension,
-              expectedByteSize: candidate.byteSize,
-              expectedMtimeMs: candidate.filesystemMtimeMs,
-              expectedSha256: candidate.activeHash,
+              expectedByteSize: resolved.expectedByteSize,
+              expectedMtimeMs: resolved.expectedMtimeMs,
+              expectedSha256: resolved.expectedSha256,
               options: this.extractionOptions,
               delayMs: this.itemDelayMs > 0 ? this.itemDelayMs : undefined
             })
@@ -586,7 +616,10 @@ export class DocumentExtractionCoordinator {
                 expectedContentRevision: candidate.contentRevision,
                 contentSha256: verifyRes.observedSha256,
                 observedByteSize: verifyRes.observedByteSize,
-                observedMtimeMs: verifyRes.observedMtimeMs,
+                observedMtimeMs:
+                  resolved.mode === 'vault_copy'
+                    ? candidate.filesystemMtimeMs
+                    : verifyRes.observedMtimeMs,
                 recipeVersion: DOCUMENT_EXTRACTION_RECIPE_VERSION,
                 extractionStatus: reusableCandidate.extractionStatus,
                 statusDetail: reusableCandidate.statusDetail,
@@ -611,7 +644,11 @@ export class DocumentExtractionCoordinator {
               continue
             }
 
-            if (!verifyRes.ok && verifyRes.errorCode === 'FILE_CHANGED') {
+            if (
+              resolved.mode === 'source' &&
+              !verifyRes.ok &&
+              verifyRes.errorCode === 'FILE_CHANGED'
+            ) {
               repo.recordDocumentExtractionJobItemResult({
                 jobId,
                 fileLocationId: candidate.fileLocationId,
@@ -625,12 +662,12 @@ export class DocumentExtractionCoordinator {
 
           const workerRes = await this.runWorkerRequest({
             action: 'extract_document',
-            sourcePath: candidate.originalPath,
+            sourcePath: resolved.filePath,
             approvedRoots: effectiveRoots,
             extension: candidate.extension,
-            expectedByteSize: candidate.byteSize,
-            expectedMtimeMs: candidate.filesystemMtimeMs,
-            expectedSha256: candidate.activeHash,
+            expectedByteSize: resolved.expectedByteSize,
+            expectedMtimeMs: resolved.expectedMtimeMs,
+            expectedSha256: resolved.expectedSha256,
             options: this.extractionOptions,
             delayMs: this.itemDelayMs > 0 ? this.itemDelayMs : undefined
           })
@@ -642,7 +679,7 @@ export class DocumentExtractionCoordinator {
           }
 
           if (!workerRes.ok) {
-            const isStale = workerRes.errorCode === 'FILE_CHANGED'
+            const isStale = resolved.mode === 'source' && workerRes.errorCode === 'FILE_CHANGED'
             if (isStale) {
               repo.recordDocumentExtractionJobItemResult({
                 jobId,
@@ -686,7 +723,10 @@ export class DocumentExtractionCoordinator {
             expectedContentRevision: candidate.contentRevision,
             contentSha256: workerRes.observedSha256,
             observedByteSize: workerRes.observedByteSize,
-            observedMtimeMs: workerRes.observedMtimeMs,
+            observedMtimeMs:
+              resolved.mode === 'vault_copy'
+                ? candidate.filesystemMtimeMs
+                : workerRes.observedMtimeMs,
             recipeVersion: workerRes.outcome.recipeVersion,
             extractionStatus: workerRes.outcome.status,
             statusDetail: workerRes.outcome.statusDetail,

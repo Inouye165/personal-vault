@@ -1,6 +1,6 @@
 # Stage 8B — Backup, restore, and catalog recovery
 
-Status: planning (Slice 1 design revised for independent re-review). Stage 8A baseline: `ba4785a0fd5f0e0948b429198a0c7a679f54b399` (`ba4785a`).
+Status: Slice 1 Complete (`a3cc152`); Slice 2 Complete; Slice 3 Planned. Stage 8A baseline: `ba4785a0fd5f0e0948b429198a0c7a679f54b399` (`ba4785a`).
 
 ## Destinations
 

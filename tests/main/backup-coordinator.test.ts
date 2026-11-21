@@ -255,7 +255,7 @@ describe('Stage 8B Sub-slice 1B — Migration 17, BackupRepository & BackupCoord
     const fixture = await createCoordinatorFixture()
     tempDirs.push(fixture.rootDir)
 
-    expect(CURRENT_SCHEMA_VERSION).toBe(17)
+    expect(CURRENT_SCHEMA_VERSION).toBe(18)
     const tables = fixture.catalog
       .getRawDb()
       .prepare(
@@ -1076,7 +1076,7 @@ describe('Stage 8B Sub-slice 1B — Migration 17, BackupRepository & BackupCoord
       const versionRow = db
         .prepare('SELECT MAX(version) AS max_version FROM schema_migrations;')
         .get() as { max_version: number }
-      expect(versionRow.max_version).toBe(17)
+      expect(versionRow.max_version).toBe(CURRENT_SCHEMA_VERSION)
 
       const backupTables = db
         .prepare(

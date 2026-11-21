@@ -317,6 +317,7 @@ export interface RegisterVaultInput {
   readonly vaultPath: string
   readonly name: string
   readonly createdAtMs: number
+  readonly isReadOnly?: boolean
 }
 
 export interface CatalogVaultRecord {
@@ -328,6 +329,71 @@ export interface CatalogVaultRecord {
   readonly createdAtMs: number
   readonly updatedAtMs: number
   readonly isActive: boolean
+  readonly isReadOnly: boolean
+}
+
+export interface RecoveredVaultCopyEntry {
+  readonly sha256: string
+  readonly byteSize: number
+  readonly relativePath: string
+  readonly manifestRelativePath: string
+  readonly verifiedAtMs: number
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export interface RecoveredObservationEntry {
+  readonly sha256: string
+  readonly byteSize: number
+  readonly filesystemBirthtimeMs: number | null
+  readonly filesystemMtimeMs: number | null
+  readonly inferredCaptureTimeMs: number | null
+  readonly firstDiscoveredAtMs: number
+  readonly lastSeenAtMs: number
+  readonly hashVerifiedAtMs: number
+  readonly isCurrent: boolean
+}
+
+export interface RecoveredFileLocationEntry {
+  readonly sourceRootPath: string
+  readonly normalizedSourceRootPath: string
+  readonly originalPath: string
+  readonly normalizedPath: string
+  readonly fileName: string
+  readonly extension: string
+  readonly category: 'photo' | 'document'
+  readonly currentObservation: RecoveredObservationEntry
+  readonly observations: readonly RecoveredObservationEntry[]
+}
+
+export interface PopulateRecoveredCatalogInput {
+  readonly vaultId: string
+  readonly vaultPath: string
+  readonly normalizedVaultPath: string
+  readonly vaultName: string
+  readonly vaultCreatedAtMs: number
+  readonly recoveredAtMs: number
+  readonly vaultCopies: readonly RecoveredVaultCopyEntry[]
+  readonly fileLocations: readonly RecoveredFileLocationEntry[]
+}
+
+export interface PopulateRecoveredCatalogResult {
+  readonly recoveredVaultCopies: number
+  readonly recoveredSources: number
+  readonly recoveredFileLocations: number
+  readonly recoveredObservations: number
+  readonly historicalObservations: number
+}
+
+export interface LocationReadResolutionContext {
+  readonly locationId: number
+  readonly sourceId: number
+  readonly sourceRootPath: string
+  readonly sourceKind: 'user' | 'recovery_manifest'
+  readonly originalPath: string
+  readonly byteSize: number
+  readonly filesystemMtimeMs: number | null
+  readonly activeHash: string | null
 }
 
 export interface RecordVaultCopyInput {

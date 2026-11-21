@@ -181,6 +181,7 @@ describe('preload bridge', () => {
         'listRecoveryPoints',
         'verifyRecoveryPoint',
         'restoreRecoveryPoint',
+        'recoverCatalogFromVault',
         'onBackupProgress'
       ].sort()
     )

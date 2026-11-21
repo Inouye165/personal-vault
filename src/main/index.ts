@@ -36,6 +36,7 @@ import { ExportCoordinator } from './services/export'
 import { BackupCoordinator } from './services/backup/coordinator'
 import { RestoreIncompleteError } from './services/backup/errors'
 import { inspectRestoredProfileStatus } from './services/backup/restore'
+import { withProfileStartupCoordination } from './services/backup/catalog-recovery'
 import { AppWorkerBudget } from './services/worker-budget'
 
 function logStartup(message: string): void {
@@ -186,23 +187,27 @@ if (!app.requestSingleInstanceLock()) {
           `Refusing startup: restored profile at "${userDataDir}" is ${restoreStatus.status}${restoreStatus.reason ? ` (${restoreStatus.reason})` : ''}`
         )
       }
+      const openedCatalog = await withProfileStartupCoordination(userDataDir, async () => {
+        const catalogPath = join(userDataDir, 'vault-catalog.db')
+        logStartup(`Opening catalog at ${catalogPath}`)
+        const db = CatalogDatabase.open({ catalogPath })
+        catalog = db
+        logStartup('CatalogDatabase.open completed')
 
-      const catalogPath = join(userDataDir, 'vault-catalog.db')
-      logStartup(`Opening catalog at ${catalogPath}`)
-      catalog = CatalogDatabase.open({ catalogPath })
-      logStartup('CatalogDatabase.open completed')
+        const annotationsDir = join(app.getPath('userData'), 'annotations')
+        const journal = new AnnotationJournal({
+          storageDir: annotationsDir,
+          sourceRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
+          vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
+        })
+        await journal.initialize()
+        logStartup('journal.initialize completed')
 
-      const annotationsDir = join(app.getPath('userData'), 'annotations')
-      const journal = new AnnotationJournal({
-        storageDir: annotationsDir,
-        sourceRoots: () => (catalog ? catalog.getAllSourceRoots() : []),
-        vaultPath: () => (catalog ? (catalog.getActiveVault()?.vaultPath ?? null) : null)
+        db.setJournal(journal)
+        logStartup('catalog.setJournal completed with startup reconciliation')
+        return db
       })
-      await journal.initialize()
-      logStartup('journal.initialize completed')
-
-      catalog.setJournal(journal)
-      logStartup('catalog.setJournal completed with startup reconciliation')
+      catalog = openedCatalog
 
       coordinator = new ScanJobCoordinator({ catalog })
       await coordinator.initialize()

@@ -686,4 +686,69 @@ describe('BackupRestorePanel — Redesigned everyday view', () => {
       })
     })
   })
+
+  it('recovers a catalog from an existing surviving vault and discloses full-restore scope', async () => {
+    const recoverCatalogFromVault = vi.fn().mockResolvedValue({
+      recoveryJobId: 'rec-job-1',
+      vaultId: 'vault-uuid-1',
+      vaultName: 'Surviving Vault',
+      sourceVaultDir: 'E:\\SurvivingVault',
+      targetProfileDir: 'D:\\RecoveredProfile',
+      catalogPath: 'D:\\RecoveredProfile\\vault-catalog.db',
+      catalogSha256: 'a'.repeat(64),
+      recoveredVaultCopies: 2,
+      recoveredSources: 1,
+      recoveredFileLocations: 2,
+      recoveredObservations: 2,
+      historicalObservations: 0,
+      recoveredAtMs: 5000,
+      currentVersionSelectionNote: 'inferred_from_manifest_evidence',
+      omittedDataCategories: ['photo_annotations', 'collections']
+    })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        listBackupDestinations: vi.fn().mockResolvedValue([]),
+        listBackupJobs: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }),
+        getActiveBackupJob: vi.fn().mockResolvedValue(null),
+        listRecoveryPoints: vi.fn().mockResolvedValue({
+          backupRepoDir: '',
+          repositoryId: null,
+          recoveryPoints: []
+        }),
+        selectBackupDirectory: vi.fn().mockResolvedValue({ canceled: true, directoryPath: null }),
+        onBackupProgress: vi.fn().mockReturnValue(() => {}),
+        recoverCatalogFromVault
+      }
+    })
+
+    render(<BackupRestorePanel />)
+
+    const section = await screen.findByTestId('recover-from-vault-section')
+    expect(section).toHaveTextContent(/Recover from an existing vault/i)
+    expect(section).toHaveTextContent(/without modifying it/i)
+    expect(section).toHaveTextContent(/ratings, collections/i)
+
+    fireEvent.change(screen.getByTestId('recover-vault-dir-input'), {
+      target: { value: 'E:\\SurvivingVault' }
+    })
+    fireEvent.change(screen.getByTestId('recover-profile-dir-input'), {
+      target: { value: 'D:\\RecoveredProfile' }
+    })
+
+    fireEvent.click(screen.getByTestId('recover-catalog-submit-btn'))
+
+    await waitFor(() => {
+      expect(recoverCatalogFromVault).toHaveBeenCalledWith({
+        sourceVaultDir: 'E:\\SurvivingVault',
+        targetProfileDir: 'D:\\RecoveredProfile'
+      })
+    })
+
+    const resultBox = await screen.findByTestId('recover-catalog-result')
+    expect(resultBox).toHaveTextContent(/2 verified vault copies/i)
+    expect(resultBox).toHaveTextContent(/--user-data-dir="D:\\RecoveredProfile"/)
+  })
 })

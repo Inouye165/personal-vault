@@ -331,6 +331,7 @@ async function main() {
         'pauseSemanticIndexing',
         'reconcileJournal',
         'reconcileSimilarity',
+        'recoverCatalogFromVault',
         'removeCollectionMember',
         'renameCollection',
         'resetDocumentClassificationOverride',

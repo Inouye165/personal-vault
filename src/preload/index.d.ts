@@ -10,6 +10,8 @@ import type {
   BackupListRecoveryPointsRequest,
   BackupListRecoveryPointsResponse,
   BackupProgressEvent,
+  BackupRecoverCatalogRequest,
+  BackupRecoverCatalogResponse,
   BackupRestoreRequest,
   BackupRestoreResponse,
   BackupSelectDirectoryRequest,
@@ -41,6 +43,8 @@ import type {
   BackupListRecoveryPointsRequest,
   BackupListRecoveryPointsResponse,
   BackupProgressEvent,
+  BackupRecoverCatalogRequest,
+  BackupRecoverCatalogResponse,
   BackupRestoreRequest,
   BackupRestoreResponse,
   BackupSelectDirectoryRequest,
@@ -373,6 +377,9 @@ export interface VaultApi {
     request: BackupVerifyRecoveryPointRequest
   ) => Promise<BackupVerifyRecoveryPointResponse>
   restoreRecoveryPoint: (request: BackupRestoreRequest) => Promise<BackupRestoreResponse>
+  recoverCatalogFromVault: (
+    request: BackupRecoverCatalogRequest
+  ) => Promise<BackupRecoverCatalogResponse>
   onBackupProgress: (listener: (event: BackupProgressEvent) => void) => () => void
 }
 

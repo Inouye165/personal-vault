@@ -248,3 +248,32 @@ export const BackupProgressEventSchema = z
   })
   .strict()
 export type BackupProgressEvent = z.infer<typeof BackupProgressEventSchema>
+
+export const BackupRecoverCatalogRequestSchema = z
+  .object({
+    sourceVaultDir: z.string().trim().min(1),
+    targetProfileDir: z.string().trim().min(1)
+  })
+  .strict()
+export type BackupRecoverCatalogRequest = z.infer<typeof BackupRecoverCatalogRequestSchema>
+
+export const BackupRecoverCatalogResponseSchema = z
+  .object({
+    recoveryJobId: z.string().min(1),
+    vaultId: z.string().min(1),
+    vaultName: z.string().min(1),
+    sourceVaultDir: z.string().min(1),
+    targetProfileDir: z.string().min(1),
+    catalogPath: z.string().min(1),
+    catalogSha256: BackupSha256HexSchema,
+    recoveredVaultCopies: z.number().int().nonnegative(),
+    recoveredSources: z.number().int().nonnegative(),
+    recoveredFileLocations: z.number().int().nonnegative(),
+    recoveredObservations: z.number().int().nonnegative(),
+    historicalObservations: z.number().int().nonnegative(),
+    recoveredAtMs: z.number().int().nonnegative(),
+    currentVersionSelectionNote: z.literal('inferred_from_manifest_evidence'),
+    omittedDataCategories: z.array(z.string().min(1))
+  })
+  .strict()
+export type BackupRecoverCatalogResponse = z.infer<typeof BackupRecoverCatalogResponseSchema>

@@ -21,6 +21,8 @@ import {
   BackupListRecoveryPointsRequestSchema,
   BackupListRecoveryPointsResponseSchema,
   BackupProgressEventSchema,
+  BackupRecoverCatalogRequestSchema,
+  BackupRecoverCatalogResponseSchema,
   BackupRestoreRequestSchema,
   BackupRestoreResponseSchema,
   BackupSelectDirectoryRequestSchema,
@@ -35,6 +37,7 @@ import {
   restoreRecoveryPointToIsolatedProfile,
   verifyRecoveryPoint
 } from '../services/backup/restore'
+import { recoverCatalogFromVaultManifests } from '../services/backup/catalog-recovery'
 import type { CatalogDatabase } from '../services/catalog'
 
 type RegisterHandleFn = (
@@ -201,6 +204,18 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
       activeVaultRoots: getAllRegisteredVaultRoots(catalog)
     })
     return BackupRestoreResponseSchema.parse(result)
+  })
+
+  handle(IPC_CHANNELS.BACKUP_RECOVER_CATALOG_FROM_VAULT, async (rawPayload) => {
+    const req = BackupRecoverCatalogRequestSchema.parse(rawPayload)
+    const result = await recoverCatalogFromVaultManifests({
+      sourceVaultDir: req.sourceVaultDir,
+      targetProfileDir: req.targetProfileDir,
+      activeUserDataDir: userDataDir,
+      activeSourceRoots: catalog && !catalog.isClosed() ? catalog.getAllSourceRoots() : [],
+      activeVaultPaths: getAllRegisteredVaultRoots(catalog)
+    })
+    return BackupRecoverCatalogResponseSchema.parse(result)
   })
 
   handle(IPC_CHANNELS.BACKUP_PROGRESS_EVENT, (): never => {

@@ -40,6 +40,8 @@ interface NormalizedThumbnailRequestParams {
   readonly expectedMtimeMs: number | null
   readonly expectedSha256: string | null
   readonly priority?: 'high' | 'normal' | 'low'
+  readonly approvedRootsOverride?: readonly string[]
+  readonly verifySourceBeforeCacheHit?: boolean
 }
 
 interface QueuedThumbnailItem {
@@ -163,7 +165,9 @@ function normalizeRequestParams(params: ThumbnailRequestParams): NormalizedThumb
     expectedByteSize: params.expectedByteSize,
     expectedMtimeMs: params.expectedMtimeMs ?? null,
     expectedSha256: params.expectedSha256 ?? null,
-    priority: params.priority
+    priority: params.priority,
+    approvedRootsOverride: params.approvedRootsOverride,
+    verifySourceBeforeCacheHit: params.verifySourceBeforeCacheHit
   }
 }
 
@@ -815,7 +819,10 @@ export class ThumbnailCoordinator {
     }
 
     // Validate root containment if approved roots are configured
-    const roots = this.getApprovedRoots()
+    const roots =
+      params.approvedRootsOverride && params.approvedRootsOverride.length > 0
+        ? params.approvedRootsOverride
+        : this.getApprovedRoots()
     if (roots.length > 0) {
       try {
         const canonicalSource = realpathSync(params.sourcePath)
@@ -1178,7 +1185,23 @@ export class ThumbnailCoordinator {
         action: 'validate_cache',
         buffer: item.cachedBuf,
         maxBytes: THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES,
-        stuck: process.env.PV_TEST_STUCK_VALIDATION === '1'
+        stuck: process.env.PV_TEST_STUCK_VALIDATION === '1',
+        verifySource: item.params.verifySourceBeforeCacheHit === true,
+        params:
+          item.params.verifySourceBeforeCacheHit === true
+            ? {
+                sourcePath: item.params.sourcePath,
+                expectedByteSize: item.params.expectedByteSize,
+                expectedMtimeMs: item.params.expectedMtimeMs,
+                expectedSha256: item.params.expectedSha256,
+                maxInputPixels: this.maxInputPixels,
+                maxSourceSizeBytes: this.maxSourceSizeBytes,
+                approvedRoots:
+                  item.params.approvedRootsOverride && item.params.approvedRootsOverride.length > 0
+                    ? item.params.approvedRootsOverride
+                    : this.getApprovedRoots()
+              }
+            : undefined
       })
     } else if (item.action === 'fingerprint') {
       currentEntry.worker.postMessage({
@@ -1486,6 +1509,25 @@ export class ThumbnailCoordinator {
           mimeType: 'image/webp',
           width,
           height
+        })
+        this.processNext()
+        return
+      } else if (msg.status === 'source_invalid') {
+        this.cacheMisses++
+        this.cache.delete(item.cacheKey)
+
+        entry.item = null
+        entry.jobId = null
+        entry.locationId = null
+
+        item.resolve({
+          status: 'error',
+          locationId: item.params.locationId,
+          code: typeof msg.code === 'string' ? msg.code : 'SOURCE_MODIFIED',
+          message:
+            typeof msg.message === 'string'
+              ? msg.message
+              : 'Recovered vault payload verification failed'
         })
         this.processNext()
         return

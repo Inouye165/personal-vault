@@ -319,6 +319,22 @@ describe('Stage 8B Sub-slice 1C — Backup & Restore IPC handlers', () => {
         'sample.jpg'
       )
       expect(readFileSync(restoredFile)).toEqual(photoBytes)
+
+      // Recover catalog directly from the surviving vault via BACKUP_RECOVER_CATALOG_FROM_VAULT IPC
+      const recoveredProfileDir = join(baseDir, 'recovered-from-vault-profile')
+      const recoverRes = (await handlers.get(IPC_CHANNELS.BACKUP_RECOVER_CATALOG_FROM_VAULT)!({
+        sourceVaultDir: restoreVaultDir,
+        targetProfileDir: recoveredProfileDir
+      })) as {
+        recoveredVaultCopies: number
+        recoveredFileLocations: number
+        targetProfileDir: string
+        currentVersionSelectionNote: string
+      }
+      expect(recoverRes.recoveredVaultCopies).toBe(1)
+      expect(recoverRes.recoveredFileLocations).toBe(1)
+      expect(recoverRes.targetProfileDir).toBe(recoveredProfileDir)
+      expect(recoverRes.currentVersionSelectionNote).toBe('inferred_from_manifest_evidence')
     } finally {
       await backupCoordinator.shutdown()
       catalog.close()

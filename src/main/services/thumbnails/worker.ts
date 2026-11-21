@@ -41,6 +41,7 @@ if (parentPort) {
       buffer?: Buffer | Uint8Array
       maxBytes?: number
       stuck?: boolean
+      verifySource?: boolean
       directoryPath?: string
       specs?: readonly SemanticModelArtifactSpec[]
     }) => {
@@ -178,6 +179,21 @@ if (parentPort) {
           if (message.stuck || process.env.PV_TEST_STUCK_VALIDATION === '1') {
             // Intentionally do not respond to test coordinator timeout termination
             return
+          }
+          if (message.verifySource && message.params) {
+            const srcCheck = await readAndVerifySourceFile(message.params as DecodeInputParams)
+            if (srcCheck.status !== 'success') {
+              parentPort!.postMessage({
+                id: message.id,
+                status: 'source_invalid',
+                code: srcCheck.status === 'error' ? srcCheck.code : 'SOURCE_MODIFIED',
+                message:
+                  srcCheck.status === 'error'
+                    ? srcCheck.message
+                    : 'Recovered vault payload verification failed'
+              })
+              return
+            }
           }
           const buf = Buffer.isBuffer(message.buffer)
             ? message.buffer

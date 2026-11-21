@@ -109,7 +109,10 @@ import type {
   PhotoMetadataFacetsResult,
   PhotoTechnicalMetadataDetailResult,
   SemanticSearchCatalogInput,
-  SemanticSearchCatalogResult
+  SemanticSearchCatalogResult,
+  PopulateRecoveredCatalogInput,
+  PopulateRecoveredCatalogResult,
+  LocationReadResolutionContext
 } from './types'
 import {
   validateAndSerializeEmbeddingVector,
@@ -209,6 +212,7 @@ interface RawVaultRow {
   created_at_ms: number
   updated_at_ms: number
   is_active: number
+  is_read_only: number
 }
 
 interface RawVaultCopyRow {
@@ -2410,15 +2414,17 @@ export class CatalogDatabase {
       this.db.prepare('UPDATE vaults SET is_active = 0;').run()
 
       // Upsert the vault record
+      const isReadOnlyFlag = input.isReadOnly ? 1 : 0
       const stmt = this.db.prepare(`
-        INSERT INTO vaults (vault_id, vault_path, normalized_vault_path, name, created_at_ms, updated_at_ms, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, 1)
+        INSERT INTO vaults (vault_id, vault_path, normalized_vault_path, name, created_at_ms, updated_at_ms, is_active, is_read_only)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(vault_id) DO UPDATE SET
           vault_path = excluded.vault_path,
           normalized_vault_path = excluded.normalized_vault_path,
           name = excluded.name,
           updated_at_ms = excluded.updated_at_ms,
-          is_active = 1;
+          is_active = 1,
+          is_read_only = CASE WHEN vaults.is_read_only = 1 THEN 1 ELSE excluded.is_read_only END;
       `)
       stmt.run(
         input.vaultId,
@@ -2426,7 +2432,8 @@ export class CatalogDatabase {
         normalizedVaultPath,
         input.name,
         input.createdAtMs,
-        now
+        now,
+        isReadOnlyFlag
       )
       this.db.exec('COMMIT;')
     } catch (err) {
@@ -2449,7 +2456,8 @@ export class CatalogDatabase {
       name: row.name,
       createdAtMs: row.created_at_ms,
       updatedAtMs: row.updated_at_ms,
-      isActive: row.is_active === 1
+      isActive: row.is_active === 1,
+      isReadOnly: row.is_read_only === 1
     }
   }
 
@@ -2467,7 +2475,8 @@ export class CatalogDatabase {
       name: row.name,
       createdAtMs: row.created_at_ms,
       updatedAtMs: row.updated_at_ms,
-      isActive: true
+      isActive: true,
+      isReadOnly: row.is_read_only === 1
     }
   }
 
@@ -2503,7 +2512,8 @@ export class CatalogDatabase {
       name: row.name,
       createdAtMs: row.created_at_ms,
       updatedAtMs: Date.now(),
-      isActive: true
+      isActive: true,
+      isReadOnly: row.is_read_only === 1
     }
   }
 
@@ -3059,10 +3069,62 @@ export class CatalogDatabase {
 
   public getAllSourceRoots(): string[] {
     this.assertOpen()
-    const rows = this.db.prepare('SELECT root_path FROM sources ORDER BY id ASC;').all() as Array<{
+    const rows = this.db
+      .prepare("SELECT root_path FROM sources WHERE source_kind = 'user' ORDER BY id ASC;")
+      .all() as Array<{
       root_path: string
     }>
     return rows.map((r) => r.root_path)
+  }
+
+  public getLocationReadResolutionContext(
+    locationId: number
+  ): LocationReadResolutionContext | null {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          fl.id AS location_id,
+          fl.source_id AS source_id,
+          s.root_path AS source_root_path,
+          s.source_kind AS source_kind,
+          fl.original_path AS original_path,
+          d.byte_size AS byte_size,
+          d.filesystem_mtime_ms AS filesystem_mtime_ms,
+          h.sha256 AS active_hash
+        FROM file_locations fl
+        JOIN sources s ON s.id = fl.source_id
+        JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.file_location_id = fl.id AND h.discovery_observation_id = d.id AND h.is_active = 1
+        WHERE fl.id = ?
+        LIMIT 1;
+      `
+      )
+      .get(locationId) as
+      | {
+          location_id: number
+          source_id: number
+          source_root_path: string
+          source_kind: 'user' | 'recovery_manifest'
+          original_path: string
+          byte_size: number
+          filesystem_mtime_ms: number | null
+          active_hash: string | null
+        }
+      | undefined
+
+    if (!row) return null
+    return {
+      locationId: row.location_id,
+      sourceId: row.source_id,
+      sourceRootPath: row.source_root_path,
+      sourceKind: row.source_kind,
+      originalPath: row.original_path,
+      byteSize: row.byte_size,
+      filesystemMtimeMs: row.filesystem_mtime_ms,
+      activeHash: row.active_hash
+    }
   }
 
   public reconcileJournalWithDatabase(): { reconciledCount: number } {
@@ -6730,6 +6792,181 @@ export class CatalogDatabase {
       errorMessage: strOrNull(row.error_message),
       createdAtMs: Number(row.created_at_ms),
       isCurrent: Number(row.is_current) === 1
+    }
+  }
+
+  public populateRecoveredCatalog(
+    input: PopulateRecoveredCatalogInput
+  ): PopulateRecoveredCatalogResult {
+    this.assertOpen()
+
+    let recoveredVaultCopies = 0
+    let recoveredSources = 0
+    let recoveredFileLocations = 0
+    let recoveredObservations = 0
+    let historicalObservations = 0
+
+    this.db.exec('BEGIN IMMEDIATE;')
+    try {
+      this.db.prepare('UPDATE vaults SET is_active = 0;').run()
+      this.db
+        .prepare(
+          `INSERT INTO vaults (
+            vault_id, vault_path, normalized_vault_path, name,
+            created_at_ms, updated_at_ms, is_active, is_read_only
+          ) VALUES (?, ?, ?, ?, ?, ?, 1, 1);`
+        )
+        .run(
+          input.vaultId,
+          input.vaultPath,
+          input.normalizedVaultPath,
+          input.vaultName,
+          input.vaultCreatedAtMs,
+          input.recoveredAtMs
+        )
+
+      const insertVaultCopyStmt = this.db.prepare(`
+        INSERT INTO vault_copies (
+          vault_id, sha256, byte_size, relative_path, manifest_relative_path,
+          verified_at_ms, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+      `)
+      for (const copy of input.vaultCopies) {
+        insertVaultCopyStmt.run(
+          input.vaultId,
+          copy.sha256,
+          copy.byteSize,
+          copy.relativePath,
+          copy.manifestRelativePath,
+          copy.verifiedAtMs,
+          copy.createdAtMs,
+          copy.updatedAtMs
+        )
+        recoveredVaultCopies++
+      }
+
+      const sourceIdByNormRoot = new Map<string, number>()
+      const selectSourceStmt = this.db.prepare(
+        'SELECT id FROM sources WHERE normalized_root_path = ?;'
+      )
+      const insertSourceStmt = this.db.prepare(`
+        INSERT INTO sources (root_path, normalized_root_path, created_at_ms, updated_at_ms, source_kind)
+        VALUES (?, ?, ?, ?, 'recovery_manifest');
+      `)
+
+      const insertFileLocationStmt = this.db.prepare(`
+        INSERT INTO file_locations (
+          source_id, original_path, normalized_path, file_name, extension, category,
+          created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+      `)
+      const insertDiscoveryObsStmt = this.db.prepare(`
+        INSERT INTO discovery_observations (
+          file_location_id, byte_size, filesystem_birthtime_ms, filesystem_mtime_ms,
+          inferred_capture_time_ms, observed_at_ms, last_seen_at_ms, is_current
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+      `)
+      const insertHashObsStmt = this.db.prepare(`
+        INSERT INTO hash_observations (
+          file_location_id, discovery_observation_id, sha256,
+          observed_byte_size, observed_mtime_ms, hashed_at_ms, is_active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?);
+      `)
+
+      for (const loc of input.fileLocations) {
+        let sourceId = sourceIdByNormRoot.get(loc.normalizedSourceRootPath)
+        if (sourceId === undefined) {
+          const existing = selectSourceStmt.get(loc.normalizedSourceRootPath) as
+            { id: number } | undefined
+          if (existing) {
+            sourceId = existing.id
+          } else {
+            const res = insertSourceStmt.run(
+              loc.sourceRootPath,
+              loc.normalizedSourceRootPath,
+              input.recoveredAtMs,
+              input.recoveredAtMs
+            )
+            sourceId = Number(res.lastInsertRowid)
+            recoveredSources++
+          }
+          sourceIdByNormRoot.set(loc.normalizedSourceRootPath, sourceId)
+        }
+
+        const fileLocRes = insertFileLocationStmt.run(
+          sourceId,
+          loc.originalPath,
+          loc.normalizedPath,
+          loc.fileName,
+          loc.extension,
+          loc.category,
+          input.recoveredAtMs,
+          input.recoveredAtMs
+        )
+        const fileLocationId = Number(fileLocRes.lastInsertRowid)
+        recoveredFileLocations++
+
+        for (const obs of loc.observations) {
+          const isCurInt = obs.isCurrent ? 1 : 0
+          const discRes = insertDiscoveryObsStmt.run(
+            fileLocationId,
+            obs.byteSize,
+            obs.filesystemBirthtimeMs,
+            obs.filesystemMtimeMs,
+            obs.inferredCaptureTimeMs,
+            obs.firstDiscoveredAtMs,
+            obs.lastSeenAtMs,
+            isCurInt
+          )
+          const discObsId = Number(discRes.lastInsertRowid)
+
+          insertHashObsStmt.run(
+            fileLocationId,
+            discObsId,
+            obs.sha256,
+            obs.byteSize,
+            obs.filesystemMtimeMs,
+            obs.hashVerifiedAtMs,
+            isCurInt
+          )
+          recoveredObservations++
+          if (!obs.isCurrent) {
+            historicalObservations++
+          }
+        }
+      }
+
+      const integrity = this.db.prepare('PRAGMA integrity_check;').get() as {
+        integrity_check?: string
+      }
+      if (integrity.integrity_check !== 'ok') {
+        throw new Error(
+          `Recovered catalog failed PRAGMA integrity_check: ${integrity.integrity_check}`
+        )
+      }
+      const fkViolations = this.db.prepare('PRAGMA foreign_key_check;').all()
+      if (fkViolations.length > 0) {
+        throw new Error(
+          `Recovered catalog failed PRAGMA foreign_key_check (${fkViolations.length} violations)`
+        )
+      }
+
+      this.db.exec('COMMIT;')
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // Ignore rollback failure
+      }
+      throw err
+    }
+
+    return {
+      recoveredVaultCopies,
+      recoveredSources,
+      recoveredFileLocations,
+      recoveredObservations,
+      historicalObservations
     }
   }
 }

@@ -56,6 +56,8 @@
     "verify:unified-search:unpacked": "node scripts/verify-electron-unified-search.mjs --mode=unpacked",
     "verify:backup": "node scripts/verify-electron-backup-restore.mjs --mode=built",
     "verify:backup:unpacked": "node scripts/verify-electron-backup-restore.mjs --mode=unpacked",
+    "verify:recovery": "node scripts/verify-electron-catalog-recovery.mjs --mode=built",
+    "verify:recovery:unpacked": "node scripts/verify-electron-catalog-recovery.mjs --mode=unpacked",
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",

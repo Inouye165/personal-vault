@@ -118,6 +118,9 @@ export class VaultImportCoordinator {
       if (!activeVault || activeVault.vaultId !== options.vaultId) {
         throw new Error(`Vault "${options.vaultId}" is not currently active`)
       }
+      if (activeVault.isReadOnly) {
+        throw new Error(`Vault "${options.vaultId}" is bound read-only and cannot accept imports`)
+      }
 
       // Validate vault exists and identity is intact
       loadVaultIdentity(activeVault.vaultPath)
@@ -483,6 +486,9 @@ export class VaultImportCoordinator {
       const activeVault = this.catalog.getActiveVault()
       if (!activeVault || activeVault.vaultId !== job.vaultId) {
         throw new Error(`Vault "${job.vaultId}" is not currently active`)
+      }
+      if (activeVault.isReadOnly) {
+        throw new Error(`Vault "${job.vaultId}" is bound read-only and cannot resume imports`)
       }
 
       // Vault integrity and path containment checks on resume as well as initial start

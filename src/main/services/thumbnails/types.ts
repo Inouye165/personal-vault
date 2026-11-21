@@ -88,6 +88,8 @@ export interface ThumbnailRequestParams {
   readonly expectedMtimeMs?: number | null
   readonly expectedSha256?: string | null
   readonly priority?: 'high' | 'normal' | 'low'
+  readonly approvedRootsOverride?: readonly string[]
+  readonly verifySourceBeforeCacheHit?: boolean
 }
 
 export interface SemanticEmbedRequestParams {

@@ -13,6 +13,8 @@ import {
   BackupListRecoveryPointsRequestSchema,
   BackupListRecoveryPointsResponseSchema,
   BackupProgressEventSchema,
+  BackupRecoverCatalogRequestSchema,
+  BackupRecoverCatalogResponseSchema,
   BackupRestoreRequestSchema,
   BackupRestoreResponseSchema,
   BackupSelectDirectoryRequestSchema,
@@ -31,6 +33,8 @@ import {
   type BackupListRecoveryPointsRequest,
   type BackupListRecoveryPointsResponse,
   type BackupProgressEvent,
+  type BackupRecoverCatalogRequest,
+  type BackupRecoverCatalogResponse,
   type BackupRestoreRequest,
   type BackupRestoreResponse,
   type BackupSelectDirectoryRequest,
@@ -2040,6 +2044,24 @@ const api: VaultApi = {
     const result = validatePayload(BackupRestoreResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid restoreRecoveryPoint response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async recoverCatalogFromVault(
+    request: BackupRecoverCatalogRequest
+  ): Promise<BackupRecoverCatalogResponse> {
+    const parsed = validatePayload(BackupRecoverCatalogRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid recoverCatalogFromVault request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(
+      IPC_CHANNELS.BACKUP_RECOVER_CATALOG_FROM_VAULT,
+      parsed.data
+    )
+    const result = validatePayload(BackupRecoverCatalogResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid recoverCatalogFromVault response from main: ${result.error}`)
     }
     return result.data
   },
