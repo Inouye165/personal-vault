@@ -291,12 +291,12 @@ Status: **Complete (Substages 7A–7F independently accepted; Stage 7 closed in 
 
 ---
 
-## Stage 8: Export, Recovery, Release Validation, Beta, and Public Release (In progress — 8A Complete, 8B–8E Planned)
+## Stage 8: Export, Recovery, Release Validation, Beta, and Public Release (In progress)
 
-Status: **In progress** (Stage 8A Complete: Slice 1 checkpointed at `a03504c`; Slice 2 checkpointed at `36f1444`; Slice 3 independently ACCEPTED, closing Stage 8A; Stage 8B–8E future planning).
+Status: **In progress** (Stage 8A closed at `ba4785a`; Stage 8B Sub-slice 1A-1 independently accepted; Stages 8C-8E planned).
 
 - [x] **8A**: Selective export bundles with preserved metadata sidecars (Slice 1 export core & schemas **Complete — accepted & checkpointed at `a03504c`**; Slice 2 Migration 16 & `ExportRepository` **Complete — accepted & checkpointed at `36f1444`**; Slice 3 Electron `ExportCoordinator`, IPC, preload & `ExportPanel` **Complete — independently ACCEPTED**, verified with 49/49 focused tests, 1,530/1,530 full-suite tests, `typecheck`/`lint`/`format:check`, `build:unpack`, `smoke:built` & `smoke:unpacked` passing; live unpacked native picker verified Cancel and confirmation of the default `Downloads` folder, with navigation to a different folder remaining unverified).
-- [ ] **8B**: Backup, restore, and catalog recovery from vault manifests.
+- [ ] **8B**: [Home storage and metered Google Drive backup, restore, and catalog recovery](docs/stage-8b-backup-recovery-plan.md) (Sub-slice 1A-1 **Complete — independently ACCEPTED**: schemas, capture containment, `backup_snapshot_worker`, `captureConsistentBackupSnapshot`, 6/6 focused, Electron Node worker pass, 1,535/1,536 full run with thumbnail test passing on its own; 1A-2+ in progress).
 - [ ] **8C**: Release scope, security, performance, cross-platform installers, and documentation.
 - [ ] **8D**: Beta testing, defect resolution, and release candidate acceptance.
 - [ ] **8E**: Approved public release and verified distribution.

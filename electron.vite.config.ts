@@ -61,7 +61,8 @@ export default defineConfig({
           document_classify_coordinator: resolve(
             'src/main/services/documents/classification/coordinator.ts'
           ),
-          document_classify_worker: resolve('src/main/services/documents/classification/worker.ts')
+          document_classify_worker: resolve('src/main/services/documents/classification/worker.ts'),
+          backup_snapshot_worker: resolve('src/main/services/backup/snapshot-worker.ts')
         }
       }
     }

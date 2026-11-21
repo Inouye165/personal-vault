@@ -364,15 +364,15 @@ Exit: supported documents can be found and reviewed alongside photos without upl
 
 ## Stage 8 - Release preparation through public availability
 
-**In progress.** Stage 8A is complete; Substages 8B–8E are future planning, not completed work or authorization to publish.
+**In progress.** Stage 8A is complete. Stage 8B planning is underway. Stages 8C-8E remain planned.
 
-| Substage | Deliverable                                                         | Status   | Acceptance/release reference                                         |
-| -------- | ------------------------------------------------------------------- | -------- | -------------------------------------------------------------------- |
-| 8A       | Selective export and portable metadata bundles                      | Complete | Slice 1 `a03504c`, Slice 2 `36f1444`, Slice 3 independently accepted |
-| 8B       | Backup, restore, and catalog recovery from vault manifests          | Planned  | Pending                                                              |
-| 8C       | Release scope, security, performance, installers, and documentation | Planned  | Pending                                                              |
-| 8D       | Beta testing, defect resolution, and release candidate              | Planned  | Pending                                                              |
-| 8E       | Approved public release and verified distribution                   | Planned  | Pending                                                              |
+| Substage | Deliverable                                                                 | Status      | Acceptance/release reference                                                                                                                                                                  |
+| -------- | --------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 8A       | Selective export and portable metadata bundles                              | Complete    | Slice 1 `a03504c`, Slice 2 `36f1444`, Slice 3 independently accepted                                                                                                                          |
+| 8B       | Home storage and metered Google Drive backup, restore, and catalog recovery | In progress | [Stage 8B plan](docs/stage-8b-backup-recovery-plan.md); 1A-1 independently accepted (`6/6` focused, Electron Node worker pass, `1,535/1,536` full run with thumbnail test passing on its own) |
+| 8C       | Release scope, security, performance, installers, and documentation         | Planned     | Pending                                                                                                                                                                                       |
+| 8D       | Beta testing, defect resolution, and release candidate                      | Planned     | Pending                                                                                                                                                                                       |
+| 8E       | Approved public release and verified distribution                           | Planned     | Pending                                                                                                                                                                                       |
 
 - [x] **8A (Complete — Slice 1 `a03504c`, Slice 2 `36f1444`, Slice 3 independently ACCEPTED)**: Selective export bundles with preserved `.pv-meta.json` sidecars, SQLite Migration 16 job history (`ExportRepository`), `ExportCoordinator`, sender-validated IPC (`export-handlers.ts`), sandboxed preload (`128`-method `window.api` allowlist), and `ExportPanel` UI. Independent Slice 3 verification: **49/49** focused tests (`5` files), **1,530/1,530** full-suite tests (`118` files), `typecheck`, `lint`, `format:check`, `build:unpack`, `smoke:built`, and `smoke:unpacked` passed (`exit 0`); live unpacked native picker (`dist/win-unpacked/Personal Vault.exe`) verified Cancel and confirmation of the default `Downloads` folder, while navigation to a different folder remains unverified. Non-blocking Slice 1/3 retained notes: `inspectExportBundleStatus` ignores top-level orphaned `*.pv-meta.json` sidecars unless listed in `export-manifest.json`, and already-published bundles whose SQLite finalization did not commit remain `interrupted` after startup recovery.
 
