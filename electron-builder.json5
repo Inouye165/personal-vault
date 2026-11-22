@@ -44,6 +44,7 @@
     deleteAppDataOnUninstall: false,
     createDesktopShortcut: true,
     createStartMenuShortcut: true,
-    shortcutName: 'Personal Vault'
+    shortcutName: 'Personal Vault',
+    include: 'build/installer.nsh'
   }
 }

@@ -24,6 +24,17 @@ Clone or open the repository at `D:\organizer`, then install dependencies:
 npm install
 ```
 
+### Building the Windows Installer (Clean Checkout)
+
+The Windows NSIS installer (`build/installer.nsh`) bundles the Microsoft-signed Visual C++ 2015–2022 Redistributable (x64) (`14.44.35211.0`, SHA-256 `cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b`), which is gitignored under `build/vc_redist.x64.exe`. On a clean checkout, download it from the pinned `download.visualstudio.microsoft.com` URL and verify it before building the installer:
+
+```bash
+npm run fetch:vcredist
+npm run build:installer
+```
+
+`npm run verify:vcredist` checks both the pinned SHA-256 and the `Valid` Microsoft Authenticode signature (`CN=Microsoft Corporation`) and fails closed on any mismatch.
+
 ---
 
 ## Development

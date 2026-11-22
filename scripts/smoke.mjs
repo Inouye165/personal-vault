@@ -475,9 +475,17 @@ async function main() {
       if (leftover.length > 0) {
         failures.push(`Unpacked launch wrote into cwd (${launchCwd}): ${leftover.join(', ')}`)
       }
-      rmSync(launchCwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      try {
+        rmSync(launchCwd, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 })
+      } catch (cleanupErr) {
+        console.warn(`[smoke] warning: could not remove ${launchCwd}: ${cleanupErr.message}`)
+      }
     }
-    rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    try {
+      rmSync(userDataDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 })
+    } catch (cleanupErr) {
+      console.warn(`[smoke] warning: could not remove ${userDataDir}: ${cleanupErr.message}`)
+    }
   }
 
   if (failures.length > 0) {

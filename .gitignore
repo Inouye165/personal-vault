@@ -25,6 +25,7 @@ dist-stage-7e-ui-verify/
 dist-stage-7f-verify/
 build/*
 !build/icon.ico
+!build/installer.nsh
 coverage/
 *.tsbuildinfo
 

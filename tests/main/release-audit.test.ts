@@ -17,11 +17,13 @@ describe('Stage 8C-1 release readiness audit', () => {
     expect(notices).toContain('electron')
   })
 
-  it('configures Windows x64 NSIS alongside dir with icon and user-data preservation', () => {
+  it('configures Windows x64 NSIS alongside dir with icon, VC++ runtime hook, and user-data preservation', () => {
     const builderConfig = readFileSync(join(rootDir, 'electron-builder.json5'), 'utf8')
     expect(existsSync(join(rootDir, 'build', 'icon.ico'))).toBe(true)
+    expect(existsSync(join(rootDir, 'build', 'installer.nsh'))).toBe(true)
     expect(builderConfig).toContain("target: 'dir'")
     expect(builderConfig).toContain("target: 'nsis'")
+    expect(builderConfig).toContain("include: 'build/installer.nsh'")
     expect(builderConfig).toContain('deleteAppDataOnUninstall: false')
   })
 
