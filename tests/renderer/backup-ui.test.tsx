@@ -751,4 +751,236 @@ describe('BackupRestorePanel — Redesigned everyday view', () => {
     expect(resultBox).toHaveTextContent(/2 verified vault copies/i)
     expect(resultBox).toHaveTextContent(/--user-data-dir="D:\\RecoveredProfile"/)
   })
+
+  it('supports Google Drive account connect/disconnect, folder creation, speed & rolling budget setup, budget-exhausted resume, and remote restore', async () => {
+    const driveDest = {
+      id: 'dest-gdrive-1',
+      name: 'Google Drive Backup',
+      kind: 'google_drive' as const,
+      targetPath: 'folder-2',
+      maxBytesPerSecond: 2 * 1024 * 1024,
+      dailyBudgetBytes: 512 * 1024 * 1024,
+      encryptionMode: 'aes-256-gcm-v1' as const,
+      repositoryId: 'repo-gdrive-1',
+      isEnabled: true,
+      lastVerifiedSnapshotId: null,
+      lastVerifiedAtMs: null,
+      createdAtMs: 1000,
+      updatedAtMs: 2000
+    }
+
+    const budgetPausedJob = {
+      id: 'job-gdrive-1',
+      destinationId: 'dest-gdrive-1',
+      snapshotId: '2026-11-21T01-00-00Z_gdrive1',
+      repositoryId: 'repo-gdrive-1',
+      status: 'paused' as const,
+      pauseReason: 'daily_budget_exhausted' as const,
+      stagingDir: 'C:\\staging\\job-gdrive-1',
+      verificationScope: null,
+      totalObjectCount: 5,
+      completedObjectCount: 2,
+      writtenChunkCount: 2,
+      reusedChunkCount: 0,
+      totalLogicalBytes: 4096,
+      totalStoredBytes: 4096,
+      transferredBytes: 2048,
+      manifestSha256: null,
+      abandonedFromJobId: null,
+      errorCode: null,
+      errorMessage: null,
+      createdAtMs: 1000,
+      startedAtMs: 1000,
+      updatedAtMs: 2000,
+      completedAtMs: null
+    }
+
+    let authState: {
+      status: 'disconnected' | 'connected' | 'expired'
+      accountEmail: string | null
+      accountDisplayName: string | null
+      lastError: string | null
+    } = {
+      status: 'disconnected',
+      accountEmail: null,
+      accountDisplayName: null,
+      lastError: null
+    }
+    const getGoogleDriveAuthStatus = vi.fn().mockImplementation(async () => authState)
+    const connectGoogleDrive = vi.fn().mockImplementation(async () => {
+      authState = {
+        status: 'connected',
+        accountEmail: 'user@example.com',
+        accountDisplayName: 'Test User',
+        lastError: null
+      }
+      return authState
+    })
+    const disconnectGoogleDrive = vi.fn().mockImplementation(async () => {
+      authState = {
+        status: 'disconnected',
+        accountEmail: null,
+        accountDisplayName: null,
+        lastError: null
+      }
+      return authState
+    })
+    const listGoogleDriveFolders = vi
+      .fn()
+      .mockResolvedValue([{ id: 'folder-1', name: 'Existing Backups' }])
+    const createGoogleDriveFolder = vi.fn().mockResolvedValue({
+      id: 'folder-2',
+      name: 'Vault Cloud'
+    })
+    let configuredDestinations: Array<typeof driveDest> = []
+    const configureBackupDestination = vi.fn().mockImplementation(async () => {
+      configuredDestinations = [driveDest]
+      return driveDest
+    })
+    const listBackupDestinations = vi.fn().mockImplementation(async () => configuredDestinations)
+    const listBackupJobs = vi
+      .fn()
+      .mockResolvedValue({ items: [budgetPausedJob], total: 1, limit: 25, offset: 0 })
+    const resumeBackup = vi
+      .fn()
+      .mockResolvedValue({ ...budgetPausedJob, status: 'completed', pauseReason: null })
+    const listRecoveryPoints = vi.fn().mockResolvedValue({
+      destinationId: 'dest-gdrive-1',
+      backupRepoDir: 'gdrive://folder/folder-2',
+      repositoryId: 'repo-gdrive-1',
+      recoveryPoints: [
+        {
+          snapshotId: '2026-11-21T01-00-00Z_gdrive1',
+          isComplete: true,
+          reasons: [],
+          repositoryId: 'repo-gdrive-1',
+          encryptionMode: 'aes-256-gcm-v1' as const,
+          createdAtMs: 1000,
+          completedAtMs: 2000,
+          verificationScope: 'full_readback' as const,
+          totalObjectCount: 5,
+          totalLogicalBytes: 4096,
+          totalStoredBytes: 4096,
+          vaultName: 'Cloud Vault',
+          vaultCopyCount: 3
+        }
+      ]
+    })
+    const verifyRecoveryPoint = vi.fn().mockResolvedValue({
+      repositoryId: 'repo-gdrive-1',
+      snapshotId: '2026-11-21T01-00-00Z_gdrive1',
+      verifiedFileCount: 5,
+      verifiedObjectCount: 5,
+      hasVault: true,
+      verificationScope: 'full_readback' as const
+    })
+    const restoreRecoveryPoint = vi.fn().mockResolvedValue({
+      repositoryId: 'repo-gdrive-1',
+      snapshotId: '2026-11-21T01-00-00Z_gdrive1',
+      restoredProfilePath: 'D:\\Restores\\Cloud\\profile',
+      restoredVaultPath: 'D:\\Restores\\Cloud\\vault',
+      verifiedFileCount: 5,
+      verificationScope: 'full_readback' as const
+    })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        listBackupDestinations,
+        listBackupJobs,
+        getActiveBackupJob: vi.fn().mockResolvedValue(null),
+        getGoogleDriveAuthStatus,
+        connectGoogleDrive,
+        disconnectGoogleDrive,
+        listGoogleDriveFolders,
+        createGoogleDriveFolder,
+        configureBackupDestination,
+        resumeBackup,
+        listRecoveryPoints,
+        verifyRecoveryPoint,
+        restoreRecoveryPoint,
+        selectBackupDirectory: vi.fn().mockResolvedValue({ canceled: true, directoryPath: null }),
+        onBackupProgress: vi.fn().mockReturnValue(() => {})
+      }
+    })
+
+    render(<BackupRestorePanel />)
+
+    const gdriveRadio = await screen.findByLabelText(/Google Drive \(Encrypted cloud\)/i)
+    fireEvent.click(gdriveRadio)
+
+    const connectBtn = await screen.findByRole('button', { name: /Connect Google Drive/i })
+    fireEvent.click(connectBtn)
+
+    await screen.findByText(/Connected as user@example\.com/i)
+    expect(listGoogleDriveFolders).toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText(/Or Create New Folder/i), {
+      target: { value: 'Vault Cloud' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Create folder/i }))
+    await waitFor(() => {
+      expect(createGoogleDriveFolder).toHaveBeenCalledWith({ name: 'Vault Cloud' })
+    })
+
+    fireEvent.change(screen.getByLabelText(/Upload Speed Limit/i), {
+      target: { value: '2' }
+    })
+    fireEvent.change(screen.getByLabelText(/Rolling 24h Upload Budget/i), {
+      target: { value: '512' }
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Save destination/i }))
+
+    await waitFor(() => {
+      expect(configureBackupDestination).toHaveBeenCalledWith({
+        name: 'Google Drive Backup',
+        kind: 'google_drive',
+        targetPath: 'folder-2',
+        encryptionMode: 'aes-256-gcm-v1',
+        maxBytesPerSecond: 2 * 1024 * 1024,
+        dailyBudgetBytes: 512 * 1024 * 1024
+      })
+    })
+
+    // Budget-exhausted pause banner is shown
+    await screen.findByText(/Backup paused — daily upload budget reached/i)
+    await screen.findByText(/rolling 24-hour upload budget was reached/i)
+
+    // Resume passes optional secret and clears input immediately
+    const secretInput = screen.getByTestId('backup-recovery-secret-input') as HTMLInputElement
+    fireEvent.change(secretInput, { target: { value: 'my-drive-secret' } })
+    const summaryResumeBtn = screen.getAllByRole('button', { name: /^Resume$/i })[0]!
+    fireEvent.click(summaryResumeBtn)
+
+    await waitFor(() => {
+      expect(resumeBackup).toHaveBeenCalledWith('job-gdrive-1', 'my-drive-secret')
+    })
+    expect(secretInput.value).toBe('')
+
+    // Remote snapshot appears in Restore section and restores with destinationId + recoverySecret
+    await screen.findByText(/3 vault files \(Cloud Vault\)/i)
+    const restoreSecretInput = screen.getByTestId(
+      'restore-recovery-secret-input'
+    ) as HTMLInputElement
+    fireEvent.change(restoreSecretInput, { target: { value: 'my-drive-secret' } })
+    fireEvent.change(screen.getByLabelText(/Restore Location \(empty folder\)/i), {
+      target: { value: 'D:\\Restores\\Cloud' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Restore files/i }))
+
+    await waitFor(() => {
+      expect(restoreRecoveryPoint).toHaveBeenCalledWith({
+        destinationKind: 'google_drive',
+        driveFolderId: 'folder-2',
+        snapshotId: '2026-11-21T01-00-00Z_gdrive1',
+        targetProfileDir: 'D:\\Restores\\Cloud\\profile',
+        targetVaultDir: 'D:\\Restores\\Cloud\\vault',
+        recoverySecret: 'my-drive-secret'
+      })
+    })
+    expect(restoreSecretInput.value).toBe('')
+    await screen.findByText(/Restore complete — 5 files restored/i)
+  })
 })

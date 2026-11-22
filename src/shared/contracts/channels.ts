@@ -141,6 +141,11 @@ export const IPC_CHANNELS = {
   BACKUP_VERIFY_RECOVERY_POINT: 'backup:verify-recovery-point',
   BACKUP_RESTORE_RECOVERY_POINT: 'backup:restore-recovery-point',
   BACKUP_RECOVER_CATALOG_FROM_VAULT: 'backup:recover-catalog-from-vault',
+  BACKUP_GDRIVE_GET_STATUS: 'backup:gdrive-get-status',
+  BACKUP_GDRIVE_CONNECT: 'backup:gdrive-connect',
+  BACKUP_GDRIVE_DISCONNECT: 'backup:gdrive-disconnect',
+  BACKUP_GDRIVE_LIST_FOLDERS: 'backup:gdrive-list-folders',
+  BACKUP_GDRIVE_CREATE_FOLDER: 'backup:gdrive-create-folder',
   BACKUP_PROGRESS_EVENT: 'backup:progress-event'
 } as const
 

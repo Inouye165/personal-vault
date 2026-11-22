@@ -1,6 +1,11 @@
 import type {
   BackupConfigureDestinationRequest,
   BackupDestinationRecordDto,
+  BackupGoogleDriveAuthStatusDto,
+  BackupGoogleDriveCreateFolderRequest,
+  BackupGoogleDriveFolderDto,
+  BackupGoogleDriveListFoldersRequest,
+  BackupGoogleDriveListFoldersResponse,
   BackupJobActionResponse,
   BackupJobRecordDto,
   BackupListDestinationsRequest,
@@ -31,28 +36,6 @@ import type {
   ExportSelectDestinationResponse,
   ExportStartRequest
 } from '../shared/validation/export-schemas.js'
-import type {
-  BackupConfigureDestinationRequest,
-  BackupDestinationRecordDto,
-  BackupJobActionResponse,
-  BackupJobRecordDto,
-  BackupListDestinationsRequest,
-  BackupListDestinationsResponse,
-  BackupListJobsRequest,
-  BackupListJobsResponse,
-  BackupListRecoveryPointsRequest,
-  BackupListRecoveryPointsResponse,
-  BackupProgressEvent,
-  BackupRecoverCatalogRequest,
-  BackupRecoverCatalogResponse,
-  BackupRestoreRequest,
-  BackupRestoreResponse,
-  BackupSelectDirectoryRequest,
-  BackupSelectDirectoryResponse,
-  BackupStartRequest,
-  BackupVerifyRecoveryPointRequest,
-  BackupVerifyRecoveryPointResponse
-} from '../shared/validation/backup-ipc-schemas.js'
 import type {
   AppInfo,
   NavigationTab,
@@ -365,7 +348,7 @@ export interface VaultApi {
   ) => Promise<BackupListDestinationsResponse>
   startBackup: (request: BackupStartRequest) => Promise<BackupJobRecordDto>
   pauseBackup: (jobId: string) => Promise<BackupJobActionResponse>
-  resumeBackup: (jobId: string) => Promise<BackupJobRecordDto>
+  resumeBackup: (jobId: string, recoverySecret?: string) => Promise<BackupJobRecordDto>
   cancelBackup: (jobId: string) => Promise<BackupJobActionResponse>
   getActiveBackupJob: () => Promise<BackupJobRecordDto | null>
   listBackupJobs: (request?: BackupListJobsRequest) => Promise<BackupListJobsResponse>
@@ -380,6 +363,15 @@ export interface VaultApi {
   recoverCatalogFromVault: (
     request: BackupRecoverCatalogRequest
   ) => Promise<BackupRecoverCatalogResponse>
+  getGoogleDriveAuthStatus: () => Promise<BackupGoogleDriveAuthStatusDto>
+  connectGoogleDrive: () => Promise<BackupGoogleDriveAuthStatusDto>
+  disconnectGoogleDrive: () => Promise<BackupGoogleDriveAuthStatusDto>
+  listGoogleDriveFolders: (
+    request?: BackupGoogleDriveListFoldersRequest
+  ) => Promise<BackupGoogleDriveListFoldersResponse>
+  createGoogleDriveFolder: (
+    request: BackupGoogleDriveCreateFolderRequest
+  ) => Promise<BackupGoogleDriveFolderDto>
   onBackupProgress: (listener: (event: BackupProgressEvent) => void) => () => void
 }
 

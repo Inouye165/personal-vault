@@ -51,6 +51,7 @@ import {
 } from './engine'
 import {
   BackupContainmentError,
+  BackupRestoreError,
   BackupSnapshotError,
   classifyBackupDestinationFsError
 } from './errors'
@@ -155,6 +156,7 @@ export class BackupCoordinator {
   private readonly recoverySecret?: string
   private readonly getRecoverySecret?: (dest: BackupDestinationRecord) => string | undefined
   private readonly kdfParams?: BackupEncryptionKdfParams
+  private readonly secretCache = new Map<string, string>()
   private readonly events = new EventEmitter()
 
   private activeJobId: string | null = null
@@ -375,7 +377,11 @@ export class BackupCoordinator {
     dest: BackupDestinationRecord,
     overrideSecret?: string
   ): string | undefined {
-    return overrideSecret ?? this.getRecoverySecret?.(dest) ?? this.recoverySecret
+    if (overrideSecret) {
+      this.secretCache.set(dest.id, overrideSecret)
+      return overrideSecret
+    }
+    return this.secretCache.get(dest.id) ?? this.getRecoverySecret?.(dest) ?? this.recoverySecret
   }
 
   private createGoogleDriveTransport(
@@ -562,7 +568,13 @@ export class BackupCoordinator {
             })
           }
         }
-      } catch {
+      } catch (err) {
+        if (
+          (err instanceof BackupSnapshotError || err instanceof BackupRestoreError) &&
+          (err.code === 'recovery_secret_required' || err.code === 'wrong_recovery_secret')
+        ) {
+          throw err
+        }
         return null
       }
     } else {
@@ -582,7 +594,13 @@ export class BackupCoordinator {
         manifest = BackupSnapshotManifestV1Schema.parse(
           JSON.parse(readFileSync(join(snapDir, BACKUP_SNAPSHOT_MANIFEST_FILE), 'utf8'))
         )
-      } catch {
+      } catch (err) {
+        if (
+          (err instanceof BackupSnapshotError || err instanceof BackupRestoreError) &&
+          (err.code === 'recovery_secret_required' || err.code === 'wrong_recovery_secret')
+        ) {
+          throw err
+        }
         return null
       }
     }
@@ -685,9 +703,27 @@ export class BackupCoordinator {
     }
 
     if (job.status === 'paused' || job.status === 'interrupted') {
-      const reconciled = await this.tryReconcileCompletedBackupOnDisk(job, dest, options)
-      if (reconciled) {
-        return reconciled
+      try {
+        const reconciled = await this.tryReconcileCompletedBackupOnDisk(job, dest, options)
+        if (reconciled) {
+          return reconciled
+        }
+      } catch (err) {
+        if (
+          (err instanceof BackupSnapshotError || err instanceof BackupRestoreError) &&
+          (err.code === 'recovery_secret_required' || err.code === 'wrong_recovery_secret')
+        ) {
+          this.secretCache.delete(dest.id)
+          const paused = repo.updateJobState(job.id, {
+            status: 'paused',
+            pauseReason: job.pauseReason ?? 'user_paused',
+            errorCode: err.code,
+            errorMessage: err.message
+          })
+          this.emitProgress(paused)
+          return paused
+        }
+        throw err
       }
     }
 
@@ -915,8 +951,25 @@ export class BackupCoordinator {
       }
 
       const classifiedCode =
-        err instanceof BackupSnapshotError ? err.code : classifyBackupDestinationFsError(err)
+        err instanceof BackupSnapshotError || err instanceof BackupRestoreError
+          ? err.code
+          : classifyBackupDestinationFsError(err)
       const message = err instanceof Error ? err.message : String(err)
+
+      if (
+        classifiedCode === 'recovery_secret_required' ||
+        classifiedCode === 'wrong_recovery_secret'
+      ) {
+        this.secretCache.delete(dest.id)
+        const paused = repo.updateJobState(initialJob.id, {
+          status: 'paused',
+          pauseReason: 'user_paused',
+          errorCode: classifiedCode,
+          errorMessage: message
+        })
+        this.emitProgress(paused)
+        return paused
+      }
 
       if (classifiedCode === 'destination_unavailable') {
         const paused = repo.updateJobState(initialJob.id, {
@@ -934,6 +987,17 @@ export class BackupCoordinator {
           status: 'paused',
           pauseReason: 'daily_budget_exhausted',
           errorCode: 'daily_budget_exhausted',
+          errorMessage: message
+        })
+        this.emitProgress(paused)
+        return paused
+      }
+
+      if (classifiedCode === 'destination_access_denied') {
+        const paused = repo.updateJobState(initialJob.id, {
+          status: 'paused',
+          pauseReason: 'destination_unavailable',
+          errorCode: 'destination_access_denied',
           errorMessage: message
         })
         this.emitProgress(paused)

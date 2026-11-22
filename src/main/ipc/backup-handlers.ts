@@ -11,6 +11,11 @@ import { IPC_CHANNELS } from '../../shared/contracts/channels'
 import {
   BackupConfigureDestinationRequestSchema,
   BackupDestinationRecordSchema,
+  BackupGoogleDriveAuthStatusSchema,
+  BackupGoogleDriveCreateFolderRequestSchema,
+  BackupGoogleDriveFolderSchema,
+  BackupGoogleDriveListFoldersRequestSchema,
+  BackupGoogleDriveListFoldersResponseSchema,
   BackupJobActionRequestSchema,
   BackupJobActionResponseSchema,
   BackupJobRecordSchema,
@@ -32,10 +37,15 @@ import {
   BackupVerifyRecoveryPointResponseSchema
 } from '../../shared/validation/backup-ipc-schemas'
 import type { BackupCoordinator } from '../services/backup/coordinator'
+import type { GoogleDriveAuthService } from '../services/backup/google-drive-auth'
+import { GoogleDriveTransport } from '../services/backup/google-drive-transport'
 import {
   listRecoveryPoints,
+  listRemoteRecoveryPoints,
   restoreRecoveryPointToIsolatedProfile,
-  verifyRecoveryPoint
+  restoreRemoteRecoveryPointToIsolatedProfile,
+  verifyRecoveryPoint,
+  verifyRemoteRecoveryPoint
 } from '../services/backup/restore'
 import { recoverCatalogFromVaultManifests } from '../services/backup/catalog-recovery'
 import type { CatalogDatabase } from '../services/catalog'
@@ -48,6 +58,8 @@ type RegisterHandleFn = (
 export interface BackupIpcHandlerDeps {
   readonly handle: RegisterHandleFn
   readonly backupCoordinator?: BackupCoordinator
+  readonly googleDriveAuth?: GoogleDriveAuthService
+  readonly createGoogleDriveTransport?: (folderId: string) => GoogleDriveTransport
   readonly catalog?: CatalogDatabase
   readonly userDataDir?: string
   readonly getMainWindow?: () => BrowserWindow | null
@@ -66,8 +78,29 @@ function getAllRegisteredVaultRoots(catalog?: CatalogDatabase): string[] {
 }
 
 export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
-  const { handle, backupCoordinator, catalog, userDataDir, getMainWindow, selectBackupDirectory } =
-    deps
+  const {
+    handle,
+    backupCoordinator,
+    googleDriveAuth,
+    createGoogleDriveTransport,
+    catalog,
+    userDataDir,
+    getMainWindow,
+    selectBackupDirectory
+  } = deps
+
+  const resolveDriveTransport = (folderId: string): GoogleDriveTransport => {
+    if (createGoogleDriveTransport) {
+      return createGoogleDriveTransport(folderId)
+    }
+    if (!googleDriveAuth) {
+      throw new Error('Google Drive auth service is not initialized')
+    }
+    return new GoogleDriveTransport({
+      rootFolderId: folderId,
+      getAccessToken: () => googleDriveAuth.getAccessToken()
+    })
+  }
 
   handle(IPC_CHANNELS.BACKUP_SELECT_DIRECTORY, async (rawPayload) => {
     const req = rawPayload === undefined ? {} : BackupSelectDirectoryRequestSchema.parse(rawPayload)
@@ -100,7 +133,9 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
       name: req.name,
       kind: req.kind,
       targetPath: req.targetPath,
-      maxBytesPerSecond: req.maxBytesPerSecond ?? null
+      maxBytesPerSecond: req.maxBytesPerSecond ?? null,
+      dailyBudgetBytes: req.dailyBudgetBytes ?? null,
+      encryptionMode: req.encryptionMode
     })
     return BackupDestinationRecordSchema.parse(dest)
   })
@@ -120,7 +155,9 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
       throw new Error('BackupCoordinator is not initialized')
     }
     const req = BackupStartRequestSchema.parse(rawPayload)
-    const job = await backupCoordinator.startBackup(req.destinationId)
+    const job = await backupCoordinator.startBackup(req.destinationId, {
+      recoverySecret: req.recoverySecret
+    })
     return BackupJobRecordSchema.parse(job)
   })
 
@@ -138,7 +175,9 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
       throw new Error('BackupCoordinator is not initialized')
     }
     const req = BackupJobActionRequestSchema.parse(rawPayload)
-    const job = await backupCoordinator.resumeBackup(req.jobId)
+    const job = await backupCoordinator.resumeBackup(req.jobId, {
+      recoverySecret: req.recoverySecret
+    })
     return BackupJobRecordSchema.parse(job)
   })
 
@@ -177,23 +216,73 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
     return job ? BackupJobRecordSchema.parse(job) : null
   })
 
-  handle(IPC_CHANNELS.BACKUP_LIST_RECOVERY_POINTS, (rawPayload) => {
+  handle(IPC_CHANNELS.BACKUP_LIST_RECOVERY_POINTS, async (rawPayload) => {
     const req = BackupListRecoveryPointsRequestSchema.parse(rawPayload)
+    if (req.destinationKind === 'google_drive') {
+      if (!req.driveFolderId) {
+        throw new Error('driveFolderId is required when listing Google Drive recovery points')
+      }
+      const transport = resolveDriveTransport(req.driveFolderId)
+      const result = await listRemoteRecoveryPoints(
+        transport,
+        `google-drive://${req.driveFolderId}`
+      )
+      return BackupListRecoveryPointsResponseSchema.parse(result)
+    }
+    if (!req.backupRepoDir) {
+      throw new Error('backupRepoDir is required for local recovery points')
+    }
     const result = listRecoveryPoints(req.backupRepoDir)
     return BackupListRecoveryPointsResponseSchema.parse(result)
   })
 
   handle(IPC_CHANNELS.BACKUP_VERIFY_RECOVERY_POINT, async (rawPayload) => {
     const req = BackupVerifyRecoveryPointRequestSchema.parse(rawPayload)
+    if (req.destinationKind === 'google_drive') {
+      if (!req.driveFolderId) {
+        throw new Error('driveFolderId is required when verifying Google Drive recovery point')
+      }
+      const transport = resolveDriveTransport(req.driveFolderId)
+      const result = await verifyRemoteRecoveryPoint({
+        transport,
+        snapshotId: req.snapshotId,
+        recoverySecret: req.recoverySecret
+      })
+      return BackupVerifyRecoveryPointResponseSchema.parse(result)
+    }
+    if (!req.backupRepoDir) {
+      throw new Error('backupRepoDir is required for local recovery point verification')
+    }
     const result = await verifyRecoveryPoint({
       backupRepoDir: req.backupRepoDir,
-      snapshotId: req.snapshotId
+      snapshotId: req.snapshotId,
+      recoverySecret: req.recoverySecret
     })
     return BackupVerifyRecoveryPointResponseSchema.parse(result)
   })
 
   handle(IPC_CHANNELS.BACKUP_RESTORE_RECOVERY_POINT, async (rawPayload) => {
     const req = BackupRestoreRequestSchema.parse(rawPayload)
+    if (req.destinationKind === 'google_drive') {
+      if (!req.driveFolderId) {
+        throw new Error('driveFolderId is required when restoring Google Drive recovery point')
+      }
+      const transport = resolveDriveTransport(req.driveFolderId)
+      const result = await restoreRemoteRecoveryPointToIsolatedProfile({
+        transport,
+        snapshotId: req.snapshotId,
+        targetProfileDir: req.targetProfileDir,
+        targetVaultDir: req.targetVaultDir ?? null,
+        activeUserDataDir: userDataDir,
+        activeSourceRoots: catalog && !catalog.isClosed() ? catalog.getAllSourceRoots() : [],
+        activeVaultRoots: getAllRegisteredVaultRoots(catalog),
+        recoverySecret: req.recoverySecret
+      })
+      return BackupRestoreResponseSchema.parse(result)
+    }
+    if (!req.backupRepoDir) {
+      throw new Error('backupRepoDir is required for local recovery point restore')
+    }
     const result = await restoreRecoveryPointToIsolatedProfile({
       backupRepoDir: req.backupRepoDir,
       snapshotId: req.snapshotId,
@@ -201,9 +290,61 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
       targetVaultDir: req.targetVaultDir ?? null,
       activeUserDataDir: userDataDir,
       activeSourceRoots: catalog && !catalog.isClosed() ? catalog.getAllSourceRoots() : [],
-      activeVaultRoots: getAllRegisteredVaultRoots(catalog)
+      activeVaultRoots: getAllRegisteredVaultRoots(catalog),
+      recoverySecret: req.recoverySecret
     })
     return BackupRestoreResponseSchema.parse(result)
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GDRIVE_GET_STATUS, () => {
+    if (!googleDriveAuth) {
+      return BackupGoogleDriveAuthStatusSchema.parse({
+        status: 'disconnected',
+        accountEmail: null,
+        accountDisplayName: null,
+        lastError: null
+      })
+    }
+    return BackupGoogleDriveAuthStatusSchema.parse(googleDriveAuth.getStatus())
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GDRIVE_CONNECT, async () => {
+    if (!googleDriveAuth) {
+      throw new Error('Google Drive auth service is not initialized')
+    }
+    const status = await googleDriveAuth.connect()
+    return BackupGoogleDriveAuthStatusSchema.parse(status)
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GDRIVE_DISCONNECT, () => {
+    if (!googleDriveAuth) {
+      return BackupGoogleDriveAuthStatusSchema.parse({
+        status: 'disconnected',
+        accountEmail: null,
+        accountDisplayName: null,
+        lastError: null
+      })
+    }
+    return BackupGoogleDriveAuthStatusSchema.parse(googleDriveAuth.disconnect())
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GDRIVE_LIST_FOLDERS, async (rawPayload) => {
+    if (!googleDriveAuth) {
+      throw new Error('Google Drive auth service is not initialized')
+    }
+    const req =
+      rawPayload === undefined ? {} : BackupGoogleDriveListFoldersRequestSchema.parse(rawPayload)
+    const folders = await googleDriveAuth.listFolders(req.parentId)
+    return BackupGoogleDriveListFoldersResponseSchema.parse(folders)
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GDRIVE_CREATE_FOLDER, async (rawPayload) => {
+    if (!googleDriveAuth) {
+      throw new Error('Google Drive auth service is not initialized')
+    }
+    const req = BackupGoogleDriveCreateFolderRequestSchema.parse(rawPayload)
+    const created = await googleDriveAuth.createFolder(req.name, req.parentId)
+    return BackupGoogleDriveFolderSchema.parse(created)
   })
 
   handle(IPC_CHANNELS.BACKUP_RECOVER_CATALOG_FROM_VAULT, async (rawPayload) => {

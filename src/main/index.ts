@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, safeStorage } from 'electron'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc/handlers'
@@ -34,6 +34,7 @@ import {
 import { UnifiedSearchCoordinator } from './services/unified-search'
 import { ExportCoordinator } from './services/export'
 import { BackupCoordinator } from './services/backup/coordinator'
+import { GoogleDriveAuthService } from './services/backup/google-drive-auth'
 import { RestoreIncompleteError } from './services/backup/errors'
 import { inspectRestoredProfileStatus } from './services/backup/restore'
 import { withProfileStartupCoordination } from './services/backup/catalog-recovery'
@@ -415,13 +416,22 @@ if (!app.requestSingleInstanceLock()) {
       const recoveredExportJobs = exportCoordinator.initialize()
       logStartup(`exportCoordinator initialized (recovered=${recoveredExportJobs})`)
 
+      const googleDriveAuth = new GoogleDriveAuthService({
+        tokenFilePath: join(userDataDir, 'google-drive-auth.enc'),
+        safeStorage
+      })
+
       backupCoordinator = new BackupCoordinator({
         catalog,
         userDataDir,
         appVersion: app.getVersion(),
         vaultImportCoordinator: vaultCoordinator,
         appPath: app.getAppPath(),
-        isPackaged: app.isPackaged
+        isPackaged: app.isPackaged,
+        googleDrive: {
+          getAccessToken: () => googleDriveAuth.getAccessToken(),
+          isAvailable: () => googleDriveAuth.getStatus().status === 'connected'
+        }
       })
       const backupInit = backupCoordinator.initialize()
       logStartup(
@@ -452,6 +462,7 @@ if (!app.requestSingleInstanceLock()) {
         documentClassificationCoordinator,
         exportCoordinator,
         backupCoordinator,
+        googleDriveAuth,
         userDataDir,
         getMainWindow: () => mainWindow
       })

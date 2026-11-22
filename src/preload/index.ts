@@ -3,6 +3,11 @@ import { IPC_CHANNELS } from '../shared/contracts/channels.js'
 import {
   BackupConfigureDestinationRequestSchema,
   BackupDestinationRecordSchema,
+  BackupGoogleDriveAuthStatusSchema,
+  BackupGoogleDriveCreateFolderRequestSchema,
+  BackupGoogleDriveFolderSchema,
+  BackupGoogleDriveListFoldersRequestSchema,
+  BackupGoogleDriveListFoldersResponseSchema,
   BackupJobActionRequestSchema,
   BackupJobActionResponseSchema,
   BackupJobRecordSchema,
@@ -24,6 +29,11 @@ import {
   BackupVerifyRecoveryPointResponseSchema,
   type BackupConfigureDestinationRequest,
   type BackupDestinationRecordDto,
+  type BackupGoogleDriveAuthStatusDto,
+  type BackupGoogleDriveCreateFolderRequest,
+  type BackupGoogleDriveFolderDto,
+  type BackupGoogleDriveListFoldersRequest,
+  type BackupGoogleDriveListFoldersResponse,
   type BackupJobActionResponse,
   type BackupJobRecordDto,
   type BackupListDestinationsRequest,
@@ -1942,8 +1952,11 @@ const api: VaultApi = {
     return result.data
   },
 
-  async resumeBackup(jobId: string): Promise<BackupJobRecordDto> {
-    const parsed = validatePayload(BackupJobActionRequestSchema, { jobId })
+  async resumeBackup(jobId: string, recoverySecret?: string): Promise<BackupJobRecordDto> {
+    const parsed = validatePayload(BackupJobActionRequestSchema, {
+      jobId,
+      ...(recoverySecret !== undefined ? { recoverySecret } : {})
+    })
     if (!parsed.success) {
       throw new Error(`Invalid resumeBackup request: ${parsed.error}`)
     }
@@ -2062,6 +2075,63 @@ const api: VaultApi = {
     const result = validatePayload(BackupRecoverCatalogResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid recoverCatalogFromVault response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getGoogleDriveAuthStatus(): Promise<BackupGoogleDriveAuthStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GDRIVE_GET_STATUS)
+    const result = validatePayload(BackupGoogleDriveAuthStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getGoogleDriveAuthStatus response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async connectGoogleDrive(): Promise<BackupGoogleDriveAuthStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GDRIVE_CONNECT)
+    const result = validatePayload(BackupGoogleDriveAuthStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid connectGoogleDrive response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async disconnectGoogleDrive(): Promise<BackupGoogleDriveAuthStatusDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GDRIVE_DISCONNECT)
+    const result = validatePayload(BackupGoogleDriveAuthStatusSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid disconnectGoogleDrive response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listGoogleDriveFolders(
+    request?: BackupGoogleDriveListFoldersRequest
+  ): Promise<BackupGoogleDriveListFoldersResponse> {
+    const parsed = validatePayload(BackupGoogleDriveListFoldersRequestSchema, request ?? {})
+    if (!parsed.success) {
+      throw new Error(`Invalid listGoogleDriveFolders request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GDRIVE_LIST_FOLDERS, parsed.data)
+    const result = validatePayload(BackupGoogleDriveListFoldersResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listGoogleDriveFolders response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async createGoogleDriveFolder(
+    request: BackupGoogleDriveCreateFolderRequest
+  ): Promise<BackupGoogleDriveFolderDto> {
+    const parsed = validatePayload(BackupGoogleDriveCreateFolderRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid createGoogleDriveFolder request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GDRIVE_CREATE_FOLDER, parsed.data)
+    const result = validatePayload(BackupGoogleDriveFolderSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid createGoogleDriveFolder response from main: ${result.error}`)
     }
     return result.data
   },

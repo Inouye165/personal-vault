@@ -97,9 +97,11 @@ export type BackupSelectDirectoryResponse = z.infer<typeof BackupSelectDirectory
 export const BackupConfigureDestinationRequestSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
-    kind: z.literal('local_fs').default('local_fs'),
+    kind: z.enum(['local_fs', 'google_drive']).default('local_fs'),
     targetPath: z.string().trim().min(1),
-    maxBytesPerSecond: z.number().int().min(65536).nullable().optional()
+    maxBytesPerSecond: z.number().int().min(65536).nullable().optional(),
+    dailyBudgetBytes: z.number().int().min(16777216).nullable().optional(),
+    encryptionMode: BackupEncryptionModeSchema.optional()
   })
   .strict()
 export type BackupConfigureDestinationRequest = z.infer<
@@ -118,14 +120,16 @@ export type BackupListDestinationsResponse = z.infer<typeof BackupListDestinatio
 
 export const BackupStartRequestSchema = z
   .object({
-    destinationId: z.string().min(1)
+    destinationId: z.string().min(1),
+    recoverySecret: z.string().min(1).optional()
   })
   .strict()
 export type BackupStartRequest = z.infer<typeof BackupStartRequestSchema>
 
 export const BackupJobActionRequestSchema = z
   .object({
-    jobId: z.string().min(1)
+    jobId: z.string().min(1),
+    recoverySecret: z.string().min(1).optional()
   })
   .strict()
 export type BackupJobActionRequest = z.infer<typeof BackupJobActionRequestSchema>
@@ -180,10 +184,12 @@ export type BackupRecoveryPointSummary = z.infer<typeof BackupRecoveryPointSumma
 
 export const BackupListRecoveryPointsRequestSchema = z
   .object({
-    backupRepoDir: z.string().trim().min(1)
+    backupRepoDir: z.string().trim().min(1).optional(),
+    destinationKind: z.enum(['local_fs', 'google_drive']).default('local_fs'),
+    driveFolderId: z.string().trim().min(1).optional()
   })
   .strict()
-export type BackupListRecoveryPointsRequest = z.infer<typeof BackupListRecoveryPointsRequestSchema>
+export type BackupListRecoveryPointsRequest = z.input<typeof BackupListRecoveryPointsRequestSchema>
 
 export const BackupListRecoveryPointsResponseSchema = z
   .object({
@@ -198,11 +204,14 @@ export type BackupListRecoveryPointsResponse = z.infer<
 
 export const BackupVerifyRecoveryPointRequestSchema = z
   .object({
-    backupRepoDir: z.string().trim().min(1),
-    snapshotId: z.string().trim().min(1)
+    backupRepoDir: z.string().trim().min(1).optional(),
+    snapshotId: z.string().trim().min(1),
+    destinationKind: z.enum(['local_fs', 'google_drive']).default('local_fs'),
+    driveFolderId: z.string().trim().min(1).optional(),
+    recoverySecret: z.string().min(1).optional()
   })
   .strict()
-export type BackupVerifyRecoveryPointRequest = z.infer<
+export type BackupVerifyRecoveryPointRequest = z.input<
   typeof BackupVerifyRecoveryPointRequestSchema
 >
 
@@ -223,13 +232,16 @@ export type BackupVerifyRecoveryPointResponse = z.infer<
 
 export const BackupRestoreRequestSchema = z
   .object({
-    backupRepoDir: z.string().trim().min(1),
+    backupRepoDir: z.string().trim().min(1).optional(),
     snapshotId: z.string().trim().min(1),
     targetProfileDir: z.string().trim().min(1),
-    targetVaultDir: z.string().trim().min(1).nullable().optional()
+    targetVaultDir: z.string().trim().min(1).nullable().optional(),
+    destinationKind: z.enum(['local_fs', 'google_drive']).default('local_fs'),
+    driveFolderId: z.string().trim().min(1).optional(),
+    recoverySecret: z.string().min(1).optional()
   })
   .strict()
-export type BackupRestoreRequest = z.infer<typeof BackupRestoreRequestSchema>
+export type BackupRestoreRequest = z.input<typeof BackupRestoreRequestSchema>
 
 export const BackupRestoreResponseSchema = z
   .object({
@@ -280,3 +292,45 @@ export const BackupRecoverCatalogResponseSchema = z
   })
   .strict()
 export type BackupRecoverCatalogResponse = z.infer<typeof BackupRecoverCatalogResponseSchema>
+
+export const BackupGoogleDriveAuthStatusSchema = z
+  .object({
+    status: z.enum(['disconnected', 'connected', 'expired']),
+    accountEmail: z.string().nullable(),
+    accountDisplayName: z.string().nullable(),
+    lastError: z.string().nullable()
+  })
+  .strict()
+export type BackupGoogleDriveAuthStatusDto = z.infer<typeof BackupGoogleDriveAuthStatusSchema>
+
+export const BackupGoogleDriveFolderSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1)
+  })
+  .strict()
+export type BackupGoogleDriveFolderDto = z.infer<typeof BackupGoogleDriveFolderSchema>
+
+export const BackupGoogleDriveListFoldersRequestSchema = z
+  .object({
+    parentId: z.string().trim().min(1).optional()
+  })
+  .strict()
+export type BackupGoogleDriveListFoldersRequest = z.infer<
+  typeof BackupGoogleDriveListFoldersRequestSchema
+>
+
+export const BackupGoogleDriveListFoldersResponseSchema = z.array(BackupGoogleDriveFolderSchema)
+export type BackupGoogleDriveListFoldersResponse = z.infer<
+  typeof BackupGoogleDriveListFoldersResponseSchema
+>
+
+export const BackupGoogleDriveCreateFolderRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    parentId: z.string().trim().min(1).optional()
+  })
+  .strict()
+export type BackupGoogleDriveCreateFolderRequest = z.infer<
+  typeof BackupGoogleDriveCreateFolderRequestSchema
+>

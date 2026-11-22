@@ -2672,4 +2672,179 @@ describe('Stage 8B Slice 3: Google Drive Transport (Mocked Drive API v3)', () =>
     expect(sha256Hex(readFileSync(restoredFile))).toBe(fx.payloadSha256)
     await coordinator2.shutdown()
   })
+
+  it('keeps job, staging, and upload state retryable across restart when resuming a budget-paused Drive job with missing or wrong recovery secret, then completes with the correct secret', async () => {
+    const fx = await createDriveFixture()
+    cleanups.push(() => {
+      try {
+        fx.catalog.close()
+      } catch {
+        // ignore
+      }
+      rmSync(fx.rootDir, { recursive: true, force: true })
+    })
+    const mockDrive = new MockGoogleDriveServer()
+    const baseFetch = mockDrive.createFetch()
+
+    let currentTimeMs = 1_730_000_000_000
+    const coordinator1 = new BackupCoordinator({
+      catalog: fx.catalog,
+      userDataDir: fx.userDataDir,
+      appVersion: '0.1.0-test',
+      recoverySecret: TEST_SECRET,
+      kdfParams: TEST_KDF_PARAMS,
+      googleDrive: {
+        rootFolderId: mockDrive.rootFolderId,
+        getAccessToken: () => 'mock-access-token',
+        fetchFn: baseFetch,
+        apiBaseUrl: 'https://mock-drive.local/drive/v3',
+        uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+        uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+        resumableThresholdBytes: 16 * 1024,
+        retryDelaysMs: [5, 10],
+        nowMs: () => currentTimeMs
+      }
+    })
+    await coordinator1.initialize()
+
+    const dest = coordinator1.configureDestination({
+      name: 'Google Drive Retryable Secret',
+      kind: 'google_drive',
+      targetPath: mockDrive.rootFolderId,
+      dailyBudgetBytes: 16 * 1024 * 1024,
+      encryptionMode: 'aes-256-gcm-v1'
+    })
+
+    // Pre-reserve all but 400 KiB so the backup pauses for daily_budget_exhausted mid-transfer
+    fx.catalog.getBackupRepository().recordBandwidthReservation({
+      destinationId: dest.id,
+      bytesReserved: 16 * 1024 * 1024 - 400 * 1024,
+      recordedAtMs: currentTimeMs
+    })
+
+    const snapId = 'snap-coord-retry-secret-1'
+    const started = await coordinator1.startBackup(dest.id, { snapshotId: snapId })
+    const paused = await coordinator1.waitForCompletion()
+
+    expect(paused?.id).toBe(started.id)
+    expect(paused?.status).toBe('paused')
+    expect(paused?.pauseReason).toBe('daily_budget_exhausted')
+    expect(paused?.stagingDir).toBeTruthy()
+    expect(existsSync(paused!.stagingDir!)).toBe(true)
+
+    const uploadStateBeforeRestart = fx.catalog
+      .getRawDb()
+      .prepare('SELECT * FROM backup_drive_upload_state WHERE destination_id = ?')
+      .all(dest.id) as Array<Record<string, unknown>>
+    expect(uploadStateBeforeRestart.length).toBeGreaterThan(0)
+
+    // Shut down coordinator and close/reopen SQLite without supplying recoverySecret
+    await coordinator1.shutdown()
+    fx.catalog.close()
+    fx.catalog = CatalogDatabase.open({ catalogPath: fx.catalogPath, journal: fx.journal })
+
+    // Advance 25 hours so the rolling 24h budget clears
+    currentTimeMs += 25 * 60 * 60 * 1000
+
+    const coordinator2 = new BackupCoordinator({
+      catalog: fx.catalog,
+      userDataDir: fx.userDataDir,
+      appVersion: '0.1.0-test',
+      kdfParams: TEST_KDF_PARAMS,
+      googleDrive: {
+        rootFolderId: mockDrive.rootFolderId,
+        getAccessToken: () => 'mock-access-token',
+        fetchFn: baseFetch,
+        apiBaseUrl: 'https://mock-drive.local/drive/v3',
+        uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+        uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+        resumableThresholdBytes: 16 * 1024,
+        retryDelaysMs: [5, 10],
+        nowMs: () => currentTimeMs
+      }
+    })
+    await coordinator2.initialize()
+
+    // 1. Resume with missing secret -> stays paused & retryable with staging + upload state intact
+    const resumedMissing = await coordinator2.resumeBackup(started.id)
+    const missingSecretJob =
+      (await coordinator2.waitForCompletion()) ??
+      fx.catalog.getBackupRepository().getJob(started.id) ??
+      resumedMissing
+    expect(missingSecretJob.id).toBe(started.id)
+    expect(missingSecretJob.status).toBe('paused')
+    expect(missingSecretJob.errorCode).toBe('recovery_secret_required')
+    expect(existsSync(paused!.stagingDir!)).toBe(true)
+    expect(
+      fx.catalog
+        .getRawDb()
+        .prepare('SELECT * FROM backup_drive_upload_state WHERE destination_id = ?')
+        .all(dest.id)
+    ).toEqual(uploadStateBeforeRestart)
+
+    // 2. Resume with wrong secret -> stays paused & retryable with staging + upload state intact
+    const resumedWrong = await coordinator2.resumeBackup(started.id, {
+      recoverySecret: 'wrong-secret-attempt'
+    })
+    const wrongSecretJob =
+      (await coordinator2.waitForCompletion()) ??
+      fx.catalog.getBackupRepository().getJob(started.id) ??
+      resumedWrong
+    expect(wrongSecretJob.id).toBe(started.id)
+    expect(wrongSecretJob.status).toBe('paused')
+    expect(wrongSecretJob.errorCode).toBe('wrong_recovery_secret')
+    expect(existsSync(paused!.stagingDir!)).toBe(true)
+    expect(
+      fx.catalog
+        .getRawDb()
+        .prepare('SELECT * FROM backup_drive_upload_state WHERE destination_id = ?')
+        .all(dest.id)
+    ).toEqual(uploadStateBeforeRestart)
+
+    // 3. Resume with correct secret -> completes the SAME job and restores cleanly
+    const resumedCorrect = await coordinator2.resumeBackup(started.id, {
+      recoverySecret: TEST_SECRET
+    })
+    const completed =
+      (await coordinator2.waitForCompletion()) ??
+      fx.catalog.getBackupRepository().getJob(started.id) ??
+      resumedCorrect
+    expect(completed.id).toBe(started.id)
+    expect(completed.status).toBe('completed')
+    expect(completed.snapshotId).toBe(snapId)
+
+    const checkTransport = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: baseFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 16 * 1024,
+      retryDelaysMs: [5, 10]
+    })
+    const targetProfileDir = join(fx.rootDir, 'retry-secret-profile')
+    const targetVaultDir = join(fx.rootDir, 'retry-secret-vault')
+    const restored = await restoreRemoteRecoveryPointToIsolatedProfile({
+      transport: checkTransport,
+      snapshotId: snapId,
+      targetProfileDir,
+      targetVaultDir,
+      activeUserDataDir: fx.userDataDir,
+      activeSourceRoots: [fx.sourceDir],
+      activeVaultRoots: [fx.vaultDir],
+      recoverySecret: TEST_SECRET
+    })
+    expect(restored.snapshotId).toBe(snapId)
+    expect(inspectRestoredProfileStatus(targetProfileDir, targetVaultDir).status).toBe('complete')
+    const restoredFile = join(
+      targetVaultDir,
+      'files',
+      fx.payloadSha256.slice(0, 2),
+      fx.payloadSha256,
+      'archive-photo.jpg'
+    )
+    expect(sha256Hex(readFileSync(restoredFile))).toBe(fx.payloadSha256)
+    await coordinator2.shutdown()
+  })
 })

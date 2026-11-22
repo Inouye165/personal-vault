@@ -159,6 +159,7 @@ import type {
 import { UnifiedSearchCoordinator } from '../services/unified-search'
 import type { ExportCoordinator } from '../services/export/coordinator'
 import type { BackupCoordinator } from '../services/backup/coordinator'
+import type { GoogleDriveAuthService } from '../services/backup/google-drive-auth'
 import { resolveReadableFileLocation } from '../services/backup/recovered-file-resolver'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 import { registerDocumentIpcHandlers } from './document-handlers'
@@ -186,6 +187,7 @@ export interface IpcHandlerOptions {
   readonly documentClassificationCoordinator?: DocumentClassificationCoordinator
   readonly exportCoordinator?: ExportCoordinator
   readonly backupCoordinator?: BackupCoordinator
+  readonly googleDriveAuth?: GoogleDriveAuthService
   readonly userDataDir?: string
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDocSemanticModelDirectory?: () => Promise<string | null>
@@ -224,6 +226,7 @@ export function registerIpcHandlers({
   documentClassificationCoordinator,
   exportCoordinator,
   backupCoordinator,
+  googleDriveAuth,
   userDataDir,
   getMainWindow,
   selectDirectories,
@@ -1716,6 +1719,7 @@ export function registerIpcHandlers({
   registerBackupIpcHandlers({
     handle,
     backupCoordinator,
+    googleDriveAuth,
     catalog,
     userDataDir,
     getMainWindow,

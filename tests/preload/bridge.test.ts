@@ -182,6 +182,11 @@ describe('preload bridge', () => {
         'verifyRecoveryPoint',
         'restoreRecoveryPoint',
         'recoverCatalogFromVault',
+        'getGoogleDriveAuthStatus',
+        'connectGoogleDrive',
+        'disconnectGoogleDrive',
+        'listGoogleDriveFolders',
+        'createGoogleDriveFolder',
         'onBackupProgress'
       ].sort()
     )
