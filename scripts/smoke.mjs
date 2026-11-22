@@ -288,6 +288,7 @@ async function main() {
         'getLatestImportJob',
         'getLatestScanJob',
         'getOcrModelStatus',
+        'getOriginalPhoto',
         'getPhotoAnnotation',
         'getPhotoMemberships',
         'getPhotoMetadataDetail',

@@ -60,11 +60,14 @@ import {
   GetPhotosPageResponseSchema,
   GetThumbnailRequestSchema,
   ThumbnailResultSchema,
+  GetOriginalPhotoRequestSchema,
+  OriginalPhotoResultSchema,
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
   type GetPhotosPageResponse,
   type ThumbnailResult,
+  type OriginalPhotoResult,
   type CancelThumbnailResponse,
   type PhotosDiagnosticsResponse,
   SetPhotoAnnotationRequestSchema,
@@ -881,6 +884,64 @@ export function registerIpcHandlers({
       throw new Error(`Invalid outgoing ThumbnailResult in main: ${validated.error}`)
     }
     return validated.data
+  })
+
+  const validateOriginalPhotoResult = (result: OriginalPhotoResult): OriginalPhotoResult => {
+    const validated = validatePayload(OriginalPhotoResultSchema, result)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing OriginalPhotoResult in main: ${validated.error}`)
+    }
+    return validated.data
+  }
+
+  handle(IPC_CHANNELS.PHOTOS_GET_ORIGINAL, async (raw: unknown): Promise<OriginalPhotoResult> => {
+    const parsed = validatePayload(GetOriginalPhotoRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming GetOriginalPhotoRequest in main: ${parsed.error}`)
+    }
+    const { locationId } = parsed.data
+    if (!thumbnailCoordinator || !catalog) {
+      return validateOriginalPhotoResult({
+        status: 'missing',
+        locationId,
+        reason: 'Thumbnail coordinator or catalog unavailable'
+      })
+    }
+
+    const fileRecord = catalog.getFileLocationById(locationId)
+    if (!fileRecord || fileRecord.category !== 'photo') {
+      return validateOriginalPhotoResult({
+        status: 'missing',
+        locationId,
+        reason: `Photograph location ID ${locationId} not found in catalog`
+      })
+    }
+
+    const resolved = resolveReadableFileLocation(catalog, locationId, {
+      verifyPayloadHash: false
+    })
+    if (!resolved.ok) {
+      const failureStatus =
+        resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
+        resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
+          ? ('error' as const)
+          : ('missing' as const)
+      return validateOriginalPhotoResult({
+        status: failureStatus,
+        locationId,
+        reason: resolved.errorMessage
+      })
+    }
+
+    const res = await thumbnailCoordinator.getOriginalPhoto({
+      locationId,
+      sourcePath: resolved.filePath,
+      expectedByteSize: resolved.expectedByteSize,
+      expectedMtimeMs: resolved.expectedMtimeMs,
+      expectedSha256: resolved.expectedSha256 ?? undefined
+    })
+
+    return validateOriginalPhotoResult(res)
   })
 
   handle(IPC_CHANNELS.PHOTOS_CANCEL_THUMBNAIL, (raw: unknown): CancelThumbnailResponse => {

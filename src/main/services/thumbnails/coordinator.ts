@@ -27,7 +27,7 @@ import {
   type MetadataExtractJobResult,
   type MetadataSourceVerifyResult
 } from './types'
-import type { ThumbnailResult } from '../../../shared/validation/ipc-schemas'
+import type { OriginalPhotoResult, ThumbnailResult } from '../../../shared/validation/ipc-schemas'
 import type { SemanticModelArtifactSpec } from '../semantic/manifest'
 import type { ExtractedPhotoMetadataResult } from '../metadata/types'
 
@@ -127,8 +127,19 @@ interface QueuedVerifyMetadataSourceItem {
   priorityOrder: number
 }
 
+interface QueuedDecodeOriginalItem {
+  id: number
+  action: 'decode_original'
+  params: ThumbnailRequestParams & { readonly locationId: number }
+  cacheKey: string
+  resolve: (res: OriginalPhotoResult) => void
+  reject: (err: unknown) => void
+  priorityOrder: number
+}
+
 type QueuedItem =
   | QueuedThumbnailItem
+  | QueuedDecodeOriginalItem
   | QueuedFingerprintItem
   | QueuedSemanticEmbedItem
   | QueuedVerifySourceItem
@@ -531,6 +542,12 @@ export class ThumbnailCoordinator {
         errorCode: 'CANCELLED',
         errorMessage: 'Source verification cancelled'
       })
+    } else if (item.action === 'decode_original') {
+      item.resolve({
+        status: 'error',
+        locationId,
+        reason: 'Original photo request was cancelled'
+      })
     } else if (item.action === 'verify_model') {
       item.resolve({
         ok: false,
@@ -621,6 +638,41 @@ export class ThumbnailCoordinator {
       errorCode: res.code,
       errorMessage: res.message
     }
+  }
+
+  /**
+   * Decodes a photograph at full resolution on demand without caching it in the thumbnail cache.
+   */
+  public async getOriginalPhoto(
+    params: ThumbnailRequestParams & { readonly locationId: number }
+  ): Promise<OriginalPhotoResult> {
+    if (this.isShuttingDown) {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        reason: 'Thumbnail service is shutting down'
+      }
+    }
+    if (this.queue.length >= this.maxQueuedJobs) {
+      return {
+        status: 'error',
+        locationId: params.locationId,
+        reason: 'Worker queue is full'
+      }
+    }
+
+    return new Promise<OriginalPhotoResult>((resolve, reject) => {
+      const item: QueuedDecodeOriginalItem = {
+        id: this.nextJobId++,
+        action: 'decode_original',
+        params,
+        cacheKey: '',
+        resolve,
+        reject,
+        priorityOrder: 0
+      }
+      this.enqueueItem(item)
+    })
   }
 
   public async verifyModelDirectory(
@@ -1247,6 +1299,18 @@ export class ThumbnailCoordinator {
           approvedRoots: this.getApprovedRoots()
         }
       })
+    } else if (item.action === 'decode_original') {
+      currentEntry.worker.postMessage({
+        id: item.id,
+        action: 'decode_original',
+        params: {
+          sourcePath: item.params.sourcePath,
+          expectedByteSize: item.params.expectedByteSize,
+          expectedMtimeMs: item.params.expectedMtimeMs,
+          expectedSha256: item.params.expectedSha256,
+          approvedRoots: this.getApprovedRoots()
+        }
+      })
     } else if (item.action === 'verify_model') {
       currentEntry.worker.postMessage({
         id: item.id,
@@ -1345,6 +1409,46 @@ export class ThumbnailCoordinator {
     }
 
     const item = entry.item
+
+    if (item.action === 'decode_original') {
+      entry.item = null
+      entry.jobId = null
+      entry.locationId = null
+      if (msg.status === 'ready' && msg.buffer) {
+        const buf = Buffer.isBuffer(msg.buffer) ? msg.buffer : Buffer.from(msg.buffer as Uint8Array)
+        const mimeType = typeof msg.mimeType === 'string' ? msg.mimeType : 'image/webp'
+        item.resolve({
+          status: 'ready',
+          locationId: item.params.locationId,
+          dataUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
+          mimeType,
+          width: Number(msg.width) || 1,
+          height: Number(msg.height) || 1
+        })
+      } else {
+        const msgText =
+          (typeof msg.message === 'string' && msg.message) ||
+          (typeof msg.reason === 'string' && msg.reason) ||
+          'Failed to decode original photograph'
+        const isMissing =
+          msg.status === 'missing' ||
+          msg.code === 'FILE_NOT_FOUND' ||
+          msg.code === 'ENOENT' ||
+          /Failed to resolve source path|ENOENT|no such file/i.test(msgText)
+        const status = isMissing
+          ? 'missing'
+          : msg.status === 'unsupported' || msg.status === 'corrupt'
+            ? msg.status
+            : 'error'
+        item.resolve({
+          status,
+          locationId: item.params.locationId,
+          reason: msgText
+        })
+      }
+      this.processNext()
+      return
+    }
 
     if (item.action === 'verify_model') {
       entry.item = null
@@ -1723,6 +1827,12 @@ export class ThumbnailCoordinator {
         category: 'error',
         errorCode: code,
         errorMessage: message
+      })
+    } else if (item.action === 'decode_original') {
+      item.resolve({
+        status: 'error',
+        locationId: item.params.locationId,
+        reason: message
       })
     } else if (item.action === 'verify_model') {
       item.resolve({

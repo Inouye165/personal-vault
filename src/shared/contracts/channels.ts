@@ -28,6 +28,7 @@ export const IPC_CHANNELS = {
   VAULT_PROGRESS_EVENT: 'vault:progress-event',
   PHOTOS_GET_PAGE: 'photos:get-page',
   PHOTOS_GET_THUMBNAIL: 'photos:get-thumbnail',
+  PHOTOS_GET_ORIGINAL: 'photos:get-original',
   PHOTOS_CANCEL_THUMBNAIL: 'photos:cancel-thumbnail',
   PHOTOS_GET_DIAGNOSTICS: 'photos:get-diagnostics',
   PHOTOS_SET_ANNOTATION: 'photos:set-annotation',

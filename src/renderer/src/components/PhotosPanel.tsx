@@ -48,6 +48,7 @@ import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import { PhotosSearchBar } from './PhotosSearchBar'
 import { PhotoSelectedOcrSection } from './PhotoSelectedOcrSection'
 import type {
+  OriginalPhotoResult,
   PhotoItem,
   PhotoTechnicalMetadataDetail,
   ThumbnailResult
@@ -415,6 +416,114 @@ export function PhotosPanel() {
     setShowSemanticPanel(false)
   }, [])
 
+  const originalModalRef = useRef<HTMLDivElement>(null)
+  const originalOpenBtnRef = useRef<HTMLButtonElement>(null)
+  const originalRequestGenRef = useRef(0)
+  const selectedPhotoIdRef = useRef<number | null>(selectedPhoto?.id ?? null)
+
+  const INITIAL_ORIGINAL_VIEWER_STATE: {
+    open: boolean
+    locationId: number | null
+    fileName: string
+    loading: boolean
+    result: OriginalPhotoResult | null
+    error: string | null
+  } = {
+    open: false,
+    locationId: null,
+    fileName: '',
+    loading: false,
+    result: null,
+    error: null
+  }
+
+  const [originalViewerState, setOriginalViewerState] = useState(INITIAL_ORIGINAL_VIEWER_STATE)
+  const [prevOriginalSelectedId, setPrevOriginalSelectedId] = useState<number | null>(
+    selectedPhoto?.id ?? null
+  )
+  const currentOriginalSelectedId = selectedPhoto?.id ?? null
+  if (prevOriginalSelectedId !== currentOriginalSelectedId) {
+    setPrevOriginalSelectedId(currentOriginalSelectedId)
+    if (
+      originalViewerState.open ||
+      originalViewerState.loading ||
+      originalViewerState.result !== null ||
+      originalViewerState.error !== null
+    ) {
+      setOriginalViewerState(INITIAL_ORIGINAL_VIEWER_STATE)
+    }
+  }
+
+  const closeOriginalViewer = useCallback(() => {
+    originalRequestGenRef.current += 1
+    setOriginalViewerState({
+      open: false,
+      locationId: null,
+      fileName: '',
+      loading: false,
+      result: null,
+      error: null
+    })
+  }, [])
+
+  useEffect(() => {
+    // Invalidate any in-flight original photo request when the selected photo changes or Details closes
+    selectedPhotoIdRef.current = selectedPhoto?.id ?? null
+    originalRequestGenRef.current += 1
+  }, [selectedPhoto?.id])
+
+  const handleOpenOriginal = useCallback(async () => {
+    if (!selectedPhoto) return
+    const targetId = selectedPhoto.id
+    const targetName = selectedPhoto.fileName
+    const reqGen = ++originalRequestGenRef.current
+    setOriginalViewerState({
+      open: true,
+      locationId: targetId,
+      fileName: targetName,
+      loading: true,
+      result: null,
+      error: null
+    })
+    try {
+      const res = await window.api.getOriginalPhoto({ locationId: targetId })
+      if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
+        return
+      }
+      if (res.status === 'ready') {
+        setOriginalViewerState({
+          open: true,
+          locationId: targetId,
+          fileName: targetName,
+          loading: false,
+          result: res,
+          error: null
+        })
+      } else {
+        setOriginalViewerState({
+          open: true,
+          locationId: targetId,
+          fileName: targetName,
+          loading: false,
+          result: res,
+          error: res.reason
+        })
+      }
+    } catch (err: unknown) {
+      if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
+        return
+      }
+      setOriginalViewerState({
+        open: true,
+        locationId: targetId,
+        fileName: targetName,
+        loading: false,
+        result: null,
+        error: err instanceof Error ? err.message : 'Failed to load original photograph'
+      })
+    }
+  }, [selectedPhoto])
+
   const restorePhotoFocus = useCallback(() => {
     const id = lastSelectedIdRef.current
     return id !== null ? document.getElementById(`photo-cell-${id}`) : null
@@ -422,7 +531,18 @@ export function PhotosPanel() {
 
   const isFiltersDrawerOpen = showMetadataPanel && viewMode === 'grid'
   const isDetailsOpen = viewMode === 'grid' && Boolean(selectedPhoto)
-  const hasTopmostDrawer = isFiltersDrawerOpen || showSemanticPanel
+  const isOriginalModalOpen =
+    originalViewerState.open && originalViewerState.locationId === (selectedPhoto?.id ?? null)
+  const hasTopmostDrawer = isFiltersDrawerOpen || showSemanticPanel || isOriginalModalOpen
+
+  useFocusTrap({
+    isOpen: isOriginalModalOpen,
+    isModal: isOriginalModalOpen,
+    isActive: isOriginalModalOpen,
+    containerRef: originalModalRef,
+    onClose: closeOriginalViewer,
+    restoreFocusTo: () => originalOpenBtnRef.current
+  })
 
   useFocusTrap({
     isOpen: isFiltersDrawerOpen,
@@ -967,6 +1087,17 @@ export function PhotosPanel() {
                     </div>
                   )
                 })()}
+              </div>
+              <div className="details-preview-actions">
+                <button
+                  ref={originalOpenBtnRef}
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  data-testid="photos-open-original-btn"
+                  onClick={() => void handleOpenOriginal()}
+                >
+                  Open original
+                </button>
               </div>
 
               {/* Stage 5B: Review & Organize Controls */}
@@ -1549,6 +1680,69 @@ export function PhotosPanel() {
             </div>
           </aside>
         </>
+      )}
+
+      {isOriginalModalOpen && (
+        <div
+          className="original-photo-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeOriginalViewer()
+          }}
+        >
+          <div
+            ref={originalModalRef}
+            className="original-photo-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Original photograph: ${originalViewerState.fileName}`}
+            data-testid="photos-original-modal"
+            tabIndex={-1}
+          >
+            <div className="original-photo-header">
+              <div className="original-photo-title">
+                <strong>{originalViewerState.fileName}</strong>
+                {originalViewerState.result?.status === 'ready' && (
+                  <span className="original-photo-dims" data-testid="photos-original-dims">
+                    {originalViewerState.result.width} × {originalViewerState.result.height}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                data-testid="photos-original-close-btn"
+                onClick={closeOriginalViewer}
+              >
+                Close
+              </button>
+            </div>
+            <div className="original-photo-body">
+              {originalViewerState.loading && (
+                <p className="original-photo-status" role="status">
+                  Loading full-resolution original…
+                </p>
+              )}
+              {!originalViewerState.loading && originalViewerState.error && (
+                <p
+                  className="original-photo-error error-text"
+                  data-testid="photos-original-error"
+                  role="alert"
+                >
+                  {originalViewerState.error}
+                </p>
+              )}
+              {!originalViewerState.loading && originalViewerState.result?.status === 'ready' && (
+                <img
+                  src={originalViewerState.result.dataUrl}
+                  alt={originalViewerState.fileName}
+                  className="original-photo-img"
+                  data-testid="photos-original-img"
+                />
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

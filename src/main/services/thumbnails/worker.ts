@@ -5,6 +5,7 @@
 import { parentPort } from 'node:worker_threads'
 import {
   decodeThumbnail,
+  decodeOriginalPhoto,
   decodeFingerprint,
   decodeSemanticEmbedding,
   readAndVerifySourceFile,
@@ -28,6 +29,7 @@ if (parentPort) {
       id: number
       action?:
         | 'decode'
+        | 'decode_original'
         | 'validate_cache'
         | 'fingerprint'
         | 'semantic_embed'
@@ -212,6 +214,12 @@ if (parentPort) {
               status: 'corrupt'
             })
           }
+          return
+        }
+
+        if (message.action === 'decode_original') {
+          const result = await decodeOriginalPhoto(message.params as DecodeInputParams)
+          parentPort!.postMessage({ id: message.id, ...result })
           return
         }
 

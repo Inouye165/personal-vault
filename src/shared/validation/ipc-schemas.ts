@@ -548,6 +548,54 @@ export const ThumbnailResultSchema = z.discriminatedUnion('status', [
 ])
 export type ThumbnailResult = z.infer<typeof ThumbnailResultSchema>
 
+export const GetOriginalPhotoRequestSchema = z.object({
+  locationId: z.number().int().positive()
+})
+export type GetOriginalPhotoRequest = z.infer<typeof GetOriginalPhotoRequestSchema>
+
+export const OriginalPhotoReadySchema = z.object({
+  status: z.literal('ready'),
+  locationId: z.number().int().positive(),
+  dataUrl: z
+    .string()
+    .regex(/^data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/)
+    .max(24 * 1024 * 1024),
+  mimeType: z.string().min(1),
+  width: z.number().int().positive(),
+  height: z.number().int().positive()
+})
+
+export const OriginalPhotoFailureSchema = z.object({
+  status: z.enum(['missing', 'unsupported', 'corrupt', 'error']),
+  locationId: z.number().int().positive(),
+  reason: z.string().min(1)
+})
+
+export const OriginalPhotoResultSchema = z.discriminatedUnion('status', [
+  OriginalPhotoReadySchema,
+  z.object({
+    status: z.literal('missing'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1)
+  }),
+  z.object({
+    status: z.literal('unsupported'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1)
+  }),
+  z.object({
+    status: z.literal('corrupt'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1)
+  }),
+  z.object({
+    status: z.literal('error'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1)
+  })
+])
+export type OriginalPhotoResult = z.infer<typeof OriginalPhotoResultSchema>
+
 export const CancelThumbnailRequestSchema = z.object({
   locationId: z.number().int().positive()
 })

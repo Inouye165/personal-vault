@@ -4985,3 +4985,73 @@ input:focus-visible {
     gap: 8px;
   }
 }
+
+/* Stage 8D: Full-resolution original photo viewer modal */
+.details-preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
+.original-photo-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.original-photo-modal {
+  background: var(--bg-surface, #111827);
+  border: 1px solid var(--border-color, #334155);
+  border-radius: 10px;
+  max-width: 95vw;
+  max-height: 92vh;
+  width: min(1200px, 95vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  outline: none;
+}
+
+.original-photo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-color, #334155);
+}
+
+.original-photo-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.original-photo-dims {
+  font-size: 0.85rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.original-photo-body {
+  padding: 1rem;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+
+.original-photo-img {
+  max-width: 100%;
+  max-height: 78vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}

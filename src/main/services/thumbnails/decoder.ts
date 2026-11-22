@@ -421,6 +421,38 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
   }
 }
 
+/**
+ * Decodes a photograph at full resolution (no resizing) with EXIF/HEIC orientation
+ * preserved, strictly read-only through `readAndVerifySourceFile`.
+ */
+export async function decodeOriginalPhoto(params: DecodeInputParams): Promise<DecodeResult> {
+  const { maxInputPixels = THUMBNAIL_LIMITS.MAX_INPUT_PIXELS } = params
+
+  const verified = await readAndVerifySourceFile(params)
+  if (verified.status !== 'success') {
+    return verified
+  }
+
+  try {
+    const { image } = await openSharpFromImageBuffer(verified.fileBuffer, maxInputPixels)
+    const { data, info } = await image.webp({ quality: 92 }).toBuffer({ resolveWithObject: true })
+
+    return {
+      status: 'ready',
+      buffer: data,
+      mimeType: 'image/webp',
+      width: info.width,
+      height: info.height
+    }
+  } catch (err: unknown) {
+    return {
+      status: 'error',
+      code: err instanceof HeicDecodeError ? err.code : 'DECODE_FAILED',
+      message: err instanceof Error ? err.message : 'Failed to decode original image'
+    }
+  }
+}
+
 export async function decodeFingerprint(
   params: DecodeInputParams
 ): Promise<FingerprintDecodeResult> {

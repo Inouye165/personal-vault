@@ -69,6 +69,7 @@ describe('preload bridge', () => {
         'onImportProgress',
         'getPhotosPage',
         'getThumbnail',
+        'getOriginalPhoto',
         'cancelThumbnail',
         'getPhotosDiagnostics',
         'setPhotoAnnotation',

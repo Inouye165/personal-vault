@@ -117,6 +117,8 @@ import {
   GetPhotosPageResponseSchema,
   GetThumbnailRequestSchema,
   ThumbnailResultSchema,
+  GetOriginalPhotoRequestSchema,
+  OriginalPhotoResultSchema,
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
@@ -237,6 +239,8 @@ import {
   type GetPhotosPageResponse,
   type GetThumbnailRequest,
   type ThumbnailResult,
+  type GetOriginalPhotoRequest,
+  type OriginalPhotoResult,
   type CancelThumbnailRequest,
   type CancelThumbnailResponse,
   type PhotosDiagnosticsResponse,
@@ -671,6 +675,19 @@ const api: VaultApi = {
     const result = validatePayload(ThumbnailResultSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getThumbnail response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getOriginalPhoto(request: GetOriginalPhotoRequest): Promise<OriginalPhotoResult> {
+    const parsed = validatePayload(GetOriginalPhotoRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getOriginalPhoto request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_GET_ORIGINAL, parsed.data)
+    const result = validatePayload(OriginalPhotoResultSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getOriginalPhoto response from main: ${result.error}`)
     }
     return result.data
   },

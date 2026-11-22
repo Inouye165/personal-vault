@@ -74,6 +74,8 @@ import type {
   GetPhotosPageResponse,
   GetThumbnailRequest,
   ThumbnailResult,
+  GetOriginalPhotoRequest,
+  OriginalPhotoResult,
   CancelThumbnailRequest,
   CancelThumbnailResponse,
   PhotosDiagnosticsResponse,
@@ -188,6 +190,7 @@ export interface VaultApi {
   onImportProgress: (callback: (progress: VaultImportProgress) => void) => () => void
   getPhotosPage: (request: GetPhotosPageRequest) => Promise<GetPhotosPageResponse>
   getThumbnail: (request: GetThumbnailRequest) => Promise<ThumbnailResult>
+  getOriginalPhoto: (request: GetOriginalPhotoRequest) => Promise<OriginalPhotoResult>
   cancelThumbnail: (request: CancelThumbnailRequest) => Promise<CancelThumbnailResponse>
   getPhotosDiagnostics: () => Promise<PhotosDiagnosticsResponse>
   setPhotoAnnotation: (request: SetPhotoAnnotationRequest) => Promise<SetPhotoAnnotationResponse>
