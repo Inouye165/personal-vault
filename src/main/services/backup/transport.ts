@@ -48,6 +48,7 @@ export interface LocalBackupTestHooks {
 }
 
 export interface BackupTransport {
+  readonly requiresEncryption?: boolean
   ensureRepositoryLayout(): Promise<void>
   readRepositoryIdentity(): Promise<BackupRepositoryIdentityV1 | null>
   writeRepositoryIdentity(identity: BackupRepositoryIdentityV1, signal?: AbortSignal): Promise<void>
@@ -82,6 +83,11 @@ export interface BackupTransport {
     signal?: AbortSignal,
     fileName?: string
   ): Promise<Buffer | null>
+  hasSnapshotInProgress?(snapshotId: string, signal?: AbortSignal): Promise<boolean>
+  readSnapshotCompleteMarker?(
+    snapshotId: string,
+    signal?: AbortSignal
+  ): Promise<BackupSnapshotCompleteMarkerV1 | null>
   writeSnapshotCompleteMarker(
     snapshotId: string,
     marker: BackupSnapshotCompleteMarkerV1,
@@ -412,6 +418,23 @@ export class LocalFsTransport implements BackupTransport {
       return null
     }
     return this.readPacedFile(manifestPath, signal)
+  }
+
+  public async hasSnapshotInProgress(snapshotId: string): Promise<boolean> {
+    const markerPath = join(this.getSnapshotDir(snapshotId), BACKUP_SNAPSHOT_IN_PROGRESS_FILE)
+    return existsSync(markerPath)
+  }
+
+  public async readSnapshotCompleteMarker(
+    snapshotId: string,
+    signal?: AbortSignal
+  ): Promise<BackupSnapshotCompleteMarkerV1 | null> {
+    const completePath = join(this.getSnapshotDir(snapshotId), BACKUP_SNAPSHOT_COMPLETE_FILE)
+    if (!existsSync(completePath)) {
+      return null
+    }
+    const bytes = await this.readPacedFile(completePath, signal)
+    return BackupSnapshotCompleteMarkerV1Schema.parse(JSON.parse(bytes.toString('utf8')))
   }
 
   public async writeSnapshotCompleteMarker(

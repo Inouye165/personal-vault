@@ -47,6 +47,7 @@ import {
   BACKUP_SNAPSHOT_MANIFEST_FILE,
   BACKUP_SNAPSHOTS_DIR,
   LocalFsTransport,
+  type BackupTransport,
   type LocalBackupTestHooks
 } from './transport'
 
@@ -72,6 +73,13 @@ export interface RunLocalBackupOptions {
   readonly isPackaged?: boolean
   readonly onRepositoryResolved?: (repositoryId: string) => void
   readonly onChunkVerified?: (chunk: BackupChunkRef, action: 'written' | 'reused') => void
+}
+
+export interface RunBackupWithTransportOptions extends Omit<
+  RunLocalBackupOptions,
+  'backupRepoDir'
+> {
+  readonly transport: BackupTransport
 }
 
 export interface RunLocalBackupResult {
@@ -287,7 +295,7 @@ export function inspectRecoveryPointStatus(
 
 interface TransferChunkContext {
   readonly jobId: string
-  readonly transport: LocalFsTransport
+  readonly transport: BackupTransport
   readonly codec: BackupObjectCodec
   readonly signal?: AbortSignal
   readonly uploadedInThisRun: Map<string, BackupChunkRef>
@@ -659,6 +667,18 @@ export async function runLocalBackup(
     userDataDir: options.userDataDir
   })
 
+  const transport = new LocalFsTransport({
+    repositoryDir: canonicalDest,
+    rateLimiter: options.rateLimiter,
+    hooks
+  })
+  return runBackupWithTransport({ ...options, transport }, hooks)
+}
+
+export async function runBackupWithTransport(
+  options: RunBackupWithTransportOptions,
+  hooks?: LocalBackupTestHooks
+): Promise<RunLocalBackupResult> {
   const stagingDir = join(options.userDataDir, '.backup-staging', options.jobId)
   const captured = await captureConsistentBackupSnapshot({
     jobId: options.jobId,
@@ -676,7 +696,7 @@ export async function runLocalBackup(
 
   await hooks?.onAfterSnapshotCapture?.(options.snapshotId)
 
-  return executeTransferFromStaging(options, canonicalDest, captured, false, hooks)
+  return executeTransferFromStaging(options, options.transport, captured, false)
 }
 
 export async function resumeLocalBackupFromStaging(
@@ -691,28 +711,39 @@ export async function resumeLocalBackupFromStaging(
     userDataDir: options.userDataDir
   })
 
-  return executeTransferFromStaging(options, canonicalDest, captured, true, hooks)
-}
-
-async function executeTransferFromStaging(
-  options: RunLocalBackupOptions,
-  canonicalDest: string,
-  captured: CaptureConsistentBackupSnapshotResult,
-  isResume: boolean,
-  hooks?: LocalBackupTestHooks
-): Promise<RunLocalBackupResult> {
   const transport = new LocalFsTransport({
     repositoryDir: canonicalDest,
     rateLimiter: options.rateLimiter,
     hooks
   })
+  return resumeBackupWithTransport({ ...options, transport }, captured)
+}
 
+export async function resumeBackupWithTransport(
+  options: RunBackupWithTransportOptions,
+  captured: CaptureConsistentBackupSnapshotResult
+): Promise<RunLocalBackupResult> {
+  return executeTransferFromStaging(options, options.transport, captured, true)
+}
+
+async function executeTransferFromStaging(
+  options: Omit<RunLocalBackupOptions, 'backupRepoDir'>,
+  transport: BackupTransport,
+  captured: CaptureConsistentBackupSnapshotResult,
+  isResume: boolean
+): Promise<RunLocalBackupResult> {
   await transport.ensureRepositoryLayout()
   let repoIdentity = await transport.readRepositoryIdentity()
   let codec: BackupObjectCodec
   if (!repoIdentity) {
     const requestedMode: BackupEncryptionMode =
       options.codec?.encryptionMode ?? options.encryptionMode ?? 'none'
+    if (transport.requiresEncryption && requestedMode !== 'aes-256-gcm-v1') {
+      throw new BackupSnapshotError(
+        'destination_corrupt',
+        'Remote backup transport requires aes-256-gcm-v1 encryption'
+      )
+    }
     const repositoryId = randomUUID()
     if (requestedMode === 'aes-256-gcm-v1') {
       if (options.codec) {
@@ -779,6 +810,12 @@ async function executeTransferFromStaging(
       })
     }
   } else {
+    if (transport.requiresEncryption) {
+      throw new BackupSnapshotError(
+        'destination_corrupt',
+        `Remote backup transport requires aes-256-gcm-v1 encryption, but repository has "${repoIdentity.encryptionMode}"`
+      )
+    }
     codec = options.codec ?? new PlaintextObjectCodec()
     if (
       codec.encryptionMode !== repoIdentity.encryptionMode ||

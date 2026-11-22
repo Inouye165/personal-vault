@@ -57,7 +57,12 @@ import { assertPathContainedInVault } from '../vault/containment'
 import { VaultManifestSchema } from '../vault/manifest-schema'
 import { Aes256GcmObjectCodec, PlaintextObjectCodec, type BackupObjectCodec } from './codec'
 import { validateRestoreTargetPaths } from './containment'
-import { inspectRecoveryPointStatus } from './engine'
+import {
+  inspectRecoveryPointStatus,
+  type RecoveryPointIncompleteReason,
+  type RecoveryPointInspectionResult,
+  type RecoveryPointIntegrityStatus
+} from './engine'
 import { BackupRestoreError, BackupSnapshotError } from './errors'
 import {
   BACKUP_OBJECTS_DIR,
@@ -66,7 +71,8 @@ import {
   BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE,
   BACKUP_SNAPSHOT_IN_PROGRESS_FILE,
   BACKUP_SNAPSHOT_MANIFEST_FILE,
-  BACKUP_SNAPSHOTS_DIR
+  BACKUP_SNAPSHOTS_DIR,
+  type BackupTransport
 } from './transport'
 
 export const RESTORE_IN_PROGRESS_FILE = '.pv-restore-in-progress.json'
@@ -102,6 +108,14 @@ export interface VerifyRecoveryPointOptions {
   readonly signal?: AbortSignal
 }
 
+export interface VerifyRemoteRecoveryPointOptions {
+  readonly transport: BackupTransport
+  readonly snapshotId: string
+  readonly codec?: BackupObjectCodec
+  readonly recoverySecret?: string
+  readonly signal?: AbortSignal
+}
+
 export interface VerifyRecoveryPointResult {
   readonly repositoryId: string
   readonly snapshotId: string
@@ -125,6 +139,13 @@ export interface RestoreRecoveryPointOptions {
   readonly recoverySecret?: string
   readonly signal?: AbortSignal
   readonly hooks?: LocalRestoreTestHooks
+}
+
+export interface RestoreRemoteRecoveryPointOptions extends Omit<
+  RestoreRecoveryPointOptions,
+  'backupRepoDir'
+> {
+  readonly transport: BackupTransport
 }
 
 export interface RestoreRecoveryPointResult {
@@ -396,8 +417,69 @@ async function loadAndValidateRecoveryPointMetadata(
   return { repository, completeMarker, manifest, codec }
 }
 
+interface BackupReadSource {
+  readObjectBytes(
+    objectId: string,
+    expectedStoredByteSize: number,
+    signal?: AbortSignal
+  ): Promise<Buffer>
+}
+
+function createLocalReadSource(backupRepoDir: string): BackupReadSource {
+  return {
+    async readObjectBytes(objectId: string, expectedStoredByteSize: number): Promise<Buffer> {
+      const lower = objectId.toLowerCase()
+      const objPath = join(backupRepoDir, BACKUP_OBJECTS_DIR, lower.slice(0, 2), `${lower}.pvchunk`)
+      if (!existsSync(objPath)) {
+        throw new BackupRestoreError('chunk_missing', `Missing backup chunk object ${lower}`)
+      }
+      const storedBytes = readFileSync(objPath)
+      if (storedBytes.length !== expectedStoredByteSize) {
+        throw new BackupRestoreError(
+          'chunk_corrupt',
+          `Chunk ${lower} stored size mismatch: expected ${expectedStoredByteSize}, got ${storedBytes.length}`
+        )
+      }
+      return storedBytes
+    }
+  }
+}
+
+function createTransportReadSource(transport: BackupTransport): BackupReadSource {
+  return {
+    async readObjectBytes(
+      objectId: string,
+      expectedStoredByteSize: number,
+      signal?: AbortSignal
+    ): Promise<Buffer> {
+      const lower = objectId.toLowerCase()
+      const st = await transport.statObject(lower)
+      if (!st.exists) {
+        throw new BackupRestoreError('chunk_missing', `Missing remote backup chunk object ${lower}`)
+      }
+      let storedBytes: Buffer
+      try {
+        storedBytes = await transport.readObject(lower, signal)
+      } catch (err) {
+        if (err instanceof BackupRestoreError) throw err
+        throw new BackupRestoreError(
+          'chunk_corrupt',
+          `Failed to read remote chunk ${lower}: ${(err as Error).message}`
+        )
+      }
+      if (storedBytes.length !== expectedStoredByteSize) {
+        throw new BackupRestoreError(
+          'chunk_corrupt',
+          `Chunk ${lower} stored size mismatch: expected ${expectedStoredByteSize}, got ${storedBytes.length}`
+        )
+      }
+      return storedBytes
+    }
+  }
+}
+
 async function decodeVerifiedChunk(
-  backupRepoDir: string,
+  source: BackupReadSource,
   objectId: string,
   expectedStoredByteSize: number,
   expectedPlaintextByteSize: number,
@@ -407,17 +489,7 @@ async function decodeVerifiedChunk(
 ): Promise<Buffer> {
   checkCancelled(signal)
   const lower = objectId.toLowerCase()
-  const objPath = join(backupRepoDir, BACKUP_OBJECTS_DIR, lower.slice(0, 2), `${lower}.pvchunk`)
-  if (!existsSync(objPath)) {
-    throw new BackupRestoreError('chunk_missing', `Missing backup chunk object ${lower}`)
-  }
-  const storedBytes = readFileSync(objPath)
-  if (storedBytes.length !== expectedStoredByteSize) {
-    throw new BackupRestoreError(
-      'chunk_corrupt',
-      `Chunk ${lower} stored size mismatch: expected ${expectedStoredByteSize}, got ${storedBytes.length}`
-    )
-  }
+  const storedBytes = await source.readObjectBytes(lower, expectedStoredByteSize, signal)
   try {
     const plaintext = await codec.decodeChunk(storedBytes, objectId, expectedPlaintextSha256)
     if (plaintext.length !== expectedPlaintextByteSize) {
@@ -440,7 +512,7 @@ async function decodeVerifiedChunk(
 }
 
 async function reassembleFileEntryToPath(
-  backupRepoDir: string,
+  source: BackupReadSource,
   entry: BackupFileEntry,
   destPath: string,
   codec: BackupObjectCodec,
@@ -473,7 +545,7 @@ async function reassembleFileEntryToPath(
         )
       }
       const plaintext = await decodeVerifiedChunk(
-        backupRepoDir,
+        source,
         chunk.objectId,
         chunk.storedByteSize,
         chunk.plaintextByteSize,
@@ -507,7 +579,7 @@ async function reassembleFileEntryToPath(
 }
 
 async function reassembleFileEntryToBuffer(
-  backupRepoDir: string,
+  source: BackupReadSource,
   entry: BackupFileEntry,
   codec: BackupObjectCodec,
   signal?: AbortSignal
@@ -534,7 +606,7 @@ async function reassembleFileEntryToBuffer(
     }
     parts.push(
       await decodeVerifiedChunk(
-        backupRepoDir,
+        source,
         chunk.objectId,
         chunk.storedByteSize,
         chunk.plaintextByteSize,
@@ -770,23 +842,30 @@ function rebindRestoredCatalogSqlite(
 export async function verifyRecoveryPoint(
   options: VerifyRecoveryPointOptions
 ): Promise<VerifyRecoveryPointResult> {
-  const { repository, manifest, codec } = await loadAndValidateRecoveryPointMetadata(
+  const loaded = await loadAndValidateRecoveryPointMetadata(
     options.backupRepoDir,
     options.snapshotId,
     { codec: options.codec, recoverySecret: options.recoverySecret }
   )
+  return verifyRecoveryPointFromLoaded(
+    createLocalReadSource(options.backupRepoDir),
+    loaded,
+    options.signal
+  )
+}
+
+async function verifyRecoveryPointFromLoaded(
+  source: BackupReadSource,
+  loaded: LoadedRecoveryPoint,
+  signal?: AbortSignal
+): Promise<VerifyRecoveryPointResult> {
+  const { repository, manifest, codec } = loaded
 
   const tempDir = mkdtempSync(join(tmpdir(), 'pv-8b-verify-'))
   try {
     // 1. Reassemble and validate SQLite catalog
     const tempDbPath = join(tempDir, 'vault-catalog.db')
-    await reassembleFileEntryToPath(
-      options.backupRepoDir,
-      manifest.catalogFile,
-      tempDbPath,
-      codec,
-      options.signal
-    )
+    await reassembleFileEntryToPath(source, manifest.catalogFile, tempDbPath, codec, signal)
     validateCatalogSqliteFile(tempDbPath)
 
     let verifiedFileCount = 1
@@ -794,16 +873,16 @@ export async function verifyRecoveryPoint(
     // 2. Reassemble and validate annotations if present
     if (manifest.annotations) {
       const ownerBytes = await reassembleFileEntryToBuffer(
-        options.backupRepoDir,
+        source,
         manifest.annotations.ownerMarkerFile,
         codec,
-        options.signal
+        signal
       )
       const journalBytes = await reassembleFileEntryToBuffer(
-        options.backupRepoDir,
+        source,
         manifest.annotations.journalFile,
         codec,
-        options.signal
+        signal
       )
       validateAnnotationsContent(ownerBytes, journalBytes)
       verifiedFileCount += 2
@@ -812,30 +891,24 @@ export async function verifyRecoveryPoint(
     // 3. Reassemble and validate vault identity, payload files, and manifest.json sidecars
     if (manifest.vault) {
       const identityBytes = await reassembleFileEntryToBuffer(
-        options.backupRepoDir,
+        source,
         manifest.vault.identityFile,
         codec,
-        options.signal
+        signal
       )
       validateVaultIdentityBytes(identityBytes, manifest.vault.vaultId)
       verifiedFileCount += 1
 
       for (const copy of manifest.vault.copies) {
         const payloadTempPath = join(tempDir, 'vault-payload', `${copy.sha256}.bin`)
-        await reassembleFileEntryToPath(
-          options.backupRepoDir,
-          copy.payloadFile,
-          payloadTempPath,
-          codec,
-          options.signal
-        )
+        await reassembleFileEntryToPath(source, copy.payloadFile, payloadTempPath, codec, signal)
         unlinkSync(payloadTempPath)
 
         const manifestBytes = await reassembleFileEntryToBuffer(
-          options.backupRepoDir,
+          source,
           copy.manifestFile,
           codec,
-          options.signal
+          signal
         )
         validateVaultManifestBytes(manifestBytes, manifest.vault.vaultId, copy.sha256)
         verifiedFileCount += 2
@@ -887,13 +960,31 @@ export async function restoreRecoveryPointToIsolatedProfile(
 
   // 2. Pre-flight recovery point validation (including key unwrap & manifest decryption)
   // Must fail closed before creating any target profile/vault directories.
-  const { repository, manifest, codec } = await loadAndValidateRecoveryPointMetadata(
+  const loaded = await loadAndValidateRecoveryPointMetadata(
     validatedPaths.backupRepoDir,
     options.snapshotId,
     { codec: options.codec, recoverySecret: options.recoverySecret }
   )
 
-  if (manifest.vault !== null && validatedPaths.targetVaultDir === null) {
+  return restoreRecoveryPointFromLoaded(
+    createLocalReadSource(validatedPaths.backupRepoDir),
+    loaded,
+    validatedPaths.targetProfileDir,
+    validatedPaths.targetVaultDir,
+    options
+  )
+}
+
+async function restoreRecoveryPointFromLoaded(
+  source: BackupReadSource,
+  loaded: LoadedRecoveryPoint,
+  validatedTargetProfileDir: string,
+  validatedTargetVaultDir: string | null,
+  options: Pick<RestoreRecoveryPointOptions, 'restoreJobId' | 'signal' | 'hooks'>
+): Promise<RestoreRecoveryPointResult> {
+  const { repository, manifest, codec } = loaded
+
+  if (manifest.vault !== null && validatedTargetVaultDir === null) {
     throw new BackupRestoreError(
       'restore_target_invalid',
       'targetVaultDir is required when restoring a recovery point that includes a vault'
@@ -902,8 +993,8 @@ export async function restoreRecoveryPointToIsolatedProfile(
 
   const restoreJobId = options.restoreJobId ?? randomUUID()
   const startedAtMs = Date.now()
-  const targetProfileDir = validatedPaths.targetProfileDir
-  const targetVaultDir = manifest.vault !== null ? validatedPaths.targetVaultDir : null
+  const targetProfileDir = validatedTargetProfileDir
+  const targetVaultDir = manifest.vault !== null ? validatedTargetVaultDir : null
 
   mkdirSync(targetProfileDir, { recursive: true })
   if (targetVaultDir !== null) {
@@ -941,7 +1032,7 @@ export async function restoreRecoveryPointToIsolatedProfile(
   if (manifest.vault !== null && targetVaultDir !== null && vaultTempDir !== null) {
     const stagedVaultIdentityPath = join(vaultTempDir, 'vault.json')
     await reassembleFileEntryToPath(
-      validatedPaths.backupRepoDir,
+      source,
       manifest.vault.identityFile,
       stagedVaultIdentityPath,
       codec,
@@ -965,7 +1056,7 @@ export async function restoreRecoveryPointToIsolatedProfile(
 
       const stagedPayloadPath = join(vaultTempDir, copy.payloadRelativePath)
       await reassembleFileEntryToPath(
-        validatedPaths.backupRepoDir,
+        source,
         copy.payloadFile,
         stagedPayloadPath,
         codec,
@@ -975,7 +1066,7 @@ export async function restoreRecoveryPointToIsolatedProfile(
 
       const stagedManifestPath = join(vaultTempDir, copy.manifestRelativePath)
       await reassembleFileEntryToPath(
-        validatedPaths.backupRepoDir,
+        source,
         copy.manifestFile,
         stagedManifestPath,
         codec,
@@ -1015,7 +1106,7 @@ export async function restoreRecoveryPointToIsolatedProfile(
   // Phase C — Catalog & journal staging, rebinding & verification
   const stagedCatalogPath = join(profileTempDir, 'vault-catalog.db')
   await reassembleFileEntryToPath(
-    validatedPaths.backupRepoDir,
+    source,
     manifest.catalogFile,
     stagedCatalogPath,
     codec,
@@ -1033,14 +1124,14 @@ export async function restoreRecoveryPointToIsolatedProfile(
     const stagedJournalPath = join(stagedAnnotationsDir, 'review-journal.jsonl')
 
     await reassembleFileEntryToPath(
-      validatedPaths.backupRepoDir,
+      source,
       manifest.annotations.ownerMarkerFile,
       stagedOwnerPath,
       codec,
       options.signal
     )
     await reassembleFileEntryToPath(
-      validatedPaths.backupRepoDir,
+      source,
       manifest.annotations.journalFile,
       stagedJournalPath,
       codec,
@@ -1423,4 +1514,384 @@ export function listRecoveryPoints(backupRepoDir: string): BackupListRecoveryPoi
     repositoryId,
     recoveryPoints: summaries
   }
+}
+
+export async function inspectRemoteRecoveryPointStatus(
+  transport: BackupTransport,
+  snapshotId: string,
+  options?: { readonly manifest?: BackupSnapshotManifestV1; readonly signal?: AbortSignal }
+): Promise<RecoveryPointInspectionResult> {
+  const reasons: RecoveryPointIncompleteReason[] = []
+  let repoIdentity: BackupRepositoryIdentityV1 | null = null
+  try {
+    repoIdentity = await transport.readRepositoryIdentity()
+    if (!repoIdentity) {
+      reasons.push('repository_missing')
+    }
+  } catch {
+    reasons.push('repository_invalid')
+  }
+
+  const inProgress = transport.hasSnapshotInProgress
+    ? await transport.hasSnapshotInProgress(snapshotId, options?.signal)
+    : false
+  if (inProgress) {
+    reasons.push('in_progress_marker_present')
+  }
+
+  let completeMarker: BackupSnapshotCompleteMarkerV1 | null = null
+  let completionMarkerChecked = false
+  try {
+    completeMarker = transport.readSnapshotCompleteMarker
+      ? await transport.readSnapshotCompleteMarker(snapshotId, options?.signal)
+      : null
+    if (!completeMarker) {
+      reasons.push('completion_marker_missing')
+    } else {
+      completionMarkerChecked = true
+      if (completeMarker.snapshotId !== snapshotId) {
+        reasons.push('completion_marker_invalid')
+      }
+      if (
+        repoIdentity &&
+        (completeMarker.repositoryId !== repoIdentity.repositoryId ||
+          completeMarker.encryptionMode !== repoIdentity.encryptionMode)
+      ) {
+        reasons.push('completion_marker_invalid')
+      }
+    }
+  } catch {
+    reasons.push('completion_marker_invalid')
+  }
+
+  const encryptionMode = repoIdentity?.encryptionMode ?? completeMarker?.encryptionMode ?? 'none'
+  const manifestFileName =
+    encryptionMode === 'aes-256-gcm-v1'
+      ? BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE
+      : BACKUP_SNAPSHOT_MANIFEST_FILE
+  const rawManifestBytes = await transport.readSnapshotManifest(
+    snapshotId,
+    options?.signal,
+    manifestFileName
+  )
+  let manifest: BackupSnapshotManifestV1 | null = options?.manifest ?? null
+  let manifestChecksumChecked = false
+  if (!rawManifestBytes) {
+    reasons.push('manifest_missing')
+  } else {
+    manifestChecksumChecked = completeMarker !== null
+    try {
+      const actualSha = sha256Hex(rawManifestBytes)
+      if (
+        completeMarker &&
+        actualSha.toLowerCase() !== completeMarker.manifestSha256.toLowerCase()
+      ) {
+        reasons.push('manifest_hash_mismatch')
+      }
+      if (encryptionMode === 'none') {
+        manifest = BackupSnapshotManifestV1Schema.parse(
+          JSON.parse(rawManifestBytes.toString('utf8'))
+        )
+        if (manifest.snapshotId !== snapshotId) {
+          reasons.push('manifest_invalid')
+        }
+      } else if (rawManifestBytes.length < 28) {
+        reasons.push('manifest_invalid')
+      }
+    } catch {
+      reasons.push('manifest_invalid')
+    }
+  }
+
+  let objectsChecked = false
+  if (manifest) {
+    objectsChecked = true
+    const seen = new Set<string>()
+    const refs = [
+      ...manifest.catalogFile.chunks,
+      ...(manifest.annotations
+        ? [
+            ...manifest.annotations.ownerMarkerFile.chunks,
+            ...manifest.annotations.journalFile.chunks
+          ]
+        : []),
+      ...(manifest.vault
+        ? [
+            ...manifest.vault.identityFile.chunks,
+            ...manifest.vault.copies.flatMap((c) => [
+              ...c.payloadFile.chunks,
+              ...c.manifestFile.chunks
+            ])
+          ]
+        : [])
+    ]
+    for (const chunk of refs) {
+      const lower = chunk.objectId.toLowerCase()
+      if (seen.has(lower)) continue
+      seen.add(lower)
+      const st = await transport.statObject(lower)
+      if (!st.exists) {
+        if (!reasons.includes('missing_object')) reasons.push('missing_object')
+      } else if (st.byteSize !== chunk.storedByteSize) {
+        if (!reasons.includes('object_size_mismatch')) reasons.push('object_size_mismatch')
+      }
+    }
+  }
+
+  const isComplete = reasons.length === 0
+  const integrityStatus: RecoveryPointIntegrityStatus = !isComplete
+    ? 'incomplete'
+    : objectsChecked
+      ? 'structurally_complete'
+      : 'sealed_unverified'
+
+  return {
+    isComplete,
+    integrityStatus,
+    checked: {
+      completionMarker: completionMarkerChecked,
+      manifestChecksum: manifestChecksumChecked,
+      objectPresenceAndSizes: objectsChecked
+    },
+    reasons,
+    completeMarker
+  }
+}
+
+export async function listRemoteRecoveryPoints(
+  transport: BackupTransport,
+  repoLabel = 'google-drive://backup'
+): Promise<BackupListRecoveryPointsResponse> {
+  let repositoryId: string | null
+  try {
+    const repo = await transport.readRepositoryIdentity()
+    repositoryId = repo?.repositoryId ?? null
+  } catch {
+    repositoryId = null
+  }
+
+  const snapshotIds = await transport.listSnapshotIds()
+  const summaries: BackupRecoveryPointSummary[] = []
+  for (const snapshotId of snapshotIds) {
+    const inspection = await inspectRemoteRecoveryPointStatus(transport, snapshotId)
+    summaries.push({
+      snapshotId,
+      isComplete: inspection.isComplete,
+      integrityStatus: inspection.integrityStatus,
+      reasons: [...inspection.reasons],
+      repositoryId: inspection.completeMarker?.repositoryId ?? repositoryId,
+      createdAtMs: null,
+      completedAtMs: inspection.completeMarker?.completedAtMs ?? null,
+      verificationScope: inspection.completeMarker?.verificationScope ?? null,
+      totalObjectCount: inspection.completeMarker?.totalObjectCount ?? null,
+      totalLogicalBytes: inspection.completeMarker?.totalLogicalBytes ?? null,
+      totalStoredBytes: inspection.completeMarker?.totalStoredBytes ?? null,
+      vaultName: null,
+      vaultCopyCount: null
+    })
+  }
+
+  summaries.sort((a, b) => {
+    const timeA = a.completedAtMs ?? a.createdAtMs ?? 0
+    const timeB = b.completedAtMs ?? b.createdAtMs ?? 0
+    if (timeB !== timeA) return timeB - timeA
+    return b.snapshotId.localeCompare(a.snapshotId)
+  })
+
+  return {
+    backupRepoDir: repoLabel,
+    repositoryId,
+    recoveryPoints: summaries
+  }
+}
+
+async function loadAndValidateRemoteRecoveryPointMetadata(
+  transport: BackupTransport,
+  snapshotId: string,
+  options?: {
+    readonly codec?: BackupObjectCodec
+    readonly recoverySecret?: string
+    readonly signal?: AbortSignal
+  }
+): Promise<LoadedRecoveryPoint> {
+  const repository = await transport.readRepositoryIdentity()
+  if (!repository) {
+    throw new BackupRestoreError('repository_missing', 'Remote repository.json missing')
+  }
+
+  let codec: BackupObjectCodec
+  if (repository.encryptionMode === 'aes-256-gcm-v1') {
+    if (options?.codec) {
+      if (
+        !(options.codec instanceof Aes256GcmObjectCodec) ||
+        !options.codec.matchesRepositoryEncryption(repository.repositoryId, repository.encryption)
+      ) {
+        throw new BackupRestoreError(
+          'wrong_recovery_secret',
+          `Provided codec is not bound to repository "${repository.repositoryId}"`
+        )
+      }
+      codec = options.codec
+    } else {
+      codec = await Aes256GcmObjectCodec.unlockFromRepository({
+        repositoryId: repository.repositoryId,
+        encryption: repository.encryption,
+        recoverySecret: options?.recoverySecret,
+        errorDomain: 'restore'
+      })
+    }
+  } else {
+    codec = options?.codec ?? new PlaintextObjectCodec()
+  }
+
+  const inProgress = transport.hasSnapshotInProgress
+    ? await transport.hasSnapshotInProgress(snapshotId, options?.signal)
+    : false
+  if (inProgress) {
+    throw new BackupRestoreError(
+      'recovery_point_incomplete',
+      `Remote recovery point "${snapshotId}" is incomplete (.pv-snapshot-in-progress.json present)`
+    )
+  }
+
+  const completeMarker = transport.readSnapshotCompleteMarker
+    ? await transport.readSnapshotCompleteMarker(snapshotId, options?.signal)
+    : null
+  if (!completeMarker) {
+    throw new BackupRestoreError(
+      'recovery_point_incomplete',
+      `Remote recovery point "${snapshotId}" is incomplete (complete.json missing)`
+    )
+  }
+  if (
+    completeMarker.snapshotId !== snapshotId ||
+    completeMarker.repositoryId !== repository.repositoryId ||
+    completeMarker.encryptionMode !== repository.encryptionMode
+  ) {
+    throw new BackupRestoreError(
+      'recovery_point_incomplete',
+      `Remote complete.json identity mismatch for "${snapshotId}"`
+    )
+  }
+
+  const manifestFileName =
+    repository.encryptionMode === 'aes-256-gcm-v1'
+      ? BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE
+      : BACKUP_SNAPSHOT_MANIFEST_FILE
+  const storedManifestBytes = await transport.readSnapshotManifest(
+    snapshotId,
+    options?.signal,
+    manifestFileName
+  )
+  if (!storedManifestBytes) {
+    throw new BackupRestoreError(
+      'manifest_missing',
+      `Remote ${manifestFileName} missing for recovery point "${snapshotId}"`
+    )
+  }
+  if (
+    sha256Hex(storedManifestBytes).toLowerCase() !== completeMarker.manifestSha256.toLowerCase()
+  ) {
+    throw new BackupRestoreError(
+      'manifest_hash_mismatch',
+      `Remote ${manifestFileName} SHA-256 mismatch for "${snapshotId}"`
+    )
+  }
+
+  let plaintextManifestBytes: Buffer
+  try {
+    plaintextManifestBytes = await codec.decodeManifest(storedManifestBytes, snapshotId)
+  } catch (err) {
+    throw new BackupRestoreError(
+      'manifest_invalid',
+      `Failed to decrypt remote ${manifestFileName} for "${snapshotId}": ${(err as Error).message}`
+    )
+  }
+
+  let manifest: BackupSnapshotManifestV1
+  try {
+    manifest = BackupSnapshotManifestV1Schema.parse(
+      JSON.parse(plaintextManifestBytes.toString('utf8'))
+    )
+  } catch (err) {
+    throw new BackupRestoreError(
+      'manifest_invalid',
+      `Invalid remote ${manifestFileName} for "${snapshotId}": ${(err as Error).message}`
+    )
+  }
+  if (manifest.snapshotId !== snapshotId || manifest.repositoryId !== repository.repositoryId) {
+    throw new BackupRestoreError(
+      'manifest_invalid',
+      `Remote ${manifestFileName} identity mismatch for "${snapshotId}"`
+    )
+  }
+  if (manifest.schemaVersion > CURRENT_SCHEMA_VERSION) {
+    throw new BackupRestoreError(
+      'unsupported_schema_version',
+      `Snapshot schemaVersion ${manifest.schemaVersion} exceeds supported version ${CURRENT_SCHEMA_VERSION}`
+    )
+  }
+
+  const status = await inspectRemoteRecoveryPointStatus(transport, snapshotId, {
+    manifest,
+    signal: options?.signal
+  })
+  if (
+    !status.isComplete ||
+    status.integrityStatus !== 'structurally_complete' ||
+    !status.checked.completionMarker ||
+    !status.checked.manifestChecksum ||
+    !status.checked.objectPresenceAndSizes
+  ) {
+    throw new BackupRestoreError(
+      'recovery_point_incomplete',
+      `Remote recovery point "${snapshotId}" failed structural preflight check: ${status.reasons.join(', ')}`
+    )
+  }
+
+  return { repository, completeMarker, manifest, codec }
+}
+
+export async function verifyRemoteRecoveryPoint(
+  options: VerifyRemoteRecoveryPointOptions
+): Promise<VerifyRecoveryPointResult> {
+  const loaded = await loadAndValidateRemoteRecoveryPointMetadata(
+    options.transport,
+    options.snapshotId,
+    { codec: options.codec, recoverySecret: options.recoverySecret, signal: options.signal }
+  )
+  return verifyRecoveryPointFromLoaded(
+    createTransportReadSource(options.transport),
+    loaded,
+    options.signal
+  )
+}
+
+export async function restoreRemoteRecoveryPointToIsolatedProfile(
+  options: RestoreRemoteRecoveryPointOptions
+): Promise<RestoreRecoveryPointResult> {
+  checkCancelled(options.signal)
+
+  const validatedPaths = validateRestoreTargetPaths({
+    targetProfileDir: options.targetProfileDir,
+    targetVaultDir: options.targetVaultDir,
+    backupRepoDir: join(tmpdir(), 'pv-remote-drive-placeholder'),
+    activeUserDataDir: options.activeUserDataDir,
+    activeSourceRoots: options.activeSourceRoots ?? [],
+    activeVaultRoots: options.activeVaultRoots ?? []
+  })
+
+  const loaded = await loadAndValidateRemoteRecoveryPointMetadata(
+    options.transport,
+    options.snapshotId,
+    { codec: options.codec, recoverySecret: options.recoverySecret, signal: options.signal }
+  )
+
+  return restoreRecoveryPointFromLoaded(
+    createTransportReadSource(options.transport),
+    loaded,
+    validatedPaths.targetProfileDir,
+    validatedPaths.targetVaultDir,
+    options
+  )
 }
