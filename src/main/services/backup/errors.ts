@@ -18,6 +18,7 @@ export type BackupSnapshotErrorCode =
   | 'destination_collision'
   | 'recovery_secret_required'
   | 'wrong_recovery_secret'
+  | 'daily_budget_exhausted'
   | 'backup_cancelled'
 
 export type BackupRestoreErrorCode =

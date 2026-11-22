@@ -810,4 +810,128 @@ export class BackupRepository {
       .get(destinationId, cutoff) as { total_bytes: number }
     return Number(row.total_bytes)
   }
+
+  public tryReserveRollingBandwidth(input: {
+    readonly destinationId: string
+    readonly jobId?: string | null
+    readonly unitId?: number | null
+    readonly bytesToReserve: number
+    readonly dailyBudgetBytes: number | null
+    readonly nowMs?: number
+  }): {
+    readonly allowed: boolean
+    readonly usedBytes: number
+    readonly remainingBytes: number | null
+  } {
+    const nowMs = input.nowMs ?? Date.now()
+    return this.runInTransaction(() => {
+      const usedBytes = this.getRolling24hBandwidthBytes(input.destinationId, nowMs)
+      if (
+        input.dailyBudgetBytes !== null &&
+        usedBytes + input.bytesToReserve > input.dailyBudgetBytes
+      ) {
+        return {
+          allowed: false,
+          usedBytes,
+          remainingBytes: Math.max(0, input.dailyBudgetBytes - usedBytes)
+        }
+      }
+      this.recordBandwidthReservation({
+        destinationId: input.destinationId,
+        jobId: input.jobId ?? null,
+        unitId: input.unitId ?? null,
+        bytesReserved: input.bytesToReserve,
+        recordedAtMs: nowMs
+      })
+      const nextUsed = usedBytes + input.bytesToReserve
+      return {
+        allowed: true,
+        usedBytes: nextUsed,
+        remainingBytes:
+          input.dailyBudgetBytes !== null ? Math.max(0, input.dailyBudgetBytes - nextUsed) : null
+      }
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Durable Google Drive Upload State (Slice 3)
+  // ---------------------------------------------------------------------------
+
+  public getDriveUploadState(
+    destinationId: string,
+    resourceKey: string
+  ): {
+    readonly destinationId: string
+    readonly resourceKey: string
+    readonly pregeneratedFileId: string
+    readonly sessionUri: string | null
+    readonly contentSha256: string | null
+    readonly byteSize: number | null
+    readonly jobId: string | null
+    readonly updatedAtMs: number
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT destination_id, resource_key, pregenerated_file_id, session_uri,
+                content_sha256, byte_size, job_id, updated_at_ms
+         FROM backup_drive_upload_state
+         WHERE destination_id = ? AND resource_key = ?`
+      )
+      .get(destinationId, resourceKey) as Record<string, unknown> | undefined
+    if (!row) return null
+    return {
+      destinationId: String(row.destination_id),
+      resourceKey: String(row.resource_key),
+      pregeneratedFileId: String(row.pregenerated_file_id),
+      sessionUri: row.session_uri !== null ? String(row.session_uri) : null,
+      contentSha256: row.content_sha256 !== null ? String(row.content_sha256) : null,
+      byteSize: row.byte_size !== null ? Number(row.byte_size) : null,
+      jobId: row.job_id !== null ? String(row.job_id) : null,
+      updatedAtMs: Number(row.updated_at_ms)
+    }
+  }
+
+  public upsertDriveUploadState(input: {
+    readonly destinationId: string
+    readonly resourceKey: string
+    readonly pregeneratedFileId: string
+    readonly sessionUri?: string | null
+    readonly contentSha256?: string | null
+    readonly byteSize?: number | null
+    readonly jobId?: string | null
+    readonly updatedAtMs?: number
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO backup_drive_upload_state (
+          destination_id, resource_key, pregenerated_file_id, session_uri,
+          content_sha256, byte_size, job_id, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (destination_id, resource_key) DO UPDATE SET
+          pregenerated_file_id = excluded.pregenerated_file_id,
+          session_uri = excluded.session_uri,
+          content_sha256 = excluded.content_sha256,
+          byte_size = excluded.byte_size,
+          job_id = COALESCE(excluded.job_id, backup_drive_upload_state.job_id),
+          updated_at_ms = excluded.updated_at_ms`
+      )
+      .run(
+        input.destinationId,
+        input.resourceKey,
+        input.pregeneratedFileId,
+        input.sessionUri ?? null,
+        input.contentSha256 ?? null,
+        input.byteSize ?? null,
+        input.jobId ?? null,
+        input.updatedAtMs ?? Date.now()
+      )
+  }
+
+  public deleteDriveUploadState(destinationId: string, resourceKey: string): void {
+    this.db
+      .prepare(
+        'DELETE FROM backup_drive_upload_state WHERE destination_id = ? AND resource_key = ?'
+      )
+      .run(destinationId, resourceKey)
+  }
 }

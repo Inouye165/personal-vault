@@ -28,6 +28,8 @@ import {
 import { captureConsistentBackupSnapshot } from '../../src/main/services/backup/snapshot-capture'
 import { BackupRestoreError, BackupSnapshotError } from '../../src/main/services/backup/errors'
 import {
+  createSqlDriveBandwidthMeter,
+  createSqlDriveUploadStateStore,
   DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
   GoogleDriveTransport
 } from '../../src/main/services/backup/google-drive-transport'
@@ -1543,5 +1545,521 @@ describe('Stage 8B Slice 3: Google Drive Transport (Mocked Drive API v3)', () =>
     })
     expect(restored2.snapshotId).toBe(snap2)
     expect(inspectRestoredProfileStatus(targetProfile2, targetVault2).status).toBe('complete')
+  })
+
+  it('persists pregenerated Drive ID and resumable session across DB close/reopen, recovers lost final PUT without duplicates, and rejects mismatched bytes', async () => {
+    const fx = await createDriveFixture()
+    cleanups.push(() => {
+      try {
+        fx.catalog.close()
+      } catch {
+        // ignore
+      }
+      rmSync(fx.rootDir, { recursive: true, force: true })
+    })
+
+    const mockDrive = new MockGoogleDriveServer()
+    const baseFetch = mockDrive.createFetch()
+
+    const repo1 = fx.catalog.getBackupRepository()
+    const dest = repo1.createDestination({
+      id: 'dest-drive-durable',
+      name: 'Google Drive Durable',
+      kind: 'google_drive',
+      targetPath: null,
+      encryptionMode: 'aes-256-gcm-v1',
+      dailyBudgetBytes: 50 * 1024 * 1024
+    })
+    const job1 = repo1.createJob({
+      id: 'job-durable-1',
+      destinationId: dest.id,
+      snapshotId: 'snap-durable-1',
+      status: 'running'
+    })
+
+    // 1. Interrupt after chunk 0 of a 400 KiB object upload
+    const payloadA = Buffer.alloc(400 * 1024, 0x33)
+    const objIdA = sha256Hex(payloadA)
+    const ac1 = new AbortController()
+    let chunk0Uploaded = false
+    const interruptAfterChunk0Fetch: typeof fetch = async (input, init) => {
+      const urlStr =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const headers = new Headers(init?.headers)
+      const range = headers.get('content-range') ?? ''
+      if (urlStr.includes('/upload/session/') && range.startsWith('bytes 262144-')) {
+        chunk0Uploaded = true
+        ac1.abort()
+        throw new Error('Simulated crash after chunk 0')
+      }
+      return baseFetch(input, init)
+    }
+
+    const transport1 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: interruptAfterChunk0Fetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo1, dest.id, job1.id),
+      retryDelaysMs: [5, 10]
+    })
+
+    await expect(
+      transport1.writeObjectAtomic(objIdA, payloadA, job1.id, { signal: ac1.signal })
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupSnapshotError && err.code === 'backup_cancelled'
+    )
+    expect(chunk0Uploaded).toBe(true)
+
+    // Close DB and reopen to prove durable state survives process/DB restart
+    fx.catalog.close()
+    fx.catalog = CatalogDatabase.open({ catalogPath: fx.catalogPath, journal: fx.journal })
+    const repo2 = fx.catalog.getBackupRepository()
+
+    // Verify mismatched upload bytes do NOT resume the stale session
+    const payloadDifferent = Buffer.alloc(400 * 1024, 0x44)
+    const diffTransport = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: baseFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo2, dest.id, job1.id),
+      retryDelaysMs: [5, 10]
+    })
+    // Put a different object with the same name/parent only if we test same objIdA with altered bytes:
+    // Re-run objIdA with payloadDifferent -> must NOT splice old session; must start fresh session & overwrite/upload payloadDifferent
+    const callsBeforeMismatch = mockDrive.callLog.length
+    await diffTransport.writeObjectAtomic(objIdA, payloadDifferent, job1.id)
+    const mismatchCalls = mockDrive.callLog.slice(callsBeforeMismatch)
+    expect(mismatchCalls.some((c) => c.includes('uploadType=resumable'))).toBe(true)
+    expect(sha256Hex(await diffTransport.readObject(objIdA))).toBe(sha256Hex(payloadDifferent))
+
+    // 2. Now test lost final PUT response across DB close & reopen on a fresh object objIdB
+    const payloadB = Buffer.alloc(400 * 1024, 0x55)
+    const objIdB = sha256Hex(payloadB)
+    const ac2 = new AbortController()
+    let droppedFinalPut = false
+    const dropFinalPutFetch: typeof fetch = async (input, init) => {
+      const urlStr =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const headers = new Headers(init?.headers)
+      const range = headers.get('content-range') ?? ''
+      const m = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(range)
+      if (urlStr.includes('/upload/session/') && m && Number(m[2]) + 1 === Number(m[3])) {
+        droppedFinalPut = true
+        const res = await baseFetch(input, init)
+        const committed = (await res.json()) as { id: string }
+        // Hide from files.list AND abort so transport crashes before seeing 200 OK
+        mockDrive.hiddenFromListIds.add(committed.id)
+        ac2.abort()
+        throw new Error('Simulated process crash after final PUT committed')
+      }
+      return baseFetch(input, init)
+    }
+
+    const transport2 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: dropFinalPutFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo2, dest.id, job1.id),
+      retryDelaysMs: [5, 10]
+    })
+
+    await expect(
+      transport2.writeObjectAtomic(objIdB, payloadB, job1.id, { signal: ac2.signal })
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupSnapshotError && err.code === 'backup_cancelled'
+    )
+    expect(droppedFinalPut).toBe(true)
+
+    // Close DB and reopen again
+    fx.catalog.close()
+    fx.catalog = CatalogDatabase.open({ catalogPath: fx.catalogPath, journal: fx.journal })
+    const repo3 = fx.catalog.getBackupRepository()
+
+    const callsBeforeReconcile = mockDrive.callLog.length
+    const transport3 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: baseFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo3, dest.id, job1.id),
+      retryDelaysMs: [5, 10]
+    })
+
+    await transport3.writeObjectAtomic(objIdB, payloadB, job1.id)
+    const reconcileCalls = mockDrive.callLog.slice(callsBeforeReconcile)
+    // Reconciled via persisted pregeneratedFileId without initiating a new upload
+    expect(reconcileCalls.some((c) => c.includes('uploadType=resumable'))).toBe(false)
+
+    mockDrive.hiddenFromListIds.clear()
+    const matchingFiles = [...mockDrive.files.values()].filter(
+      (f) => f.name === `${objIdB}.pvchunk`
+    )
+    expect(matchingFiles).toHaveLength(1)
+    expect(sha256Hex(await transport3.readObject(objIdB))).toBe(objIdB)
+  })
+
+  it('reserves rolling bandwidth before each upload attempt including retries, persists budget across DB restart, and restores completed snapshot', async () => {
+    const fx = await createDriveFixture()
+    cleanups.push(() => {
+      try {
+        fx.catalog.close()
+      } catch {
+        // ignore
+      }
+      rmSync(fx.rootDir, { recursive: true, force: true })
+    })
+
+    const mockDrive = new MockGoogleDriveServer()
+    const baseFetch = mockDrive.createFetch()
+    const nowMs = 1_700_000_000_000
+
+    const repo1 = fx.catalog.getBackupRepository()
+    const dest = repo1.createDestination({
+      id: 'dest-drive-budget',
+      name: 'Google Drive Budgeted',
+      kind: 'google_drive',
+      targetPath: null,
+      encryptionMode: 'aes-256-gcm-v1',
+      dailyBudgetBytes: 16 * 1024 * 1024 // minimum 16 MiB destination budget
+    })
+    const job1 = repo1.createJob({
+      id: 'job-budget-1',
+      destinationId: dest.id,
+      snapshotId: 'snap-budget-1',
+      status: 'running'
+    })
+    // Pre-reserve all but 400 KiB of the 16 MiB rolling 24h budget
+    const preReservedBytes = 16 * 1024 * 1024 - 400 * 1024
+    repo1.recordBandwidthReservation({
+      destinationId: dest.id,
+      jobId: job1.id,
+      bytesReserved: preReservedBytes,
+      recordedAtMs: nowMs
+    })
+
+    // Inject a 503 on the first 256 KiB chunk PUT so the retry consumes another 256 KiB (512 KiB > 400 KiB budget)
+    let injected503 = false
+    const retry503Fetch: typeof fetch = async (input, init) => {
+      const urlStr =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const headers = new Headers(init?.headers)
+      const range = headers.get('content-range') ?? ''
+      if (urlStr.includes('/upload/session/') && range.startsWith('bytes 0-') && !injected503) {
+        injected503 = true
+        return new Response('Service Unavailable', { status: 503 })
+      }
+      return baseFetch(input, init)
+    }
+
+    const transport1 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: retry503Fetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo1, dest.id, job1.id),
+      bandwidthMeter: createSqlDriveBandwidthMeter(
+        repo1,
+        dest.id,
+        dest.dailyBudgetBytes,
+        job1.id,
+        () => nowMs
+      ),
+      retryDelaysMs: [5, 10]
+    })
+
+    const objId = 'c'.repeat(64)
+    await expect(
+      transport1.writeObjectAtomic(objId, Buffer.alloc(300 * 1024, 0x66), job1.id)
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupSnapshotError && err.code === 'daily_budget_exhausted'
+    )
+    expect(injected503).toBe(true)
+
+    // Close DB and reopen: preReservedBytes + 256 KiB from the failed attempt survived restart!
+    fx.catalog.close()
+    fx.catalog = CatalogDatabase.open({ catalogPath: fx.catalogPath, journal: fx.journal })
+    const repo2 = fx.catalog.getBackupRepository()
+    expect(repo2.getRolling24hBandwidthBytes(dest.id, nowMs)).toBe(preReservedBytes + 256 * 1024)
+
+    // Remaining budget is 144 KiB; a 200 KiB upload must still be rejected after restart
+    const transport2 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: baseFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo2, dest.id, job1.id),
+      bandwidthMeter: createSqlDriveBandwidthMeter(
+        repo2,
+        dest.id,
+        dest.dailyBudgetBytes,
+        job1.id,
+        () => nowMs
+      ),
+      retryDelaysMs: [5, 10]
+    })
+    await expect(
+      transport2.writeObjectAtomic('d'.repeat(64), Buffer.alloc(200 * 1024, 0x77), job1.id)
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupSnapshotError && err.code === 'daily_budget_exhausted'
+    )
+
+    // Advance past 24h rolling window so earlier reservations expire, leaving full 16 MiB budget
+    const laterMs = nowMs + 86_400_001
+    const transport3 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: baseFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo2, dest.id, job1.id),
+      bandwidthMeter: createSqlDriveBandwidthMeter(
+        repo2,
+        dest.id,
+        dest.dailyBudgetBytes,
+        job1.id,
+        () => laterMs
+      ),
+      retryDelaysMs: [5, 10]
+    })
+
+    const snapId = 'snap-budget-complete'
+    await runBackupWithTransport({
+      jobId: job1.id,
+      snapshotId: snapId,
+      transport: transport3,
+      catalogPath: fx.catalogPath,
+      annotationsDir: fx.annotationsDir,
+      userDataDir: fx.userDataDir,
+      sourceRoots: [fx.sourceDir],
+      vaultRoots: [fx.vaultDir],
+      appVersion: '0.1.0-test',
+      encryptionMode: 'aes-256-gcm-v1',
+      recoverySecret: TEST_SECRET,
+      kdfParams: TEST_KDF_PARAMS
+    })
+
+    expect(repo2.getRolling24hBandwidthBytes(dest.id, laterMs)).toBeGreaterThan(640 * 1024)
+
+    const targetProfileDir = join(fx.rootDir, 'budget-restored-profile')
+    const targetVaultDir = join(fx.rootDir, 'budget-restored-vault')
+    const restored = await restoreRemoteRecoveryPointToIsolatedProfile({
+      transport: transport3,
+      snapshotId: snapId,
+      targetProfileDir,
+      targetVaultDir,
+      activeUserDataDir: fx.userDataDir,
+      activeSourceRoots: [fx.sourceDir],
+      activeVaultRoots: [fx.vaultDir],
+      recoverySecret: TEST_SECRET
+    })
+    expect(restored.snapshotId).toBe(snapId)
+    expect(inspectRestoredProfileStatus(targetProfileDir, targetVaultDir).status).toBe('complete')
+    const restoredFile = join(
+      targetVaultDir,
+      'files',
+      fx.payloadSha256.slice(0, 2),
+      fx.payloadSha256,
+      'archive-photo.jpg'
+    )
+    expect(sha256Hex(readFileSync(restoredFile))).toBe(fx.payloadSha256)
+  })
+
+  it('reconciles a hidden committed encrypted chunk by persisted Drive ID across DB reopen and engine resume with fresh ciphertext', async () => {
+    const fx = await createDriveFixture()
+    cleanups.push(() => {
+      try {
+        fx.catalog.close()
+      } catch {
+        // ignore
+      }
+      rmSync(fx.rootDir, { recursive: true, force: true })
+    })
+
+    const mockDrive = new MockGoogleDriveServer()
+    const baseFetch = mockDrive.createFetch()
+
+    const repo1 = fx.catalog.getBackupRepository()
+    const dest = repo1.createDestination({
+      id: 'dest-engine-reconcile',
+      name: 'Google Drive Engine Reconcile',
+      kind: 'google_drive',
+      targetPath: null,
+      encryptionMode: 'aes-256-gcm-v1',
+      dailyBudgetBytes: 50 * 1024 * 1024
+    })
+    const jobId = 'job-engine-reconcile-1'
+    const snapshotId = 'snap-engine-reconcile-1'
+    repo1.createJob({
+      id: jobId,
+      destinationId: dest.id,
+      snapshotId,
+      status: 'running'
+    })
+
+    const stagingDir = join(fx.userDataDir, '.backup-staging', jobId)
+    const captured = await captureConsistentBackupSnapshot({
+      jobId,
+      snapshotId,
+      catalogPath: fx.catalogPath,
+      annotationsDir: fx.annotationsDir,
+      stagingDir,
+      userDataDir: fx.userDataDir,
+      sourceRoots: [fx.sourceDir],
+      vaultRoots: [fx.vaultDir]
+    })
+
+    // Commit the multi-chunk encrypted vault payload on Drive, hide it from files.list,
+    // and crash before the final PUT response returns
+    let hiddenChunkName: string | null = null
+    const ac = new AbortController()
+    const crashOnFinalPutFetch: typeof fetch = async (input, init) => {
+      const urlStr =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const headers = new Headers(init?.headers)
+      const range = headers.get('content-range') ?? ''
+      const m = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(range)
+      if (
+        urlStr.includes('/upload/session/') &&
+        m &&
+        Number(m[2]) + 1 === Number(m[3]) &&
+        Number(m[3]) > 262144 &&
+        hiddenChunkName === null
+      ) {
+        const res = await baseFetch(input, init)
+        const committed = (await res.json()) as { id: string; name: string }
+        hiddenChunkName = committed.name
+        mockDrive.hiddenFromListIds.add(committed.id)
+        ac.abort()
+        throw new Error('Simulated crash after final encrypted chunk PUT committed')
+      }
+      return baseFetch(input, init)
+    }
+
+    const transport1 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: crashOnFinalPutFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo1, dest.id, jobId),
+      bandwidthMeter: createSqlDriveBandwidthMeter(repo1, dest.id, dest.dailyBudgetBytes, jobId),
+      retryDelaysMs: [5, 10]
+    })
+
+    await expect(
+      resumeBackupWithTransport(
+        {
+          jobId,
+          snapshotId,
+          transport: transport1,
+          catalogPath: fx.catalogPath,
+          annotationsDir: fx.annotationsDir,
+          userDataDir: fx.userDataDir,
+          sourceRoots: [fx.sourceDir],
+          vaultRoots: [fx.vaultDir],
+          appVersion: '0.1.0-test',
+          encryptionMode: 'aes-256-gcm-v1',
+          recoverySecret: TEST_SECRET,
+          kdfParams: TEST_KDF_PARAMS,
+          signal: ac.signal
+        },
+        captured
+      )
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupSnapshotError && err.code === 'backup_cancelled'
+    )
+    expect(hiddenChunkName).not.toBeNull()
+
+    // Close and reopen SQLite while the committed chunk remains hidden from files.list
+    fx.catalog.close()
+    fx.catalog = CatalogDatabase.open({ catalogPath: fx.catalogPath, journal: fx.journal })
+    const repo2 = fx.catalog.getBackupRepository()
+
+    const transport2 = new GoogleDriveTransport({
+      rootFolderId: mockDrive.rootFolderId,
+      getAccessToken: () => 'mock-access-token',
+      fetchFn: baseFetch,
+      apiBaseUrl: 'https://mock-drive.local/drive/v3',
+      uploadBaseUrl: 'https://mock-drive.local/upload/drive/v3',
+      uploadChunkSizeBytes: DRIVE_RESUMABLE_CHUNK_ALIGN_BYTES,
+      resumableThresholdBytes: 0,
+      uploadStateStore: createSqlDriveUploadStateStore(repo2, dest.id, jobId),
+      bandwidthMeter: createSqlDriveBandwidthMeter(repo2, dest.id, dest.dailyBudgetBytes, jobId),
+      retryDelaysMs: [5, 10]
+    })
+
+    // Resume through the engine: Aes256GcmObjectCodec generates fresh nonces (different ciphertext!),
+    // transport reconciles the hidden chunk via persisted Drive ID, and engine validates it via decodeChunk
+    const resumed = await resumeBackupWithTransport(
+      {
+        jobId,
+        snapshotId,
+        transport: transport2,
+        catalogPath: fx.catalogPath,
+        annotationsDir: fx.annotationsDir,
+        userDataDir: fx.userDataDir,
+        sourceRoots: [fx.sourceDir],
+        vaultRoots: [fx.vaultDir],
+        appVersion: '0.1.0-test',
+        encryptionMode: 'aes-256-gcm-v1',
+        recoverySecret: TEST_SECRET,
+        kdfParams: TEST_KDF_PARAMS
+      },
+      captured
+    )
+    expect(resumed.reusedChunkCount).toBeGreaterThanOrEqual(1)
+
+    // Unhide and prove there is exactly ONE Drive file for that chunk
+    mockDrive.hiddenFromListIds.clear()
+    const chunkFiles = [...mockDrive.files.values()].filter((f) => f.name === hiddenChunkName)
+    expect(chunkFiles).toHaveLength(1)
+
+    const targetProfileDir = join(fx.rootDir, 'engine-reconcile-profile')
+    const targetVaultDir = join(fx.rootDir, 'engine-reconcile-vault')
+    const restored = await restoreRemoteRecoveryPointToIsolatedProfile({
+      transport: transport2,
+      snapshotId,
+      targetProfileDir,
+      targetVaultDir,
+      activeUserDataDir: fx.userDataDir,
+      activeSourceRoots: [fx.sourceDir],
+      activeVaultRoots: [fx.vaultDir],
+      recoverySecret: TEST_SECRET
+    })
+    expect(restored.snapshotId).toBe(snapshotId)
+    expect(inspectRestoredProfileStatus(targetProfileDir, targetVaultDir).status).toBe('complete')
+    const restoredFile = join(
+      targetVaultDir,
+      'files',
+      fx.payloadSha256.slice(0, 2),
+      fx.payloadSha256,
+      'archive-photo.jpg'
+    )
+    expect(sha256Hex(readFileSync(restoredFile))).toBe(fx.payloadSha256)
   })
 })

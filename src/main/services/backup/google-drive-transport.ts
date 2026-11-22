@@ -13,6 +13,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import type { BackupRepository } from '../catalog/backup-repository'
 import {
   BACKUP_FORMAT_VERSION,
   BackupRepositoryIdentityV1Schema,
@@ -55,6 +56,83 @@ export interface GoogleDriveResumableSessionStore {
   delete(key: string): void
 }
 
+export interface GoogleDriveDurableUploadState {
+  readonly pregeneratedFileId: string
+  readonly sessionUri: string | null
+  readonly contentSha256: string | null
+  readonly byteSize: number | null
+}
+
+export interface GoogleDriveUploadStateStore {
+  get(resourceKey: string): GoogleDriveDurableUploadState | null
+  set(resourceKey: string, state: GoogleDriveDurableUploadState): void
+  delete(resourceKey: string): void
+}
+
+export interface GoogleDriveBandwidthMeter {
+  reserveUploadBytes(bytes: number): void
+}
+
+export function createSqlDriveUploadStateStore(
+  backupRepo: BackupRepository,
+  destinationId: string,
+  jobId?: string | null
+): GoogleDriveUploadStateStore {
+  return {
+    get(resourceKey: string): GoogleDriveDurableUploadState | null {
+      const row = backupRepo.getDriveUploadState(destinationId, resourceKey)
+      if (!row) return null
+      return {
+        pregeneratedFileId: row.pregeneratedFileId,
+        sessionUri: row.sessionUri,
+        contentSha256: row.contentSha256,
+        byteSize: row.byteSize
+      }
+    },
+    set(resourceKey: string, state: GoogleDriveDurableUploadState): void {
+      backupRepo.upsertDriveUploadState({
+        destinationId,
+        resourceKey,
+        pregeneratedFileId: state.pregeneratedFileId,
+        sessionUri: state.sessionUri,
+        contentSha256: state.contentSha256,
+        byteSize: state.byteSize,
+        jobId: jobId ?? null
+      })
+    },
+    delete(resourceKey: string): void {
+      backupRepo.deleteDriveUploadState(destinationId, resourceKey)
+    }
+  }
+}
+
+export function createSqlDriveBandwidthMeter(
+  backupRepo: BackupRepository,
+  destinationId: string,
+  dailyBudgetBytes: number | null,
+  jobId?: string | null,
+  nowMs?: () => number
+): GoogleDriveBandwidthMeter {
+  return {
+    reserveUploadBytes(bytes: number): void {
+      if (bytes <= 0) return
+      const res = backupRepo.tryReserveRollingBandwidth({
+        destinationId,
+        jobId: jobId ?? null,
+        bytesToReserve: bytes,
+        dailyBudgetBytes,
+        nowMs: nowMs ? nowMs() : undefined
+      })
+      if (!res.allowed) {
+        throw new BackupSnapshotError(
+          'daily_budget_exhausted',
+          `Google Drive rolling 24h bandwidth budget exhausted (${res.usedBytes} / ${String(dailyBudgetBytes)} bytes used; requested ${bytes} bytes)`
+        )
+      }
+    }
+  }
+}
+
 export interface GoogleDriveTransportOptions {
   readonly rootFolderId: string
   readonly getAccessToken: () => Promise<string> | string
@@ -66,6 +144,8 @@ export interface GoogleDriveTransportOptions {
   readonly retryDelaysMs?: readonly number[]
   readonly rateLimiter?: TransferRateLimiter
   readonly sessionStore?: GoogleDriveResumableSessionStore
+  readonly uploadStateStore?: GoogleDriveUploadStateStore
+  readonly bandwidthMeter?: GoogleDriveBandwidthMeter
   readonly hooks?: LocalBackupTestHooks
 }
 
@@ -116,8 +196,11 @@ export class GoogleDriveTransport implements BackupTransport {
   private readonly retryDelaysMs: readonly number[]
   private readonly rateLimiter: TransferRateLimiter
   private readonly sessionStore: GoogleDriveResumableSessionStore
+  private readonly uploadStateStore: GoogleDriveUploadStateStore
+  private readonly bandwidthMeter?: GoogleDriveBandwidthMeter
   private readonly hooks?: LocalBackupTestHooks
   private readonly folderCache = new Map<string, string>()
+  private readonly committedFileIdCache = new Map<string, string>()
   private readonly pregeneratedIdPool: string[] = []
 
   public constructor(options: GoogleDriveTransportOptions) {
@@ -139,6 +222,19 @@ export class GoogleDriveTransport implements BackupTransport {
     this.retryDelaysMs = options.retryDelaysMs ?? [250, 750, 1500]
     this.rateLimiter = options.rateLimiter ?? new TransferRateLimiter({ maxBytesPerSecond: null })
     this.sessionStore = options.sessionStore ?? new Map<string, string>()
+    if (options.uploadStateStore) {
+      this.uploadStateStore = options.uploadStateStore
+    } else {
+      const inMemoryStates = new Map<string, GoogleDriveDurableUploadState>()
+      this.uploadStateStore = {
+        get: (k) => inMemoryStates.get(k) ?? null,
+        set: (k, v) => inMemoryStates.set(k, v),
+        delete: (k) => {
+          inMemoryStates.delete(k)
+        }
+      }
+    }
+    this.bandwidthMeter = options.bandwidthMeter
     this.hooks = options.hooks
   }
 
@@ -376,7 +472,26 @@ export class GoogleDriveTransport implements BackupTransport {
     if (existingId) return existingId
 
     const cacheKey = `${parentId}/${name}`
-    const pregeneratedId = await this.allocateFileId(signal)
+    const resourceKey = `folder:${cacheKey}`
+    const savedState = this.uploadStateStore.get(resourceKey)
+    if (savedState) {
+      const direct = await this.getFileMetadataById(savedState.pregeneratedFileId, signal)
+      if (direct) {
+        this.folderCache.set(cacheKey, direct.id)
+        this.uploadStateStore.delete(resourceKey)
+        return direct.id
+      }
+    }
+
+    const pregeneratedId = savedState?.pregeneratedFileId ?? (await this.allocateFileId(signal))
+    if (!savedState) {
+      this.uploadStateStore.set(resourceKey, {
+        pregeneratedFileId: pregeneratedId,
+        sessionUri: null,
+        contentSha256: null,
+        byteSize: null
+      })
+    }
     for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt++) {
       this.checkCancelled(signal)
       let res: Response | null = null
@@ -402,6 +517,7 @@ export class GoogleDriveTransport implements BackupTransport {
           const direct = await this.getFileMetadataById(pregeneratedId, signal)
           if (direct) {
             this.folderCache.set(cacheKey, direct.id)
+            this.uploadStateStore.delete(resourceKey)
             return direct.id
           }
           throw new BackupSnapshotError(
@@ -415,6 +531,7 @@ export class GoogleDriveTransport implements BackupTransport {
       if (res && res.ok) {
         const created = (await res.json()) as DriveFileMetadata
         this.folderCache.set(cacheKey, created.id)
+        this.uploadStateStore.delete(resourceKey)
         return created.id
       }
 
@@ -422,6 +539,7 @@ export class GoogleDriveTransport implements BackupTransport {
         const direct = await this.getFileMetadataById(pregeneratedId, signal)
         if (direct) {
           this.folderCache.set(cacheKey, direct.id)
+          this.uploadStateStore.delete(resourceKey)
           return direct.id
         }
       }
@@ -436,10 +554,12 @@ export class GoogleDriveTransport implements BackupTransport {
         const direct = await this.getFileMetadataById(pregeneratedId, signal)
         if (direct) {
           this.folderCache.set(cacheKey, direct.id)
+          this.uploadStateStore.delete(resourceKey)
           return direct.id
         }
         const reconciledId = await this.findSingleFolder(parentId, name, signal)
         if (reconciledId) {
+          this.uploadStateStore.delete(resourceKey)
           return reconciledId
         }
         if (attempt === this.retryDelaysMs.length) {
@@ -500,7 +620,33 @@ export class GoogleDriveTransport implements BackupTransport {
   ): Promise<DriveFileMetadata> {
     this.checkCancelled(signal)
 
-    const pregeneratedId = existingFileId ? undefined : await this.allocateFileId(signal)
+    const contentSha256 = createHash('sha256').update(data).digest('hex')
+    const resourceKey = `file:${parentId}/${name}`
+    let pregeneratedId: string | undefined
+    if (!existingFileId) {
+      const savedState = this.uploadStateStore.get(resourceKey)
+      if (
+        savedState &&
+        savedState.contentSha256 === contentSha256 &&
+        savedState.byteSize === data.length
+      ) {
+        const direct = await this.getFileMetadataById(savedState.pregeneratedFileId, signal)
+        if (direct) {
+          this.uploadStateStore.delete(resourceKey)
+          return direct
+        }
+        pregeneratedId = savedState.pregeneratedFileId
+      } else {
+        pregeneratedId = await this.allocateFileId(signal)
+        this.uploadStateStore.set(resourceKey, {
+          pregeneratedFileId: pregeneratedId,
+          sessionUri: null,
+          contentSha256,
+          byteSize: data.length
+        })
+      }
+    }
+
     const boundary = `pv_drive_boundary_${Date.now()}_${Math.random().toString(16).slice(2)}`
     const metadata = existingFileId
       ? { name, mimeType }
@@ -520,6 +666,7 @@ export class GoogleDriveTransport implements BackupTransport {
 
     for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt++) {
       this.checkCancelled(signal)
+      this.bandwidthMeter?.reserveUploadBytes(data.length)
       await this.rateLimiter.consume(data.length, signal)
 
       let res: Response | null = null
@@ -542,12 +689,14 @@ export class GoogleDriveTransport implements BackupTransport {
       }
 
       if (res && res.ok) {
+        this.uploadStateStore.delete(resourceKey)
         return (await res.json()) as DriveFileMetadata
       }
 
       if (res && res.status === 409 && pregeneratedId) {
         const direct = await this.getFileMetadataById(pregeneratedId, signal)
         if (direct) {
+          this.uploadStateStore.delete(resourceKey)
           return direct
         }
       }
@@ -561,6 +710,7 @@ export class GoogleDriveTransport implements BackupTransport {
       if (!existingFileId && pregeneratedId) {
         const direct = await this.getFileMetadataById(pregeneratedId, signal)
         if (direct) {
+          this.uploadStateStore.delete(resourceKey)
           return direct
         }
         const existing = await this.findSingleChild(parentId, name, signal)
@@ -568,6 +718,7 @@ export class GoogleDriveTransport implements BackupTransport {
           if (reconcileOnLostCreate) {
             const matches = await reconcileOnLostCreate(existing)
             if (matches) {
+              this.uploadStateStore.delete(resourceKey)
               return existing
             }
             throw new BackupSnapshotError(
@@ -576,6 +727,7 @@ export class GoogleDriveTransport implements BackupTransport {
             )
           }
           // Safe overwrite via PATCH if caller didn't restrict collision
+          this.uploadStateStore.delete(resourceKey)
           return this.uploadMultipart(parentId, name, data, mimeType, existing.id, signal)
         }
       }
@@ -732,9 +884,39 @@ export class GoogleDriveTransport implements BackupTransport {
     }
 
     const contentSha256 = createHash('sha256').update(data).digest('hex')
+    const resourceKey = `file:${parentId}/${name}`
     const sessionKey = `${parentId}/${name}/${contentSha256}`
-    let sessionUri = this.sessionStore.get(sessionKey)
+    const savedState = this.uploadStateStore.get(resourceKey)
+    const stateMatchesBytes =
+      savedState !== null &&
+      savedState.contentSha256 === contentSha256 &&
+      savedState.byteSize === data.length
+
+    let pregeneratedId: string | undefined = existingFileId
+      ? undefined
+      : stateMatchesBytes
+        ? savedState.pregeneratedFileId
+        : undefined
+    let sessionUri: string | undefined =
+      (stateMatchesBytes ? (savedState.sessionUri ?? undefined) : undefined) ??
+      this.sessionStore.get(sessionKey)
     let offset = 0
+
+    if (!existingFileId && pregeneratedId) {
+      const direct = await this.verifyCommittedFile(
+        parentId,
+        name,
+        data.length,
+        contentSha256,
+        pregeneratedId,
+        signal
+      )
+      if (direct) {
+        this.sessionStore.delete(sessionKey)
+        this.uploadStateStore.delete(resourceKey)
+        return direct
+      }
+    }
 
     if (sessionUri) {
       const status = await this.queryResumableOffset(sessionUri, data.length, signal)
@@ -744,6 +926,7 @@ export class GoogleDriveTransport implements BackupTransport {
       } else if (status.nextOffset >= data.length) {
         if (status.completedFile?.id) {
           this.sessionStore.delete(sessionKey)
+          this.uploadStateStore.delete(resourceKey)
           return status.completedFile
         }
         const verified = await this.verifyCommittedFile(
@@ -751,11 +934,12 @@ export class GoogleDriveTransport implements BackupTransport {
           name,
           data.length,
           contentSha256,
-          existingFileId,
+          existingFileId ?? pregeneratedId,
           signal
         )
         if (verified) {
           this.sessionStore.delete(sessionKey)
+          this.uploadStateStore.delete(resourceKey)
           return verified
         }
         this.sessionStore.delete(sessionKey)
@@ -765,7 +949,16 @@ export class GoogleDriveTransport implements BackupTransport {
       }
     }
 
-    const pregeneratedId = existingFileId ? undefined : await this.allocateFileId(signal)
+    if (!existingFileId && !pregeneratedId) {
+      pregeneratedId = await this.allocateFileId(signal)
+      this.uploadStateStore.set(resourceKey, {
+        pregeneratedFileId: pregeneratedId,
+        sessionUri: null,
+        contentSha256,
+        byteSize: data.length
+      })
+    }
+
     if (!sessionUri) {
       sessionUri = await this.initiateResumableSession(
         parentId,
@@ -777,6 +970,12 @@ export class GoogleDriveTransport implements BackupTransport {
         signal
       )
       this.sessionStore.set(sessionKey, sessionUri)
+      this.uploadStateStore.set(resourceKey, {
+        pregeneratedFileId: pregeneratedId ?? existingFileId ?? '',
+        sessionUri,
+        contentSha256,
+        byteSize: data.length
+      })
       offset = 0
     }
 
@@ -787,6 +986,7 @@ export class GoogleDriveTransport implements BackupTransport {
       this.checkCancelled(signal)
       const endExclusive = Math.min(offset + this.uploadChunkSizeBytes, data.length)
       const slice = data.subarray(offset, endExclusive)
+      this.bandwidthMeter?.reserveUploadBytes(slice.length)
       await this.rateLimiter.consume(slice.length, signal)
 
       let res: Response | null = null
@@ -810,6 +1010,7 @@ export class GoogleDriveTransport implements BackupTransport {
 
       if (res && (res.status === 200 || res.status === 201)) {
         this.sessionStore.delete(sessionKey)
+        this.uploadStateStore.delete(resourceKey)
         return (await res.json()) as DriveFileMetadata
       }
 
@@ -829,6 +1030,7 @@ export class GoogleDriveTransport implements BackupTransport {
           )
           if (verified) {
             this.sessionStore.delete(sessionKey)
+            this.uploadStateStore.delete(resourceKey)
             return verified
           }
           noProgressAttempts += 1
@@ -861,6 +1063,7 @@ export class GoogleDriveTransport implements BackupTransport {
 
       if (res && (res.status === 404 || res.status === 410)) {
         this.sessionStore.delete(sessionKey)
+        this.uploadStateStore.delete(resourceKey)
         throw new BackupSnapshotError(
           'destination_unavailable',
           `Google Drive resumable upload session expired (${res.status}) for "${name}"`
@@ -872,6 +1075,7 @@ export class GoogleDriveTransport implements BackupTransport {
         const recovery = await this.queryResumableOffset(sessionUri, data.length, signal)
         if (!recovery.active) {
           this.sessionStore.delete(sessionKey)
+          this.uploadStateStore.delete(resourceKey)
           throw new BackupSnapshotError(
             'destination_unavailable',
             `Google Drive resumable upload session lost for "${name}"`
@@ -880,6 +1084,7 @@ export class GoogleDriveTransport implements BackupTransport {
         if (recovery.nextOffset >= data.length) {
           if (recovery.completedFile?.id) {
             this.sessionStore.delete(sessionKey)
+            this.uploadStateStore.delete(resourceKey)
             return recovery.completedFile
           }
           const verified = await this.verifyCommittedFile(
@@ -892,6 +1097,7 @@ export class GoogleDriveTransport implements BackupTransport {
           )
           if (verified) {
             this.sessionStore.delete(sessionKey)
+            this.uploadStateStore.delete(resourceKey)
             return verified
           }
         }
@@ -1034,13 +1240,38 @@ export class GoogleDriveTransport implements BackupTransport {
     )
   }
 
+  private async findOrReconcileChild(
+    parentId: string,
+    name: string,
+    signal?: AbortSignal
+  ): Promise<DriveFileMetadata | null> {
+    const listed = await this.findSingleChild(parentId, name, signal)
+    if (listed) {
+      this.committedFileIdCache.set(`${parentId}/${name}`, listed.id)
+      return listed
+    }
+    const resourceKey = `file:${parentId}/${name}`
+    const candidateId =
+      this.committedFileIdCache.get(`${parentId}/${name}`) ??
+      this.uploadStateStore.get(resourceKey)?.pregeneratedFileId
+    if (!candidateId) {
+      return null
+    }
+    const direct = await this.getFileMetadataById(candidateId, signal)
+    if (direct) {
+      this.committedFileIdCache.set(`${parentId}/${name}`, direct.id)
+      return direct
+    }
+    return null
+  }
+
   public async statObject(objectId: string): Promise<{ exists: boolean; byteSize: number }> {
     const lower = objectId.toLowerCase()
     const objectsFolderId = await this.findSingleFolder(this.rootFolderId, BACKUP_OBJECTS_DIR)
     if (!objectsFolderId) return { exists: false, byteSize: 0 }
     const prefixFolderId = await this.findSingleFolder(objectsFolderId, lower.slice(0, 2))
     if (!prefixFolderId) return { exists: false, byteSize: 0 }
-    const file = await this.findSingleChild(prefixFolderId, `${lower}.pvchunk`)
+    const file = await this.findOrReconcileChild(prefixFolderId, `${lower}.pvchunk`)
     if (!file) return { exists: false, byteSize: 0 }
     return { exists: true, byteSize: Number(file.size ?? 0) }
   }
@@ -1059,7 +1290,7 @@ export class GoogleDriveTransport implements BackupTransport {
     if (!prefixFolderId) {
       throw new BackupSnapshotError('destination_corrupt', `Missing backup object ${lower}`)
     }
-    const file = await this.findSingleChild(prefixFolderId, `${lower}.pvchunk`, signal)
+    const file = await this.findOrReconcileChild(prefixFolderId, `${lower}.pvchunk`, signal)
     if (!file) {
       throw new BackupSnapshotError('destination_corrupt', `Missing backup object ${lower}`)
     }
@@ -1084,7 +1315,7 @@ export class GoogleDriveTransport implements BackupTransport {
       options?.signal
     )
     const fileName = `${lower}.pvchunk`
-    const existing = await this.findSingleChild(prefixFolderId, fileName, options?.signal)
+    const existing = await this.findOrReconcileChild(prefixFolderId, fileName, options?.signal)
     if (existing && !options?.replaceIfCorrupt) {
       return
     }

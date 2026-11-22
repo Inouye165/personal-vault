@@ -255,7 +255,7 @@ describe('Stage 8B Sub-slice 1B — Migration 17, BackupRepository & BackupCoord
     const fixture = await createCoordinatorFixture()
     tempDirs.push(fixture.rootDir)
 
-    expect(CURRENT_SCHEMA_VERSION).toBe(18)
+    expect(CURRENT_SCHEMA_VERSION).toBe(19)
     const tables = fixture.catalog
       .getRawDb()
       .prepare(

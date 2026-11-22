@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 18
+export const CURRENT_SCHEMA_VERSION = 19
 
 export interface Migration {
   readonly version: number
@@ -1564,6 +1564,25 @@ export const MIGRATIONS: readonly Migration[] = [
           "ALTER TABLE sources ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'user' CHECK (source_kind IN ('user', 'recovery_manifest'));"
         )
       }
+    }
+  },
+  {
+    version: 19,
+    name: 'backup_drive_upload_state',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS backup_drive_upload_state (
+          destination_id TEXT NOT NULL REFERENCES backup_destinations(id) ON DELETE CASCADE,
+          resource_key TEXT NOT NULL,
+          pregenerated_file_id TEXT NOT NULL,
+          session_uri TEXT,
+          content_sha256 TEXT,
+          byte_size INTEGER,
+          job_id TEXT REFERENCES backup_jobs(id) ON DELETE SET NULL,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (destination_id, resource_key)
+        );
+      `)
     }
   }
 ]
