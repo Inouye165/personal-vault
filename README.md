@@ -16,6 +16,8 @@ Personal Vault guarantees strict source file preservation: discovered originals 
 
 ## Setup & Installation
 
+For the internal Windows installer, see the [Windows user guide](docs/windows-user-guide.md). For performance verification, see the [Stage 8C-2 benchmark](docs/stage-8c2-windows-baseline.md).
+
 Clone or open the repository at `D:\organizer`, then install dependencies:
 
 ```bash
