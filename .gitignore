@@ -23,7 +23,8 @@ dist-stage-7e-foundation-verify/
 dist-stage-7e-persistence-verify/
 dist-stage-7e-ui-verify/
 dist-stage-7f-verify/
-build/
+build/*
+!build/icon.ico
 coverage/
 *.tsbuildinfo
 

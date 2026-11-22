@@ -257,3 +257,52 @@ Licensed under the Apache License, Version 2.0 (`http://www.apache.org/licenses/
 - **Upstream Project**: `https://huggingface.co/BAAI/bge-small-en-v1.5` / `https://huggingface.co/Xenova/bge-small-en-v1.5`
 
 Licensed under the MIT License. Model weights and tokenizer files are not bundled in the application installer and are never fetched automatically; they are optionally provisioned only upon explicit user-initiated offline directory import or explicit download, and verified against exact pinned byte sizes and SHA-256 checksums before use.
+
+---
+
+## 14. React & React DOM (`react`, `react-dom`)
+
+- **Version**: `19.3.1` (`^19.0.0`)
+- **License**: MIT License (`MIT`)
+- **Copyright**: Copyright (c) Meta Platforms, Inc. and affiliates.
+- **Upstream Project**: `https://github.com/facebook/react`
+
+Bundled into the renderer application (`out/renderer`) for UI rendering. Full license text is included in `node_modules/react/LICENSE` and `node_modules/react-dom/LICENSE`.
+
+---
+
+## 15. Lucide React (`lucide-react`)
+
+- **Version**: `1.69.0` (`^1.16.0`)
+- **License**: ISC License (`ISC`)
+- **Copyright**: Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2026 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2026.
+- **Upstream Project**: `https://github.com/lucide-icons/lucide`
+
+Bundled into the renderer application (`out/renderer`) for UI icons. Full license text is included in `node_modules/lucide-react/LICENSE`.
+
+---
+
+## 16. Zod (`zod`)
+
+- **Version**: `4.6.7`
+- **License**: MIT License (`MIT`)
+- **Copyright**: Copyright (c) 2020 Colin McDonnell.
+- **Upstream Project**: `https://github.com/colinhacks/zod`
+
+Bundled into main, preload, and renderer processes for runtime schema validation across IPC and persistence boundaries. Full license text is included in `node_modules/zod/LICENSE`.
+
+---
+
+## 17. Electron Runtime (`electron`) & Chromium / Node.js
+
+- **Version**: `45.2.3`
+- **License**: MIT License (`MIT`) for Electron; BSD-3-Clause and third-party notices for Chromium, V8, and Node.js.
+- **Copyright**: Copyright (c) Electron contributors, GitHub Inc., OpenJS Foundation, and The Chromium Authors.
+
+Packaged desktop distributions include `LICENSE.electron.txt` and `LICENSES.chromium.html` alongside the application executable.
+
+---
+
+## 18. Transitive Runtime Dependencies
+
+All transitive production runtime dependencies resolved in `package-lock.json` (including `onnxruntime-common`, `detect-libc`, `scheduler`, `@img/colour`, `@img/sharp-win32-x64`, `@napi-rs/canvas-win32-x64-msvc`, `@emnapi/runtime`, `@xmldom/xmldom`, `strnum`, `fast-xml-builder`, and supporting utilities) are licensed under permissive MIT, ISC, Apache-2.0, BSD-3-Clause, or CC0-1.0 licenses, except `libvips` (`@img/sharp-libvips-*` / `@img/sharp-win32-x64`, LGPL-3.0-or-later) and `libheif-js` (LGPL-3.0) noted in Sections 4 and 6 above.

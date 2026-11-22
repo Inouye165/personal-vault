@@ -23,12 +23,27 @@
     'node_modules/tesseract.js-core/*.wasm',
     'node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**/*'
   ],
+  extraFiles: ['THIRD_PARTY_NOTICES.md'],
   win: {
+    icon: 'build/icon.ico',
     target: [
       {
         target: 'dir',
         arch: ['x64']
+      },
+      {
+        target: 'nsis',
+        arch: ['x64']
       }
     ]
+  },
+  nsis: {
+    oneClick: false,
+    allowToChangeInstallationDirectory: true,
+    perMachine: false,
+    deleteAppDataOnUninstall: false,
+    createDesktopShortcut: true,
+    createStartMenuShortcut: true,
+    shortcutName: 'Personal Vault'
   }
 }
