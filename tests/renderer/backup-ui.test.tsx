@@ -983,4 +983,151 @@ describe('BackupRestorePanel — Redesigned everyday view', () => {
     expect(restoreSecretInput.value).toBe('')
     await screen.findByText(/Restore complete — 5 files restored/i)
   })
+
+  it('preserves locked-snapshot uncertainty for encrypted Google Drive summaries, avoids disconnected message, and passes targetVaultDir to restore', async () => {
+    const driveDest = {
+      id: 'dest-gdrive-locked',
+      name: 'Google Drive Backup',
+      kind: 'google_drive' as const,
+      targetPath: 'folder-live-smoke',
+      maxBytesPerSecond: null,
+      dailyBudgetBytes: 1024 * 1024 * 1024,
+      encryptionMode: 'aes-256-gcm-v1' as const,
+      repositoryId: 'repo-gdrive-locked',
+      isEnabled: true,
+      lastVerifiedSnapshotId: null,
+      lastVerifiedAtMs: null,
+      createdAtMs: 1000,
+      updatedAtMs: 2000
+    }
+
+    const completedJob = {
+      id: 'job-gdrive-locked',
+      destinationId: 'dest-gdrive-locked',
+      snapshotId: '2026-11-22T05-00-00Z_locked01',
+      repositoryId: 'repo-gdrive-locked',
+      status: 'completed' as const,
+      pauseReason: null,
+      stagingDir: null,
+      verificationScope: 'full_readback' as const,
+      totalObjectCount: 6,
+      completedObjectCount: 6,
+      writtenChunkCount: 6,
+      reusedChunkCount: 0,
+      totalLogicalBytes: 8192,
+      totalStoredBytes: 8400,
+      transferredBytes: 8400,
+      manifestSha256: 'a'.repeat(64),
+      abandonedFromJobId: null,
+      errorCode: null,
+      errorMessage: null,
+      createdAtMs: 1000,
+      startedAtMs: 1000,
+      updatedAtMs: 2000,
+      completedAtMs: 2000
+    }
+
+    // Exact locked summary shape returned by listRemoteRecoveryPoints() for encrypted Drive snapshots
+    const listRecoveryPoints = vi.fn().mockResolvedValue({
+      backupRepoDir: 'google-drive://folder-live-smoke',
+      repositoryId: 'repo-gdrive-locked',
+      recoveryPoints: [
+        {
+          snapshotId: '2026-11-22T05-00-00Z_locked01',
+          isComplete: true,
+          integrityStatus: 'sealed_unverified' as const,
+          reasons: [],
+          repositoryId: 'repo-gdrive-locked',
+          createdAtMs: null,
+          completedAtMs: 2000,
+          verificationScope: 'full_readback' as const,
+          totalObjectCount: 6,
+          totalLogicalBytes: 8192,
+          totalStoredBytes: 8400,
+          vaultName: null,
+          vaultCopyCount: null
+        }
+      ]
+    })
+
+    const restoreRecoveryPoint = vi.fn().mockResolvedValue({
+      restoreJobId: 'restore-locked-1',
+      repositoryId: 'repo-gdrive-locked',
+      snapshotId: '2026-11-22T05-00-00Z_locked01',
+      restoredProfilePath: 'D:\\Restores\\LockedCloud\\profile',
+      restoredVaultPath: 'D:\\Restores\\LockedCloud\\vault',
+      catalogSha256: 'e'.repeat(64),
+      verifiedFileCount: 6,
+      restoredAtMs: 3000
+    })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        listBackupDestinations: vi.fn().mockResolvedValue([driveDest]),
+        listBackupJobs: vi
+          .fn()
+          .mockResolvedValue({ items: [completedJob], total: 1, limit: 25, offset: 0 }),
+        getActiveBackupJob: vi.fn().mockResolvedValue(null),
+        getGoogleDriveAuthStatus: vi.fn().mockResolvedValue({
+          status: 'connected',
+          accountEmail: 'smoke@example.com',
+          accountDisplayName: 'Smoke User',
+          lastError: null
+        }),
+        onBackupProgress: vi.fn().mockReturnValue(() => {}),
+        selectBackupDirectory: vi.fn().mockResolvedValue({ canceled: true, directoryPath: null }),
+        listRecoveryPoints,
+        restoreRecoveryPoint
+      }
+    })
+
+    render(<BackupRestorePanel />)
+
+    // Reachable locked encrypted snapshot must NOT show the misleading disconnected message
+    await screen.findByText(/Backup completed successfully/i)
+    await waitFor(() => {
+      expect(listRecoveryPoints).toHaveBeenCalledWith({
+        destinationKind: 'google_drive',
+        driveFolderId: 'folder-live-smoke'
+      })
+    })
+    expect(screen.getAllByText(/File count unavailable/i).length).toBeGreaterThan(0)
+    expect(
+      screen.queryByText(/Destination is disconnected or cannot be read\./i)
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/Encrypted backup is locked/i)).toBeInTheDocument()
+
+    // Choosing a single empty restore location must NOT claim the locked backup is catalog-only
+    fireEvent.change(screen.getByLabelText(/Restore Location \(empty folder\)/i), {
+      target: { value: 'D:\\Restores\\LockedCloud' }
+    })
+    expect(screen.getByText('D:\\Restores\\LockedCloud\\profile')).toBeInTheDocument()
+    expect(screen.getByText('D:\\Restores\\LockedCloud\\vault')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/No vault subfolder needed \(this backup contains catalog data only\)/i)
+    ).not.toBeInTheDocument()
+
+    // Entering the recovery secret and clicking Restore files must send targetVaultDir so the
+    // authenticated manifest decides whether a vault subfolder is needed
+    const restoreSecretInput = screen.getByTestId(
+      'restore-recovery-secret-input'
+    ) as HTMLInputElement
+    fireEvent.change(restoreSecretInput, { target: { value: 'live-recovery-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: /Restore files/i }))
+
+    await waitFor(() => {
+      expect(restoreRecoveryPoint).toHaveBeenCalledWith({
+        destinationKind: 'google_drive',
+        driveFolderId: 'folder-live-smoke',
+        snapshotId: '2026-11-22T05-00-00Z_locked01',
+        targetProfileDir: 'D:\\Restores\\LockedCloud\\profile',
+        targetVaultDir: 'D:\\Restores\\LockedCloud\\vault',
+        recoverySecret: 'live-recovery-secret'
+      })
+    })
+    expect(restoreSecretInput.value).toBe('')
+    await screen.findByText(/Restore complete — 6 files restored/i)
+  })
 })

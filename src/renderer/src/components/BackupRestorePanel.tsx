@@ -72,16 +72,41 @@ function formatTimestamp(ms: number | null | undefined): string {
   return new Date(ms).toLocaleString()
 }
 
-function formatVaultFileCount(count: number | null | undefined): string {
-  if (count === null || count === undefined) return 'File count unavailable'
-  if (count === 0) return '0 vault files (catalog only)'
-  return `${count} ${count === 1 ? 'vault file' : 'vault files'}`
+type SnapshotVaultState = 'has_vault' | 'catalog_only' | 'unknown'
+
+function isLockedEncryptedSnapshot(rp: BackupRecoveryPointSummary | null): boolean {
+  return (
+    rp !== null &&
+    rp.isComplete &&
+    rp.integrityStatus === 'sealed_unverified' &&
+    rp.vaultCopyCount === null
+  )
 }
 
-function hasInitializedVault(rp: BackupRecoveryPointSummary | null): boolean {
-  return (
-    rp !== null && (rp.vaultName !== null || (rp.vaultCopyCount !== null && rp.vaultCopyCount > 0))
-  )
+function getSnapshotVaultState(rp: BackupRecoveryPointSummary | null): SnapshotVaultState {
+  if (rp === null) return 'unknown'
+  if (rp.vaultName !== null || (rp.vaultCopyCount !== null && rp.vaultCopyCount > 0)) {
+    return 'has_vault'
+  }
+  if (rp.vaultCopyCount === 0 && rp.integrityStatus !== 'sealed_unverified') {
+    return 'catalog_only'
+  }
+  return 'unknown'
+}
+
+function formatVaultFileCount(
+  count: number | null | undefined,
+  options?: { readonly isLockedEncrypted?: boolean; readonly hasVaultName?: boolean }
+): string {
+  if (count === null || count === undefined) {
+    return options?.isLockedEncrypted
+      ? 'File count unavailable (encrypted, locked)'
+      : 'File count unavailable'
+  }
+  if (count === 0) {
+    return options?.hasVaultName ? '0 vault files' : '0 vault files (catalog only)'
+  }
+  return `${count} ${count === 1 ? 'vault file' : 'vault files'}`
 }
 
 function joinChildPath(parentDir: string, childName: string): string {
@@ -883,10 +908,10 @@ export function BackupRestorePanel() {
 
     const chosenRp =
       restoreRecoveryPoints.find((rp) => rp.snapshotId === selectedRestoreSnapshotId) ?? null
+    const chosenVaultState = getSnapshotVaultState(chosenRp)
     const targetProfileDir = joinChildPath(restoreLocationDir, 'profile')
-    const targetVaultDir = hasInitializedVault(chosenRp)
-      ? joinChildPath(restoreLocationDir, 'vault')
-      : null
+    const targetVaultDir =
+      chosenVaultState === 'catalog_only' ? null : joinChildPath(restoreLocationDir, 'vault')
     const secret = restoreRecoverySecret
     setRestoreRecoverySecret('')
     const isDriveTarget = activeRestoreTarget.startsWith('gdrive:')
@@ -1001,11 +1026,12 @@ export function BackupRestorePanel() {
   const selectedRestoreChoice =
     completeRestoreChoices.find((rp) => rp.snapshotId === selectedRestoreSnapshotId) ?? null
 
+  const selectedRestoreVaultState = getSnapshotVaultState(selectedRestoreChoice)
   const preparedProfilePreview = restoreLocationDir.trim()
     ? joinChildPath(restoreLocationDir, 'profile')
     : ''
   const preparedVaultPreview =
-    restoreLocationDir.trim() && hasInitializedVault(selectedRestoreChoice)
+    restoreLocationDir.trim() && selectedRestoreVaultState !== 'catalog_only'
       ? joinChildPath(restoreLocationDir, 'vault')
       : ''
   const restoreSourceNeedsReload =
@@ -1314,7 +1340,12 @@ export function BackupRestorePanel() {
                     <span className="backup-metric-sub">
                       {repoLoadState === 'loading'
                         ? 'Checking backup destination…'
-                        : 'Destination is disconnected or cannot be read.'}
+                        : !isDestinationDisconnected &&
+                            isLockedEncryptedSnapshot(matchedLatestRecoveryPoint)
+                          ? 'Encrypted backup is locked — enter the recovery secret to verify or restore.'
+                          : isDestinationDisconnected
+                            ? 'Destination is disconnected or cannot be read.'
+                            : 'File count is not available for this backup.'}
                     </span>
                   </>
                 ) : (
@@ -1767,7 +1798,12 @@ export function BackupRestorePanel() {
                         </div>
                         <div className="backup-history-meta">
                           {item.destinationName} •{' '}
-                          {rp ? formatVaultFileCount(rp.vaultCopyCount) : 'File count unavailable'}
+                          {rp
+                            ? formatVaultFileCount(rp.vaultCopyCount, {
+                                isLockedEncrypted: isLockedEncryptedSnapshot(rp),
+                                hasVaultName: rp.vaultName !== null
+                              })
+                            : 'File count unavailable'}
                         </div>
                       </div>
 
@@ -2018,7 +2054,10 @@ export function BackupRestorePanel() {
                               {formatTimestamp(rp.completedAtMs ?? rp.createdAtMs)}
                             </div>
                             <div style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
-                              {formatVaultFileCount(rp.vaultCopyCount)}
+                              {formatVaultFileCount(rp.vaultCopyCount, {
+                                isLockedEncrypted: isLockedEncryptedSnapshot(rp),
+                                hasVaultName: rp.vaultName !== null
+                              })}
                               {rp.vaultName ? ` (${rp.vaultName})` : ''} •{' '}
                               {formatBytes(rp.totalLogicalBytes)}
                             </div>
@@ -2076,12 +2115,17 @@ export function BackupRestorePanel() {
                   <div>
                     Profile subfolder: <code>{preparedProfilePreview}</code>
                   </div>
-                  {preparedVaultPreview ? (
+                  {selectedRestoreVaultState === 'catalog_only' ? (
+                    <div>No vault subfolder needed (this backup contains catalog data only).</div>
+                  ) : selectedRestoreVaultState === 'unknown' ? (
+                    <div>
+                      Vault subfolder (created if this encrypted backup includes a vault):{' '}
+                      <code>{preparedVaultPreview}</code>
+                    </div>
+                  ) : (
                     <div>
                       Vault subfolder: <code>{preparedVaultPreview}</code>
                     </div>
-                  ) : (
-                    <div>No vault subfolder needed (this backup contains catalog data only).</div>
                   )}
                 </div>
               )}

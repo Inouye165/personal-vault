@@ -1085,4 +1085,174 @@ describe('Stage 8B Slice 3 (Pass 1): Encrypted Backup Format & Local Round-Trip'
       (err: unknown) => err instanceof BackupRestoreError && err.code === 'chunk_corrupt'
     )
   })
+
+  it('lets the authenticated manifest decide vault creation for locked encrypted summaries (empty vault vs catalog-only) and leaves target empty on missing/wrong secret', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'pv-8b-enc-locked-contract-'))
+    const catalogs: CatalogDatabase[] = []
+    cleanups.push(() => {
+      for (const c of catalogs) {
+        try {
+          c.close()
+        } catch {
+          // ignore
+        }
+      }
+      rmSync(rootDir, { recursive: true, force: true })
+    })
+
+    // Case 1: Encrypted backup of an initialized-but-empty vault (0 vault copies)
+    const emptyVaultUserData = join(rootDir, 'empty-vault-userData')
+    const emptyVaultDir = join(rootDir, 'empty-vault-dir')
+    const emptyVaultRepo = join(rootDir, 'empty-vault-repo')
+    mkdirSync(emptyVaultUserData, { recursive: true })
+    mkdirSync(emptyVaultRepo, { recursive: true })
+
+    const emptyVaultCatalogPath = join(emptyVaultUserData, 'vault-catalog.db')
+    const emptyVaultCatalog = CatalogDatabase.open({ catalogPath: emptyVaultCatalogPath })
+    catalogs.push(emptyVaultCatalog)
+    const emptyIdentity = initializeVault({
+      vaultPath: emptyVaultDir,
+      vaultName: 'Initialized Empty Vault'
+    })
+    emptyVaultCatalog.registerVault({
+      vaultId: emptyIdentity.vaultId,
+      vaultPath: emptyVaultDir,
+      name: emptyIdentity.vaultName,
+      createdAtMs: emptyIdentity.createdAtMs
+    })
+
+    const emptyVaultSnapId = 'snap-enc-empty-vault'
+    await runLocalBackup({
+      jobId: 'job-enc-empty-vault',
+      snapshotId: emptyVaultSnapId,
+      backupRepoDir: emptyVaultRepo,
+      catalogPath: emptyVaultCatalogPath,
+      annotationsDir: join(emptyVaultUserData, 'annotations'),
+      userDataDir: emptyVaultUserData,
+      sourceRoots: [],
+      vaultRoots: [emptyVaultDir],
+      appVersion: '0.1.0-test',
+      encryptionMode: 'aes-256-gcm-v1',
+      recoverySecret: TEST_SECRET,
+      kdfParams: TEST_KDF_PARAMS
+    })
+
+    // Locked summary omits vaultName and vaultCopyCount
+    const emptyVaultListed = listRecoveryPoints(emptyVaultRepo)
+    expect(emptyVaultListed.recoveryPoints).toHaveLength(1)
+    expect(emptyVaultListed.recoveryPoints[0]).toMatchObject({
+      snapshotId: emptyVaultSnapId,
+      isComplete: true,
+      integrityStatus: 'sealed_unverified',
+      vaultName: null,
+      vaultCopyCount: null
+    })
+
+    // Missing or wrong secret leaves restore location completely empty
+    const emptyVaultBadDest = join(rootDir, 'restore-empty-vault-bad')
+    mkdirSync(emptyVaultBadDest, { recursive: true })
+    await expect(
+      restoreRecoveryPointToIsolatedProfile({
+        backupRepoDir: emptyVaultRepo,
+        snapshotId: emptyVaultSnapId,
+        targetProfileDir: join(emptyVaultBadDest, 'profile'),
+        targetVaultDir: join(emptyVaultBadDest, 'vault'),
+        activeUserDataDir: emptyVaultUserData,
+        activeVaultRoots: [emptyVaultDir]
+      })
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupRestoreError && err.code === 'recovery_secret_required'
+    )
+    expect(readdirSync(emptyVaultBadDest)).toEqual([])
+
+    await expect(
+      restoreRecoveryPointToIsolatedProfile({
+        backupRepoDir: emptyVaultRepo,
+        snapshotId: emptyVaultSnapId,
+        targetProfileDir: join(emptyVaultBadDest, 'profile'),
+        targetVaultDir: join(emptyVaultBadDest, 'vault'),
+        activeUserDataDir: emptyVaultUserData,
+        activeVaultRoots: [emptyVaultDir],
+        recoverySecret: WRONG_SECRET
+      })
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof BackupRestoreError && err.code === 'wrong_recovery_secret'
+    )
+    expect(readdirSync(emptyVaultBadDest)).toEqual([])
+
+    // Correct secret with candidate targetVaultDir restores initialized empty vault cleanly
+    const emptyVaultRestoreDest = join(rootDir, 'restore-empty-vault-ok')
+    mkdirSync(emptyVaultRestoreDest, { recursive: true })
+    const emptyVaultTargetProfile = join(emptyVaultRestoreDest, 'profile')
+    const emptyVaultTargetVault = join(emptyVaultRestoreDest, 'vault')
+    const restoredEmptyVault = await restoreRecoveryPointToIsolatedProfile({
+      backupRepoDir: emptyVaultRepo,
+      snapshotId: emptyVaultSnapId,
+      targetProfileDir: emptyVaultTargetProfile,
+      targetVaultDir: emptyVaultTargetVault,
+      activeUserDataDir: emptyVaultUserData,
+      activeVaultRoots: [emptyVaultDir],
+      recoverySecret: TEST_SECRET
+    })
+    expect(restoredEmptyVault.restoredVaultPath).toBe(emptyVaultTargetVault)
+    expect(existsSync(join(emptyVaultTargetVault, 'vault.json'))).toBe(true)
+    expect(
+      inspectRestoredProfileStatus(emptyVaultTargetProfile, emptyVaultTargetVault).status
+    ).toBe('complete')
+
+    // Case 2: Encrypted catalog-only backup (no vault initialized)
+    const catalogOnlyUserData = join(rootDir, 'catalog-only-userData')
+    const catalogOnlyRepo = join(rootDir, 'catalog-only-repo')
+    mkdirSync(catalogOnlyUserData, { recursive: true })
+    mkdirSync(catalogOnlyRepo, { recursive: true })
+
+    const catalogOnlyPath = join(catalogOnlyUserData, 'vault-catalog.db')
+    const catalogOnlyDb = CatalogDatabase.open({ catalogPath: catalogOnlyPath })
+    catalogs.push(catalogOnlyDb)
+
+    const catalogOnlySnapId = 'snap-enc-catalog-only'
+    await runLocalBackup({
+      jobId: 'job-enc-catalog-only',
+      snapshotId: catalogOnlySnapId,
+      backupRepoDir: catalogOnlyRepo,
+      catalogPath: catalogOnlyPath,
+      annotationsDir: join(catalogOnlyUserData, 'annotations'),
+      userDataDir: catalogOnlyUserData,
+      sourceRoots: [],
+      vaultRoots: [],
+      appVersion: '0.1.0-test',
+      encryptionMode: 'aes-256-gcm-v1',
+      recoverySecret: TEST_SECRET,
+      kdfParams: TEST_KDF_PARAMS
+    })
+
+    const catalogOnlyListed = listRecoveryPoints(catalogOnlyRepo)
+    expect(catalogOnlyListed.recoveryPoints).toHaveLength(1)
+    expect(catalogOnlyListed.recoveryPoints[0]).toMatchObject({
+      snapshotId: catalogOnlySnapId,
+      isComplete: true,
+      integrityStatus: 'sealed_unverified',
+      vaultName: null,
+      vaultCopyCount: null
+    })
+
+    // Passing candidate targetVaultDir for a locked summary must NOT create a vault folder
+    // when the authenticated manifest has vault === null
+    const catalogOnlyRestoreDest = join(rootDir, 'restore-catalog-only-ok')
+    mkdirSync(catalogOnlyRestoreDest, { recursive: true })
+    const catalogOnlyTargetProfile = join(catalogOnlyRestoreDest, 'profile')
+    const catalogOnlyCandidateVault = join(catalogOnlyRestoreDest, 'vault')
+    const restoredCatalogOnly = await restoreRecoveryPointToIsolatedProfile({
+      backupRepoDir: catalogOnlyRepo,
+      snapshotId: catalogOnlySnapId,
+      targetProfileDir: catalogOnlyTargetProfile,
+      targetVaultDir: catalogOnlyCandidateVault,
+      activeUserDataDir: catalogOnlyUserData,
+      recoverySecret: TEST_SECRET
+    })
+    expect(restoredCatalogOnly.restoredVaultPath).toBeNull()
+    expect(existsSync(catalogOnlyTargetProfile)).toBe(true)
+    expect(existsSync(catalogOnlyCandidateVault)).toBe(false)
+    expect(inspectRestoredProfileStatus(catalogOnlyTargetProfile, null).status).toBe('complete')
+  })
 })
