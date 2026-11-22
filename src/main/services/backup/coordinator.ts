@@ -23,6 +23,8 @@ import {
   BackupSnapshotCompleteMarkerV1Schema,
   BackupSnapshotManifestV1Schema,
   type BackupChunkRef,
+  type BackupEncryptionKdfParams,
+  type BackupEncryptionMode,
   type BackupSnapshotManifestV1
 } from '../../../shared/validation/backup-schemas'
 import { JournalSecurityError } from '../annotations/journal'
@@ -37,9 +39,12 @@ import type {
 import type { CatalogDatabase } from '../catalog/database'
 import type { VaultImportCoordinator } from '../vault/coordinator'
 import { AsyncCaptureGuard, type BackupCaptureGuard } from './capture-guard'
+import { Aes256GcmObjectCodec } from './codec'
 import { validateBackupDestinationPath } from './containment'
 import {
+  resumeBackupWithTransport,
   resumeLocalBackupFromStaging,
+  runBackupWithTransport,
   runLocalBackup,
   verifyCapturedStagingIntegrity,
   type RunLocalBackupResult
@@ -49,15 +54,34 @@ import {
   BackupSnapshotError,
   classifyBackupDestinationFsError
 } from './errors'
+import {
+  createSqlDriveBandwidthMeter,
+  createSqlDriveUploadStateStore,
+  GoogleDriveTransport
+} from './google-drive-transport'
 import { TransferRateLimiter } from './rate-limiter'
-import { verifyRecoveryPoint } from './restore'
+import { verifyRecoveryPoint, verifyRemoteRecoveryPoint } from './restore'
 import type { CaptureConsistentBackupSnapshotResult } from './snapshot-capture'
 import {
   BACKUP_SNAPSHOT_COMPLETE_FILE,
+  BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE,
   BACKUP_SNAPSHOT_MANIFEST_FILE,
   BACKUP_SNAPSHOTS_DIR,
   type LocalBackupTestHooks
 } from './transport'
+
+export interface BackupCoordinatorGoogleDriveOptions {
+  readonly rootFolderId?: string
+  readonly getAccessToken: () => Promise<string> | string
+  readonly fetchFn?: typeof fetch
+  readonly apiBaseUrl?: string
+  readonly uploadBaseUrl?: string
+  readonly uploadChunkSizeBytes?: number
+  readonly resumableThresholdBytes?: number
+  readonly retryDelaysMs?: readonly number[]
+  readonly nowMs?: () => number
+  readonly isAvailable?: (dest: BackupDestinationRecord) => boolean
+}
 
 export interface BackupCoordinatorOptions {
   readonly catalog: CatalogDatabase
@@ -68,6 +92,10 @@ export interface BackupCoordinatorOptions {
   readonly workerScriptPath?: string
   readonly appPath?: string | null
   readonly isPackaged?: boolean
+  readonly googleDrive?: BackupCoordinatorGoogleDriveOptions
+  readonly recoverySecret?: string
+  readonly getRecoverySecret?: (dest: BackupDestinationRecord) => string | undefined
+  readonly kdfParams?: BackupEncryptionKdfParams
 }
 
 export interface ConfigureBackupDestinationInput {
@@ -76,11 +104,14 @@ export interface ConfigureBackupDestinationInput {
   readonly targetPath: string | null
   readonly maxBytesPerSecond?: number | null
   readonly dailyBudgetBytes?: number | null
+  readonly encryptionMode?: BackupEncryptionMode
 }
 
 export interface StartBackupOptions {
   readonly snapshotId?: string
   readonly hooks?: LocalBackupTestHooks
+  readonly recoverySecret?: string
+  readonly kdfParams?: BackupEncryptionKdfParams
 }
 
 export interface BackupInitializeSummary {
@@ -120,6 +151,10 @@ export class BackupCoordinator {
   private readonly workerScriptPath?: string
   private readonly appPath?: string | null
   private readonly isPackaged?: boolean
+  private readonly googleDrive?: BackupCoordinatorGoogleDriveOptions
+  private readonly recoverySecret?: string
+  private readonly getRecoverySecret?: (dest: BackupDestinationRecord) => string | undefined
+  private readonly kdfParams?: BackupEncryptionKdfParams
   private readonly events = new EventEmitter()
 
   private activeJobId: string | null = null
@@ -137,6 +172,10 @@ export class BackupCoordinator {
     this.workerScriptPath = options.workerScriptPath
     this.appPath = options.appPath
     this.isPackaged = options.isPackaged
+    this.googleDrive = options.googleDrive
+    this.recoverySecret = options.recoverySecret
+    this.getRecoverySecret = options.getRecoverySecret
+    this.kdfParams = options.kdfParams
 
     if (options.vaultImportCoordinator) {
       options.vaultImportCoordinator.setCaptureGuard(this.captureGuard)
@@ -233,12 +272,15 @@ export class BackupCoordinator {
     if (input.kind === 'local_fs' && !input.targetPath) {
       throw new BackupContainmentError('Local backup destination requires a non-empty targetPath')
     }
+    const encryptionMode =
+      input.encryptionMode ?? (input.kind === 'google_drive' ? 'aes-256-gcm-v1' : 'none')
     return this.catalog.getBackupRepository().createDestination({
       name: input.name,
       kind: input.kind,
       targetPath: input.targetPath,
       maxBytesPerSecond: input.maxBytesPerSecond,
-      dailyBudgetBytes: input.dailyBudgetBytes
+      dailyBudgetBytes: input.dailyBudgetBytes,
+      encryptionMode
     })
   }
 
@@ -276,6 +318,10 @@ export class BackupCoordinator {
   }
 
   private checkDestinationAvailable(dest: BackupDestinationRecord): boolean {
+    if (dest.kind === 'google_drive') {
+      if (!this.googleDrive) return false
+      return this.googleDrive.isAvailable ? this.googleDrive.isAvailable(dest) : true
+    }
     if (dest.kind !== 'local_fs' && dest.kind !== 'drive_for_desktop') {
       return false
     }
@@ -323,6 +369,55 @@ export class BackupCoordinator {
       return false
     }
     return existsSync(dirname(dest.targetPath))
+  }
+
+  private resolveRecoverySecret(
+    dest: BackupDestinationRecord,
+    overrideSecret?: string
+  ): string | undefined {
+    return overrideSecret ?? this.getRecoverySecret?.(dest) ?? this.recoverySecret
+  }
+
+  private createGoogleDriveTransport(
+    dest: BackupDestinationRecord,
+    jobId: string,
+    rateLimiter?: TransferRateLimiter,
+    hooks?: LocalBackupTestHooks
+  ): GoogleDriveTransport {
+    if (!this.googleDrive) {
+      throw new BackupSnapshotError(
+        'destination_unavailable',
+        'Google Drive transport is not configured on BackupCoordinator'
+      )
+    }
+    const repo = this.catalog.getBackupRepository()
+    const rootFolderId = dest.targetPath ?? this.googleDrive.rootFolderId
+    if (!rootFolderId) {
+      throw new BackupSnapshotError(
+        'destination_unavailable',
+        'Google Drive destination is missing a root folder ID'
+      )
+    }
+    return new GoogleDriveTransport({
+      rootFolderId,
+      getAccessToken: this.googleDrive.getAccessToken,
+      fetchFn: this.googleDrive.fetchFn,
+      apiBaseUrl: this.googleDrive.apiBaseUrl,
+      uploadBaseUrl: this.googleDrive.uploadBaseUrl,
+      uploadChunkSizeBytes: this.googleDrive.uploadChunkSizeBytes,
+      resumableThresholdBytes: this.googleDrive.resumableThresholdBytes,
+      retryDelaysMs: this.googleDrive.retryDelaysMs,
+      rateLimiter,
+      uploadStateStore: createSqlDriveUploadStateStore(repo, dest.id, jobId),
+      bandwidthMeter: createSqlDriveBandwidthMeter(
+        repo,
+        dest.id,
+        dest.dailyBudgetBytes,
+        jobId,
+        this.googleDrive.nowMs
+      ),
+      hooks
+    })
   }
 
   public async startBackup(
@@ -374,7 +469,7 @@ export class BackupCoordinator {
         startedAtMs: Date.now()
       })
 
-      this.launchBackgroundJob(job, dest, null, options?.hooks)
+      this.launchBackgroundJob(job, dest, null, options)
       return job
     } finally {
       this.isStarting = false
@@ -383,9 +478,10 @@ export class BackupCoordinator {
 
   private async tryReconcileCompletedBackupOnDisk(
     job: BackupJobRecord,
-    dest: BackupDestinationRecord
+    dest: BackupDestinationRecord,
+    options?: StartBackupOptions
   ): Promise<BackupJobRecord | null> {
-    if (!dest.targetPath || job.repositoryId === null) {
+    if (job.repositoryId === null) {
       return null
     }
     if (dest.repositoryId !== null && dest.repositoryId !== job.repositoryId) {
@@ -400,20 +496,95 @@ export class BackupCoordinator {
     let verified
     let completeMarker
     let manifest
-    try {
-      verified = await verifyRecoveryPoint({
-        backupRepoDir: dest.targetPath,
-        snapshotId: job.snapshotId
-      })
-      const snapDir = join(dest.targetPath, BACKUP_SNAPSHOTS_DIR, job.snapshotId)
-      completeMarker = BackupSnapshotCompleteMarkerV1Schema.parse(
-        JSON.parse(readFileSync(join(snapDir, BACKUP_SNAPSHOT_COMPLETE_FILE), 'utf8'))
-      )
-      manifest = BackupSnapshotManifestV1Schema.parse(
-        JSON.parse(readFileSync(join(snapDir, BACKUP_SNAPSHOT_MANIFEST_FILE), 'utf8'))
-      )
-    } catch {
-      return null
+    let pendingRemoteInProgressClear: (() => Promise<void>) | null = null
+    if (dest.kind === 'google_drive') {
+      try {
+        const transport = this.createGoogleDriveTransport(dest, job.id)
+        const recoverySecret = this.resolveRecoverySecret(dest, options?.recoverySecret)
+        const hasInProgress = await transport.hasSnapshotInProgress(job.snapshotId)
+        if (hasInProgress) {
+          const inProgressMarker = await transport.readSnapshotInProgressMarker(job.snapshotId)
+          if (
+            !inProgressMarker ||
+            inProgressMarker.jobId !== job.id ||
+            inProgressMarker.snapshotId !== job.snapshotId ||
+            inProgressMarker.repositoryId !== job.repositoryId
+          ) {
+            return null
+          }
+        }
+        verified = await verifyRemoteRecoveryPoint({
+          transport,
+          snapshotId: job.snapshotId,
+          recoverySecret,
+          allowInProgressMarker: hasInProgress
+        })
+        completeMarker = await transport.readSnapshotCompleteMarker(job.snapshotId)
+        if (!completeMarker) {
+          return null
+        }
+        const repositoryIdentity = await transport.readRepositoryIdentity()
+        if (!repositoryIdentity) {
+          return null
+        }
+        const manifestFileName =
+          repositoryIdentity.encryptionMode === 'aes-256-gcm-v1'
+            ? BACKUP_SNAPSHOT_ENCRYPTED_MANIFEST_FILE
+            : BACKUP_SNAPSHOT_MANIFEST_FILE
+        const storedManifestBytes = await transport.readSnapshotManifest(
+          job.snapshotId,
+          undefined,
+          manifestFileName
+        )
+        if (!storedManifestBytes) {
+          return null
+        }
+        let plaintextManifestBytes = storedManifestBytes
+        if (repositoryIdentity.encryptionMode === 'aes-256-gcm-v1') {
+          const codec = await Aes256GcmObjectCodec.unlockFromRepository({
+            repositoryId: repositoryIdentity.repositoryId,
+            encryption: repositoryIdentity.encryption,
+            recoverySecret,
+            errorDomain: 'restore'
+          })
+          plaintextManifestBytes = await codec.decodeManifest(storedManifestBytes, job.snapshotId)
+        }
+        manifest = BackupSnapshotManifestV1Schema.parse(
+          JSON.parse(plaintextManifestBytes.toString('utf8'))
+        )
+        if (hasInProgress) {
+          pendingRemoteInProgressClear = async () => {
+            await transport.removeSnapshotInProgress(job.snapshotId)
+            await verifyRemoteRecoveryPoint({
+              transport,
+              snapshotId: job.snapshotId,
+              recoverySecret
+            })
+          }
+        }
+      } catch {
+        return null
+      }
+    } else {
+      if (!dest.targetPath) {
+        return null
+      }
+      try {
+        verified = await verifyRecoveryPoint({
+          backupRepoDir: dest.targetPath,
+          snapshotId: job.snapshotId,
+          recoverySecret: this.resolveRecoverySecret(dest, options?.recoverySecret)
+        })
+        const snapDir = join(dest.targetPath, BACKUP_SNAPSHOTS_DIR, job.snapshotId)
+        completeMarker = BackupSnapshotCompleteMarkerV1Schema.parse(
+          JSON.parse(readFileSync(join(snapDir, BACKUP_SNAPSHOT_COMPLETE_FILE), 'utf8'))
+        )
+        manifest = BackupSnapshotManifestV1Schema.parse(
+          JSON.parse(readFileSync(join(snapDir, BACKUP_SNAPSHOT_MANIFEST_FILE), 'utf8'))
+        )
+      } catch {
+        return null
+      }
     }
 
     if (
@@ -442,6 +613,14 @@ export class BackupCoordinator {
     }
     for (const catalogChunk of manifest.catalogFile.chunks) {
       if (!unitSet.has(catalogChunk.objectId.toLowerCase())) {
+        return null
+      }
+    }
+
+    if (pendingRemoteInProgressClear) {
+      try {
+        await pendingRemoteInProgressClear()
+      } catch {
         return null
       }
     }
@@ -506,7 +685,7 @@ export class BackupCoordinator {
     }
 
     if (job.status === 'paused' || job.status === 'interrupted') {
-      const reconciled = await this.tryReconcileCompletedBackupOnDisk(job, dest)
+      const reconciled = await this.tryReconcileCompletedBackupOnDisk(job, dest, options)
       if (reconciled) {
         return reconciled
       }
@@ -524,7 +703,7 @@ export class BackupCoordinator {
           errorCode: null,
           errorMessage: null
         })
-        this.launchBackgroundJob(updated, dest, null, options?.hooks)
+        this.launchBackgroundJob(updated, dest, null, options)
         return updated
       }
 
@@ -546,7 +725,7 @@ export class BackupCoordinator {
           errorCode: null,
           errorMessage: null
         })
-        this.launchBackgroundJob(runningJob, dest, verifiedStaging, options?.hooks)
+        this.launchBackgroundJob(runningJob, dest, verifiedStaging, options)
         return runningJob
       } catch (err) {
         // T5c: captured inputs missing, corrupt, or non-reproducible -> abandon & recapture under new snapshotId
@@ -573,7 +752,7 @@ export class BackupCoordinator {
           abandonedFromJobId: job.id,
           startedAtMs: Date.now()
         })
-        this.launchBackgroundJob(replacement, dest, null, options?.hooks)
+        this.launchBackgroundJob(replacement, dest, null, options)
         return replacement
       }
     } finally {
@@ -585,7 +764,7 @@ export class BackupCoordinator {
     job: BackupJobRecord,
     dest: BackupDestinationRecord,
     verifiedStaging: CaptureConsistentBackupSnapshotResult | null,
-    hooks?: LocalBackupTestHooks
+    options?: StartBackupOptions
   ): void {
     this.activeJobId = job.id
     this.abortController = new AbortController()
@@ -597,7 +776,7 @@ export class BackupCoordinator {
       dest,
       verifiedStaging,
       this.abortController.signal,
-      hooks
+      options
     )
   }
 
@@ -606,7 +785,7 @@ export class BackupCoordinator {
     dest: BackupDestinationRecord,
     verifiedStaging: CaptureConsistentBackupSnapshotResult | null,
     signal: AbortSignal,
-    hooks?: LocalBackupTestHooks
+    options?: StartBackupOptions
   ): Promise<BackupJobRecord | null> {
     const repo = this.catalog.getBackupRepository()
     const { sourceRoots, vaultRoots } = this.getSourceAndVaultRoots()
@@ -620,10 +799,12 @@ export class BackupCoordinator {
 
     let result: RunLocalBackupResult
     try {
-      const commonOptions = {
+      const recoverySecret = this.resolveRecoverySecret(dest, options?.recoverySecret)
+      const kdfParams = options?.kdfParams ?? this.kdfParams
+      const hooks = options?.hooks
+      const sharedOptions = {
         jobId: initialJob.id,
         snapshotId: initialJob.snapshotId,
-        backupRepoDir: dest.targetPath!,
         catalogPath: this.catalog.getCatalogPath(),
         annotationsDir: join(this.userDataDir, 'annotations'),
         userDataDir: this.userDataDir,
@@ -631,6 +812,9 @@ export class BackupCoordinator {
         vaultRoots,
         appVersion: this.appVersion,
         rateLimiter,
+        encryptionMode: dest.encryptionMode,
+        recoverySecret,
+        kdfParams,
         signal,
         workerScriptPath: this.workerScriptPath,
         appPath: this.appPath,
@@ -677,12 +861,29 @@ export class BackupCoordinator {
         }
       }
 
-      if (verifiedStaging) {
-        result = await resumeLocalBackupFromStaging(commonOptions, verifiedStaging, hooks)
+      if (dest.kind === 'google_drive') {
+        const transport = this.createGoogleDriveTransport(dest, initialJob.id, rateLimiter, hooks)
+        if (verifiedStaging) {
+          result = await resumeBackupWithTransport({ ...sharedOptions, transport }, verifiedStaging)
+        } else {
+          const runningJob = repo.updateJobState(initialJob.id, { status: 'running' })
+          this.emitProgress(runningJob)
+          result = await this.captureGuard.runExclusive(() =>
+            runBackupWithTransport({ ...sharedOptions, transport }, hooks)
+          )
+        }
       } else {
-        const runningJob = repo.updateJobState(initialJob.id, { status: 'running' })
-        this.emitProgress(runningJob)
-        result = await this.captureGuard.runExclusive(() => runLocalBackup(commonOptions, hooks))
+        const localOptions = {
+          ...sharedOptions,
+          backupRepoDir: dest.targetPath!
+        }
+        if (verifiedStaging) {
+          result = await resumeLocalBackupFromStaging(localOptions, verifiedStaging, hooks)
+        } else {
+          const runningJob = repo.updateJobState(initialJob.id, { status: 'running' })
+          this.emitProgress(runningJob)
+          result = await this.captureGuard.runExclusive(() => runLocalBackup(localOptions, hooks))
+        }
       }
     } catch (err) {
       const intent = this.abortIntent
@@ -722,6 +923,17 @@ export class BackupCoordinator {
           status: 'paused',
           pauseReason: 'destination_unavailable',
           errorCode: 'destination_unavailable',
+          errorMessage: message
+        })
+        this.emitProgress(paused)
+        return paused
+      }
+
+      if (classifiedCode === 'daily_budget_exhausted') {
+        const paused = repo.updateJobState(initialJob.id, {
+          status: 'paused',
+          pauseReason: 'daily_budget_exhausted',
+          errorCode: 'daily_budget_exhausted',
           errorMessage: message
         })
         this.emitProgress(paused)

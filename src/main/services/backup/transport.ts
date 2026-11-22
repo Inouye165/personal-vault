@@ -84,6 +84,10 @@ export interface BackupTransport {
     fileName?: string
   ): Promise<Buffer | null>
   hasSnapshotInProgress?(snapshotId: string, signal?: AbortSignal): Promise<boolean>
+  readSnapshotInProgressMarker?(
+    snapshotId: string,
+    signal?: AbortSignal
+  ): Promise<BackupSnapshotInProgressMarkerV1 | null>
   readSnapshotCompleteMarker?(
     snapshotId: string,
     signal?: AbortSignal

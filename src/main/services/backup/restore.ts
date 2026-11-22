@@ -113,6 +113,7 @@ export interface VerifyRemoteRecoveryPointOptions {
   readonly snapshotId: string
   readonly codec?: BackupObjectCodec
   readonly recoverySecret?: string
+  readonly allowInProgressMarker?: boolean
   readonly signal?: AbortSignal
 }
 
@@ -1519,7 +1520,11 @@ export function listRecoveryPoints(backupRepoDir: string): BackupListRecoveryPoi
 export async function inspectRemoteRecoveryPointStatus(
   transport: BackupTransport,
   snapshotId: string,
-  options?: { readonly manifest?: BackupSnapshotManifestV1; readonly signal?: AbortSignal }
+  options?: {
+    readonly manifest?: BackupSnapshotManifestV1
+    readonly allowInProgressMarker?: boolean
+    readonly signal?: AbortSignal
+  }
 ): Promise<RecoveryPointInspectionResult> {
   const reasons: RecoveryPointIncompleteReason[] = []
   let repoIdentity: BackupRepositoryIdentityV1 | null = null
@@ -1535,7 +1540,7 @@ export async function inspectRemoteRecoveryPointStatus(
   const inProgress = transport.hasSnapshotInProgress
     ? await transport.hasSnapshotInProgress(snapshotId, options?.signal)
     : false
-  if (inProgress) {
+  if (inProgress && !options?.allowInProgressMarker) {
     reasons.push('in_progress_marker_present')
   }
 
@@ -1711,6 +1716,7 @@ async function loadAndValidateRemoteRecoveryPointMetadata(
   options?: {
     readonly codec?: BackupObjectCodec
     readonly recoverySecret?: string
+    readonly allowInProgressMarker?: boolean
     readonly signal?: AbortSignal
   }
 ): Promise<LoadedRecoveryPoint> {
@@ -1747,7 +1753,7 @@ async function loadAndValidateRemoteRecoveryPointMetadata(
   const inProgress = transport.hasSnapshotInProgress
     ? await transport.hasSnapshotInProgress(snapshotId, options?.signal)
     : false
-  if (inProgress) {
+  if (inProgress && !options?.allowInProgressMarker) {
     throw new BackupRestoreError(
       'recovery_point_incomplete',
       `Remote recovery point "${snapshotId}" is incomplete (.pv-snapshot-in-progress.json present)`
@@ -1834,6 +1840,7 @@ async function loadAndValidateRemoteRecoveryPointMetadata(
 
   const status = await inspectRemoteRecoveryPointStatus(transport, snapshotId, {
     manifest,
+    allowInProgressMarker: options?.allowInProgressMarker,
     signal: options?.signal
   })
   if (
@@ -1858,7 +1865,12 @@ export async function verifyRemoteRecoveryPoint(
   const loaded = await loadAndValidateRemoteRecoveryPointMetadata(
     options.transport,
     options.snapshotId,
-    { codec: options.codec, recoverySecret: options.recoverySecret, signal: options.signal }
+    {
+      codec: options.codec,
+      recoverySecret: options.recoverySecret,
+      allowInProgressMarker: options.allowInProgressMarker,
+      signal: options.signal
+    }
   )
   return verifyRecoveryPointFromLoaded(
     createTransportReadSource(options.transport),

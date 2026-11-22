@@ -1329,24 +1329,17 @@ export class GoogleDriveTransport implements BackupTransport {
     )
   }
 
-  public async writeSnapshotInProgress(
-    snapshotId: string,
+  private computeSnapshotOwnerHash(marker: BackupSnapshotInProgressMarkerV1): string {
+    return createHash('sha256')
+      .update(`${marker.jobId}:${marker.snapshotId}:${marker.repositoryId}`)
+      .digest('hex')
+  }
+
+  private async uploadInProgressMarkerFile(
+    snapFolderId: string,
     marker: BackupSnapshotInProgressMarkerV1,
     signal?: AbortSignal
   ): Promise<void> {
-    const snapshotsFolderId = await this.ensureFolder(
-      this.rootFolderId,
-      BACKUP_SNAPSHOTS_DIR,
-      signal
-    )
-    const existingSnapFolder = await this.findSingleFolder(snapshotsFolderId, snapshotId, signal)
-    if (existingSnapFolder) {
-      throw new BackupSnapshotError(
-        'destination_collision',
-        `Snapshot directory "${snapshotId}" already exists on Google Drive`
-      )
-    }
-    const snapFolderId = await this.ensureFolder(snapshotsFolderId, snapshotId, signal)
     const bytes = Buffer.from(JSON.stringify(marker, null, 2), 'utf8')
     await this.uploadFile(
       snapFolderId,
@@ -1368,6 +1361,35 @@ export class GoogleDriveTransport implements BackupTransport {
         )
       }
     )
+  }
+
+  public async writeSnapshotInProgress(
+    snapshotId: string,
+    marker: BackupSnapshotInProgressMarkerV1,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const snapshotsFolderId = await this.ensureFolder(
+      this.rootFolderId,
+      BACKUP_SNAPSHOTS_DIR,
+      signal
+    )
+    const existingSnapFolder = await this.findSingleFolder(snapshotsFolderId, snapshotId, signal)
+    if (existingSnapFolder) {
+      throw new BackupSnapshotError(
+        'destination_collision',
+        `Snapshot directory "${snapshotId}" already exists on Google Drive`
+      )
+    }
+    const snapFolderId = await this.ensureFolder(snapshotsFolderId, snapshotId, signal)
+    const ownerKey = `snapshot_owner:${snapshotsFolderId}/${snapshotId}`
+    this.uploadStateStore.set(ownerKey, {
+      pregeneratedFileId: snapFolderId,
+      sessionUri: null,
+      contentSha256: this.computeSnapshotOwnerHash(marker),
+      byteSize: null
+    })
+    await this.uploadInProgressMarkerFile(snapFolderId, marker, signal)
+    this.uploadStateStore.delete(ownerKey)
   }
 
   public async claimOrResumeSnapshotInProgress(
@@ -1402,6 +1424,20 @@ export class GoogleDriveTransport implements BackupTransport {
       signal
     )
     if (!markerFile) {
+      const ownerKey = `snapshot_owner:${snapshotsFolderId}/${snapshotId}`
+      const ownerState = this.uploadStateStore.get(ownerKey)
+      const expectedOwnerHash = this.computeSnapshotOwnerHash(marker)
+      const children = await this.listChildren(snapFolderId, undefined, signal)
+      if (
+        ownerState !== null &&
+        ownerState.pregeneratedFileId === snapFolderId &&
+        ownerState.contentSha256 === expectedOwnerHash &&
+        children.length === 0
+      ) {
+        await this.uploadInProgressMarkerFile(snapFolderId, marker, signal)
+        this.uploadStateStore.delete(ownerKey)
+        return
+      }
       throw new BackupSnapshotError(
         'destination_collision',
         `Cannot resume snapshot "${snapshotId}": missing .pv-snapshot-in-progress.json`
@@ -1427,6 +1463,28 @@ export class GoogleDriveTransport implements BackupTransport {
         `Cannot resume snapshot "${snapshotId}": snapshot directory is owned by another job/repository`
       )
     }
+  }
+
+  public async readSnapshotInProgressMarker(
+    snapshotId: string,
+    signal?: AbortSignal
+  ): Promise<BackupSnapshotInProgressMarkerV1 | null> {
+    const snapshotsFolderId = await this.findSingleFolder(
+      this.rootFolderId,
+      BACKUP_SNAPSHOTS_DIR,
+      signal
+    )
+    if (!snapshotsFolderId) return null
+    const snapFolderId = await this.findSingleFolder(snapshotsFolderId, snapshotId, signal)
+    if (!snapFolderId) return null
+    const markerFile = await this.findSingleChild(
+      snapFolderId,
+      BACKUP_SNAPSHOT_IN_PROGRESS_FILE,
+      signal
+    )
+    if (!markerFile) return null
+    const bytes = await this.downloadFileBytes(markerFile.id, signal)
+    return BackupSnapshotInProgressMarkerV1Schema.parse(JSON.parse(bytes.toString('utf8')))
   }
 
   public async removeSnapshotInProgress(snapshotId: string): Promise<void> {
