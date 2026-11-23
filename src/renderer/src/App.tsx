@@ -11,6 +11,7 @@ import { VaultImportPanel } from './components/VaultImportPanel'
 import { BackupRestorePanel } from './components/BackupRestorePanel'
 import { useScanJobs } from './hooks/useScanJobs'
 import { useMediaQuery } from './hooks/useMediaQuery'
+import { useTheme } from './hooks/useTheme'
 import { useUnifiedSearch } from './hooks/useUnifiedSearch'
 import { useVaultApi } from './hooks/useVaultApi'
 import type { NavigationTab } from '../../shared/validation/ipc-schemas'
@@ -23,6 +24,7 @@ export function App() {
   const mobileNavTriggerRef = useRef<HTMLButtonElement>(null)
   const headerSearchInputRef = useRef<HTMLInputElement>(null)
   const { state, notifyTab, refreshStatus } = useVaultApi()
+  const { theme, setTheme } = useTheme()
   const scanJobs = useScanJobs()
   const isAllSurfaceActive =
     state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && currentTab === 'all'
@@ -100,6 +102,8 @@ export function App() {
           isNavOpen={isMobileNavOpen}
           onToggleNav={() => setIsMobileNavOpen((prev) => !prev)}
           navToggleRef={mobileNavTriggerRef}
+          theme={theme}
+          onSelectTheme={setTheme}
         />
         <div className="content-area">
           {state.phase === 'loading' && (

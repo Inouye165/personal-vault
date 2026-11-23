@@ -256,8 +256,8 @@ export function ExportPanel({ selectedLocationIds }: ExportPanelProps) {
               <li
                 key={job.id}
                 style={{
-                  border: '1px solid var(--border-subtle, #333)',
-                  borderRadius: 6,
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-md)',
                   padding: 10
                 }}
               >

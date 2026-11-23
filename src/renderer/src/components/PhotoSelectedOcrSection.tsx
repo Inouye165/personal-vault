@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { CopyTextButton } from './CopyTextButton'
 import {
   isSupportedOcrImageExtension,
   type DocumentOcrPreviewPayloadDto,
@@ -264,7 +265,10 @@ export function PhotoSelectedOcrSection({
       )}
       {ocrPreview && ocrPreview.extractedText && ocrPreview.extractedText.length > 0 && (
         <>
-          <h5>OCR text (machine-recognized)</h5>
+          <div className="extracted-text-header-row">
+            <h5>OCR text (machine-recognized)</h5>
+            <CopyTextButton text={ocrPreview.extractedText} testId="copy-extracted-text-btn" />
+          </div>
           <pre className="documents-extracted-text" data-testid="photo-ocr-text-preview">
             {ocrPreview.extractedText}
           </pre>
