@@ -8,6 +8,7 @@
 import { statSync } from 'node:fs'
 import { extname } from 'node:path'
 import type { CatalogDatabase } from '../catalog/database'
+import { resolveReadableFileLocation } from '../backup/recovered-file-resolver'
 import type { PhotoMetadataJobItemRecord, PhotoMetadataJobRecord } from '../catalog/types'
 import type { ThumbnailCoordinator } from '../thumbnails/coordinator'
 import { computeExtensionFormatMismatch, normalizeRecordedExtension } from './normalize'
@@ -473,19 +474,92 @@ export class PhotoMetadataCoordinator {
       item.recordedExtension || loc.extension || extname(item.originalPath)
     )
 
+    const resolved = resolveReadableFileLocation(this.catalog, item.fileLocationId, {
+      verifyPayloadHash: false
+    })
+    if (!resolved.ok) {
+      if (resolved.errorCode === 'VAULT_UNAVAILABLE') {
+        this.catalog.recordPhotoMetadataJobItemTransientFailure({
+          jobId,
+          itemId: item.id,
+          errorCode: resolved.errorCode,
+          errorMessage: resolved.errorMessage
+        })
+        return
+      }
+      const contentRevision = `metarev:${item.discoveryObservationId}:${item.expectedByteSize}:${item.expectedMtimeMs ?? 'null'}:${loc.activeHash ?? 'unhashed'}`
+      try {
+        this.catalog.completePhotoMetadataJobItem({
+          jobId,
+          itemId: item.id,
+          reused: false,
+          metadata: {
+            fileLocationId: loc.id,
+            discoveryObservationId: item.discoveryObservationId,
+            parserRecipeVersion: job.parserRecipeVersion,
+            extractionStatus: 'failed',
+            contentSha256: null,
+            contentRevision,
+            observedByteSize: item.expectedByteSize,
+            observedMtimeMs: item.expectedMtimeMs,
+            recordedExtension: recordedExt,
+            detectedFormat: null,
+            extensionFormatMismatch: false,
+            encodedWidthPx: null,
+            encodedHeightPx: null,
+            exifOrientation: null,
+            displayWidthPx: null,
+            displayHeightPx: null,
+            captureDateSourceTag: null,
+            rawCaptureDateText: null,
+            captureSubseconds: null,
+            captureOffsetMinutes: null,
+            captureOffsetText: null,
+            captureTimezoneStatus: 'unknown',
+            captureCalendarDate: null,
+            captureLocalIso: null,
+            captureUtcEpochMs: null,
+            captureDateParseError: null,
+            captureDateConflict: null,
+            cameraMakeRaw: null,
+            cameraModelRaw: null,
+            cameraDisplay: null,
+            cameraNormalized: null,
+            lensMakeRaw: null,
+            lensModelRaw: null,
+            lensDisplay: null,
+            lensNormalized: null,
+            rawMetadataJson: null,
+            errorCode: resolved.errorCode,
+            errorMessage: resolved.errorMessage
+          }
+        })
+      } catch (err) {
+        this.catalog.recordPhotoMetadataJobItemTransientFailure({
+          jobId,
+          itemId: item.id,
+          errorCode: 'COMMIT_REJECTED',
+          errorMessage: err instanceof Error ? err.message : String(err)
+        })
+      }
+      return
+    }
+
     // 1. Content-addressed reuse check: ONLY if a previous verified extraction exists with the same byte size & recipe.
     // Even if a catalog hash exists, we ALWAYS compute live SHA-256 off-main in the worker before reusing!
     const mayReuse = this.catalog.hasReusablePhotoTechnicalMetadataCandidate({
-      observedByteSize: item.expectedByteSize,
+      observedByteSize: resolved.expectedByteSize,
       parserRecipeVersion: job.parserRecipeVersion
     })
 
     if (mayReuse) {
       const liveVerified = await this.verifySourceWithBackpressure(
         {
-          sourcePath: item.originalPath,
-          expectedByteSize: item.expectedByteSize,
-          expectedMtimeMs: item.expectedMtimeMs
+          sourcePath: resolved.filePath,
+          expectedByteSize: resolved.expectedByteSize,
+          expectedMtimeMs: resolved.expectedMtimeMs,
+          expectedSha256: resolved.expectedSha256,
+          approvedRootsOverride: resolved.approvedRoots
         },
         signal
       )
@@ -523,7 +597,7 @@ export class PhotoMetadataCoordinator {
       ) {
         if (
           !this.verifyPreCommitLiveStat(
-            item.originalPath,
+            resolved.filePath,
             liveVerified.observedByteSize,
             liveVerified.observedMtimeMs
           )
@@ -537,7 +611,9 @@ export class PhotoMetadataCoordinator {
           return
         }
 
-        const contentRevision = `metarev:${item.discoveryObservationId}:${liveVerified.observedByteSize}:${liveVerified.observedMtimeMs}:${liveVerified.sha256}`
+        const observedMtimeForCommit =
+          resolved.mode === 'vault_copy' ? item.expectedMtimeMs : liveVerified.observedMtimeMs
+        const contentRevision = `metarev:${item.discoveryObservationId}:${liveVerified.observedByteSize}:${observedMtimeForCommit}:${liveVerified.sha256}`
         const mismatch = computeExtensionFormatMismatch(recordedExt, reusable.detectedFormat)
 
         try {
@@ -553,7 +629,7 @@ export class PhotoMetadataCoordinator {
               contentSha256: liveVerified.sha256,
               contentRevision,
               observedByteSize: liveVerified.observedByteSize,
-              observedMtimeMs: liveVerified.observedMtimeMs,
+              observedMtimeMs: observedMtimeForCommit,
               recordedExtension: recordedExt,
               detectedFormat: reusable.detectedFormat,
               extensionFormatMismatch: mismatch,
@@ -602,12 +678,13 @@ export class PhotoMetadataCoordinator {
     const workerRes = await this.extractMetadataWithBackpressure(
       {
         locationId: item.fileLocationId,
-        sourcePath: item.originalPath,
+        sourcePath: resolved.filePath,
         recordedExtension: recordedExt,
-        expectedByteSize: item.expectedByteSize,
-        expectedMtimeMs: item.expectedMtimeMs,
-        expectedSha256: loc.activeHash,
-        priority: 'low'
+        expectedByteSize: resolved.expectedByteSize,
+        expectedMtimeMs: resolved.expectedMtimeMs,
+        expectedSha256: resolved.expectedSha256 ?? loc.activeHash,
+        priority: 'low',
+        approvedRootsOverride: resolved.approvedRoots
       },
       signal
     )
@@ -627,7 +704,11 @@ export class PhotoMetadataCoordinator {
 
       if (
         (workerRes.code === 'TIMEOUT' || workerRes.code === 'WORKER_CRASHED') &&
-        this.verifyPreCommitLiveStat(item.originalPath, item.expectedByteSize, item.expectedMtimeMs)
+        this.verifyPreCommitLiveStat(
+          resolved.filePath,
+          resolved.expectedByteSize,
+          resolved.expectedMtimeMs
+        )
       ) {
         const contentRevision = `metarev:${item.discoveryObservationId}:${item.expectedByteSize}:${item.expectedMtimeMs ?? 'null'}:${loc.activeHash ?? 'unhashed'}`
         try {
@@ -713,9 +794,9 @@ export class PhotoMetadataCoordinator {
       return
     }
 
-    const checkSize = extracted.observedByteSize ?? item.expectedByteSize
-    const checkMtime = extracted.observedMtimeMs ?? item.expectedMtimeMs
-    if (!this.verifyPreCommitLiveStat(item.originalPath, checkSize, checkMtime)) {
+    const checkSize = extracted.observedByteSize ?? resolved.expectedByteSize
+    const checkMtime = extracted.observedMtimeMs ?? resolved.expectedMtimeMs
+    if (!this.verifyPreCommitLiveStat(resolved.filePath, checkSize, checkMtime)) {
       this.catalog.recordPhotoMetadataJobItemTransientFailure({
         jobId,
         itemId: item.id,
@@ -725,7 +806,9 @@ export class PhotoMetadataCoordinator {
       return
     }
 
-    const contentRevision = `metarev:${item.discoveryObservationId}:${checkSize}:${checkMtime ?? 'null'}:${extracted.contentSha256 ?? 'unhashed'}`
+    const observedMtimeForCommit =
+      resolved.mode === 'vault_copy' ? item.expectedMtimeMs : extracted.observedMtimeMs
+    const contentRevision = `metarev:${item.discoveryObservationId}:${checkSize}:${observedMtimeForCommit ?? 'null'}:${extracted.contentSha256 ?? 'unhashed'}`
 
     try {
       this.catalog.completePhotoMetadataJobItem({
@@ -740,7 +823,7 @@ export class PhotoMetadataCoordinator {
           contentSha256: extracted.contentSha256,
           contentRevision,
           observedByteSize: extracted.observedByteSize,
-          observedMtimeMs: extracted.observedMtimeMs,
+          observedMtimeMs: observedMtimeForCommit,
           recordedExtension: extracted.recordedExtension,
           detectedFormat: extracted.detectedFormat,
           extensionFormatMismatch: extracted.extensionFormatMismatch,
@@ -788,6 +871,8 @@ export class PhotoMetadataCoordinator {
       sourcePath: string
       expectedByteSize: number
       expectedMtimeMs: number | null
+      expectedSha256?: string | null
+      approvedRootsOverride?: readonly string[]
     },
     signal: AbortSignal
   ): Promise<import('../thumbnails/types').MetadataSourceVerifyResult> {

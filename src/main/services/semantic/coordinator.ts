@@ -1,5 +1,6 @@
 import { statSync } from 'node:fs'
 import type { CatalogDatabase } from '../catalog/database'
+import { resolveReadableFileLocation } from '../backup/recovered-file-resolver'
 import type { SemanticIndexJobRecord } from '../catalog/types'
 import type { ThumbnailCoordinator } from '../thumbnails/coordinator'
 import type { SemanticModelManager } from './model-manager'
@@ -521,6 +522,20 @@ export class SemanticIndexCoordinator {
       return
     }
 
+    const resolved = resolveReadableFileLocation(this.catalog, item.fileLocationId, {
+      verifyPayloadHash: Boolean(this.embedSourceTask)
+    })
+    if (!resolved.ok) {
+      this.catalog.recordSemanticIndexJobItemOutcome({
+        jobId,
+        itemId: item.id,
+        status: 'failed',
+        errorCode: resolved.errorCode,
+        errorMessage: resolved.errorMessage
+      })
+      return
+    }
+
     // 1. Check if a reusable verified embedding exists (either for this location or a duplicate with identical hash).
     // Even when a catalog hash exists, we MUST verify the live source file on disk before reusing!
     const existingForLoc = this.catalog.getPhotoSemanticEmbedding(
@@ -539,7 +554,7 @@ export class SemanticIndexCoordinator {
     if (candidateSha) {
       const reusable = this.catalog.findReusableSemanticEmbedding({
         contentSha256: candidateSha,
-        observedByteSize: item.expectedByteSize,
+        observedByteSize: resolved.expectedByteSize,
         modelId: job.modelId,
         modelCommit: job.modelCommit,
         modelManifestSha256: job.modelManifestSha256,
@@ -548,10 +563,11 @@ export class SemanticIndexCoordinator {
 
       if (reusable) {
         const liveVerification = await this.thumbnailCoordinator.verifySourceFile({
-          sourcePath: item.originalPath,
-          expectedByteSize: item.expectedByteSize,
-          expectedMtimeMs: item.expectedMtimeMs,
-          expectedSha256: reusable.contentSha256
+          sourcePath: resolved.filePath,
+          expectedByteSize: resolved.expectedByteSize,
+          expectedMtimeMs: resolved.expectedMtimeMs,
+          expectedSha256: reusable.contentSha256,
+          approvedRootsOverride: resolved.approvedRoots
         })
 
         if (signal.aborted || this.pauseRequested || this.cancelRequested || this.isShutdown) {
@@ -575,7 +591,7 @@ export class SemanticIndexCoordinator {
         ) {
           if (
             !this.verifyPreCommitLiveStat(
-              item.originalPath,
+              resolved.filePath,
               liveVerification.observedByteSize,
               liveVerification.observedMtimeMs
             )
@@ -591,7 +607,11 @@ export class SemanticIndexCoordinator {
           }
 
           try {
-            const revision = `semrev:${item.discoveryObservationId}:${liveVerification.observedByteSize}:${liveVerification.observedMtimeMs}:${liveVerification.sha256}`
+            const observedMtimeForCommit =
+              resolved.mode === 'vault_copy' && item.expectedMtimeMs !== null
+                ? item.expectedMtimeMs
+                : liveVerification.observedMtimeMs
+            const revision = `semrev:${item.discoveryObservationId}:${liveVerification.observedByteSize}:${observedMtimeForCommit}:${liveVerification.sha256}`
             this.catalog.completeSemanticIndexJobItemWithEmbedding({
               jobId,
               itemId: item.id,
@@ -604,7 +624,7 @@ export class SemanticIndexCoordinator {
                 contentRevision: revision,
                 sourcePath: item.originalPath,
                 observedByteSize: liveVerification.observedByteSize,
-                observedMtimeMs: liveVerification.observedMtimeMs,
+                observedMtimeMs: observedMtimeForCommit,
                 modelId: job.modelId,
                 modelCommit: job.modelCommit,
                 modelManifestSha256: job.modelManifestSha256,
@@ -636,9 +656,9 @@ export class SemanticIndexCoordinator {
         embedOutcome = await this.embedSourceTask(
           {
             fileLocationId: item.fileLocationId,
-            sourcePath: item.originalPath,
-            expectedByteSize: item.expectedByteSize,
-            expectedMtimeMs: item.expectedMtimeMs,
+            sourcePath: resolved.filePath,
+            expectedByteSize: resolved.expectedByteSize,
+            expectedMtimeMs: resolved.expectedMtimeMs ?? item.expectedMtimeMs ?? 0,
             modelInstallDir
           },
           signal
@@ -657,12 +677,13 @@ export class SemanticIndexCoordinator {
     } else {
       const workerRes = await this.thumbnailCoordinator.requestSemanticEmbedding({
         locationId: item.fileLocationId,
-        sourcePath: item.originalPath,
-        expectedByteSize: item.expectedByteSize,
-        expectedMtimeMs: item.expectedMtimeMs,
-        expectedSha256: loc.activeHash,
+        sourcePath: resolved.filePath,
+        expectedByteSize: resolved.expectedByteSize,
+        expectedMtimeMs: resolved.expectedMtimeMs,
+        expectedSha256: resolved.expectedSha256 ?? loc.activeHash,
         modelInstallDir,
-        priority: 'low'
+        priority: 'low',
+        approvedRootsOverride: resolved.approvedRoots
       })
 
       if (workerRes.status === 'ready') {
@@ -713,7 +734,7 @@ export class SemanticIndexCoordinator {
     // Revalidate live file revision on disk right before committing the vector
     if (
       !this.verifyPreCommitLiveStat(
-        item.originalPath,
+        resolved.filePath,
         embedOutcome.observedByteSize,
         embedOutcome.observedMtimeMs
       )
@@ -729,7 +750,11 @@ export class SemanticIndexCoordinator {
     }
 
     try {
-      const revision = `semrev:${item.discoveryObservationId}:${embedOutcome.observedByteSize}:${embedOutcome.observedMtimeMs}:${embedOutcome.sha256}`
+      const observedMtimeForCommit =
+        resolved.mode === 'vault_copy' && item.expectedMtimeMs !== null
+          ? item.expectedMtimeMs
+          : embedOutcome.observedMtimeMs
+      const revision = `semrev:${item.discoveryObservationId}:${embedOutcome.observedByteSize}:${observedMtimeForCommit}:${embedOutcome.sha256}`
       this.catalog.completeSemanticIndexJobItemWithEmbedding({
         jobId,
         itemId: item.id,
@@ -742,7 +767,7 @@ export class SemanticIndexCoordinator {
           contentRevision: revision,
           sourcePath: item.originalPath,
           observedByteSize: embedOutcome.observedByteSize,
-          observedMtimeMs: embedOutcome.observedMtimeMs,
+          observedMtimeMs: observedMtimeForCommit,
           modelId: job.modelId,
           modelCommit: job.modelCommit,
           modelManifestSha256: job.modelManifestSha256,

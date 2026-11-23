@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Worker } from 'node:worker_threads'
 import type { CatalogDatabase } from '../../catalog/database'
+import { resolveReadableFileLocation } from '../../backup/recovered-file-resolver'
 import {
   EMPTY_DOCUMENT_OCR_COVERAGE,
   type DocumentOcrCoverage,
@@ -826,11 +827,47 @@ export class DocumentOcrCoordinator {
           this.activeFileLocationId = candidate.fileLocationId
           this.emitProgress()
 
-          const approvedRoots = this.catalog
-            .listSources({ offset: 0, limit: 1000 })
-            .items.map((s) => s.rootPath)
-          const effectiveRoots =
-            approvedRoots.length > 0 ? approvedRoots : [candidate.sourceRootPath]
+          const resolved = resolveReadableFileLocation(this.catalog, candidate.fileLocationId, {
+            verifyPayloadHash: false
+          })
+          if (!resolved.ok) {
+            this.activeFileLocationId = null
+            const failCommit = this.commitExtractionAndUpdateCoverage(repo, {
+              fileLocationId: candidate.fileLocationId,
+              expectedDiscoveryObservationId: candidate.discoveryObservationId,
+              expectedContentRevision: candidate.contentRevision,
+              contentSha256: candidate.activeHash ?? '0'.repeat(64),
+              observedByteSize: candidate.byteSize,
+              observedMtimeMs: candidate.filesystemMtimeMs,
+              recipeVersion: initialJob.recipeVersion,
+              ocrModelId: initialJob.ocrModelId,
+              ocrModelManifestSha256: initialJob.ocrModelManifestSha256,
+              ocrLanguage: initialJob.ocrLanguage,
+              extractionMethod: 'none',
+              ocrStatus: 'corrupt_or_failed',
+              statusDetail: resolved.errorMessage,
+              extractedText: null,
+              extractedCharCount: 0,
+              pageCount: null,
+              ocrPageCount: 0,
+              nativeOnlyPageCount: 0,
+              skippedBlankPageCount: 0,
+              meanConfidence: null,
+              truncated: false,
+              truncationReason: null
+            })
+            this.invalidatePreviewCacheForFile(candidate.fileLocationId)
+            repo.recordDocumentOcrJobItemResult({
+              jobId,
+              fileLocationId: candidate.fileLocationId,
+              status: failCommit.committed ? 'corrupt_or_failed' : 'skipped_stale',
+              errorMessage: resolved.errorMessage
+            })
+            this.emitProgress()
+            continue
+          }
+
+          const effectiveRoots = resolved.approvedRoots
 
           const reusableCandidate =
             !forceReocr && candidate.activeHash !== null
@@ -846,11 +883,11 @@ export class DocumentOcrCoordinator {
 
           if (reusableCandidate && candidate.activeHash !== null) {
             const verifyRes = await this.runner.verifySource({
-              sourcePath: candidate.originalPath,
+              sourcePath: resolved.filePath,
               approvedRoots: effectiveRoots,
-              expectedByteSize: candidate.byteSize,
-              expectedMtimeMs: candidate.filesystemMtimeMs,
-              expectedSha256: candidate.activeHash,
+              expectedByteSize: resolved.expectedByteSize,
+              expectedMtimeMs: resolved.expectedMtimeMs,
+              expectedSha256: resolved.expectedSha256 ?? candidate.activeHash,
               maxInputBytes: this.ocrOptions?.maxInputBytes ?? DOCUMENT_OCR_LIMITS.MAX_INPUT_BYTES
             })
 
@@ -867,7 +904,10 @@ export class DocumentOcrCoordinator {
                 expectedContentRevision: candidate.contentRevision,
                 contentSha256: verifyRes.observedSha256,
                 observedByteSize: verifyRes.observedByteSize,
-                observedMtimeMs: verifyRes.observedMtimeMs,
+                observedMtimeMs:
+                  resolved.mode === 'vault_copy'
+                    ? candidate.filesystemMtimeMs
+                    : verifyRes.observedMtimeMs,
                 recipeVersion: initialJob.recipeVersion,
                 ocrModelId: initialJob.ocrModelId,
                 ocrModelManifestSha256: initialJob.ocrModelManifestSha256,
@@ -919,12 +959,12 @@ export class DocumentOcrCoordinator {
 
           this.activeFileLocationId = candidate.fileLocationId
           const ocrRes = await this.runner.runOcr({
-            sourcePath: candidate.originalPath,
+            sourcePath: resolved.filePath,
             extension: candidate.extension,
             approvedRoots: effectiveRoots,
-            expectedByteSize: candidate.byteSize,
-            expectedMtimeMs: candidate.filesystemMtimeMs,
-            expectedSha256: candidate.activeHash,
+            expectedByteSize: resolved.expectedByteSize,
+            expectedMtimeMs: resolved.expectedMtimeMs,
+            expectedSha256: resolved.expectedSha256 ?? candidate.activeHash,
             modelDir,
             artifacts,
             maxInputBytes: this.ocrOptions?.maxInputBytes ?? DOCUMENT_OCR_LIMITS.MAX_INPUT_BYTES,
@@ -996,7 +1036,8 @@ export class DocumentOcrCoordinator {
             expectedContentRevision: candidate.contentRevision,
             contentSha256: ocrRes.observedSha256,
             observedByteSize: ocrRes.observedByteSize,
-            observedMtimeMs: ocrRes.observedMtimeMs,
+            observedMtimeMs:
+              resolved.mode === 'vault_copy' ? candidate.filesystemMtimeMs : ocrRes.observedMtimeMs,
             recipeVersion: initialJob.recipeVersion,
             ocrModelId: initialJob.ocrModelId,
             ocrModelManifestSha256: initialJob.ocrModelManifestSha256,

@@ -100,6 +100,7 @@ export interface SemanticEmbedRequestParams {
   readonly expectedSha256?: string | null
   readonly modelInstallDir: string
   readonly priority?: 'low' | 'normal'
+  readonly approvedRootsOverride?: readonly string[]
 }
 
 export type SemanticEmbedJobResult =
@@ -173,6 +174,7 @@ export interface MetadataExtractRequestParams {
   readonly expectedMtimeMs: number | null
   readonly expectedSha256?: string | null
   readonly priority?: 'low' | 'normal'
+  readonly approvedRootsOverride?: readonly string[]
 }
 
 export type MetadataExtractJobResult =

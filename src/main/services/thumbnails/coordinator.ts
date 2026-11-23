@@ -84,6 +84,7 @@ interface QueuedVerifySourceItem {
     expectedByteSize?: number
     expectedMtimeMs?: number | null
     expectedSha256?: string | null
+    approvedRootsOverride?: readonly string[]
   }
   cacheKey: string
   resolve: (res: SourceVerificationJobResult) => void
@@ -120,6 +121,7 @@ interface QueuedVerifyMetadataSourceItem {
     expectedByteSize?: number
     expectedMtimeMs?: number | null
     expectedSha256?: string | null
+    approvedRootsOverride?: readonly string[]
   }
   cacheKey: string
   resolve: (res: MetadataSourceVerifyResult) => void
@@ -244,6 +246,10 @@ export class ThumbnailCoordinator {
       return this.approvedRoots()
     }
     return this.approvedRoots
+  }
+
+  private resolveEffectiveRoots(override?: readonly string[]): readonly string[] {
+    return override && override.length > 0 ? override : this.getApprovedRoots()
   }
 
   public getCache(): ThumbnailDiskCache {
@@ -706,6 +712,7 @@ export class ThumbnailCoordinator {
     expectedByteSize?: number
     expectedMtimeMs?: number | null
     expectedSha256?: string | null
+    approvedRootsOverride?: readonly string[]
   }): Promise<SourceVerificationJobResult> {
     if (this.isShuttingDown) {
       return {
@@ -780,6 +787,7 @@ export class ThumbnailCoordinator {
     expectedByteSize?: number
     expectedMtimeMs?: number | null
     expectedSha256?: string | null
+    approvedRootsOverride?: readonly string[]
   }): Promise<MetadataSourceVerifyResult> {
     if (this.isShuttingDown) {
       return {
@@ -1282,7 +1290,7 @@ export class ThumbnailCoordinator {
           modelInstallDir: item.params.modelInstallDir,
           maxInputPixels: this.maxInputPixels,
           maxSourceSizeBytes: this.maxSourceSizeBytes,
-          approvedRoots: this.getApprovedRoots()
+          approvedRoots: this.resolveEffectiveRoots(item.params.approvedRootsOverride)
         }
       })
     } else if (item.action === 'verify_source') {
@@ -1296,7 +1304,7 @@ export class ThumbnailCoordinator {
           expectedSha256: item.params.expectedSha256,
           maxInputPixels: this.maxInputPixels,
           maxSourceSizeBytes: this.maxSourceSizeBytes,
-          approvedRoots: this.getApprovedRoots()
+          approvedRoots: this.resolveEffectiveRoots(item.params.approvedRootsOverride)
         }
       })
     } else if (item.action === 'decode_original') {
@@ -1328,7 +1336,7 @@ export class ThumbnailCoordinator {
           expectedMtimeMs: item.params.expectedMtimeMs,
           expectedSha256: item.params.expectedSha256 ?? null,
           maxSourceSizeBytes: this.maxSourceSizeBytes,
-          approvedRoots: this.getApprovedRoots()
+          approvedRoots: this.resolveEffectiveRoots(item.params.approvedRootsOverride)
         }
       })
     } else if (item.action === 'extract_metadata') {
@@ -1343,7 +1351,7 @@ export class ThumbnailCoordinator {
           expectedMtimeMs: item.params.expectedMtimeMs,
           expectedSha256: item.params.expectedSha256 ?? null,
           maxSourceSizeBytes: this.maxSourceSizeBytes,
-          approvedRoots: this.getApprovedRoots()
+          approvedRoots: this.resolveEffectiveRoots(item.params.approvedRootsOverride)
         }
       })
     } else {
