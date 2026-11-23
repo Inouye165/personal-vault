@@ -20,6 +20,7 @@ export interface ScanJobsPanelProps {
   readonly onDismissJob?: (jobId: number) => void
   readonly onClearRoots: () => void
   readonly onClearJob: () => void
+  readonly selectButtonLabel?: string
 }
 
 export function ScanJobsPanel({
@@ -33,7 +34,8 @@ export function ScanJobsPanel({
   onCancelScan,
   onDismissJob,
   onClearRoots,
-  onClearJob
+  onClearJob,
+  selectButtonLabel = 'Select Source Folders'
 }: ScanJobsPanelProps) {
   if (!job) {
     return (
@@ -48,10 +50,10 @@ export function ScanJobsPanel({
             type="button"
             className="btn btn-primary"
             onClick={onSelectRoots}
-            aria-label="Select Source Folders"
+            aria-label={selectButtonLabel}
           >
             <FolderSearch size={16} aria-hidden="true" />
-            <span>Select Source Folders</span>
+            <span>{selectButtonLabel}</span>
           </button>
         </div>
 

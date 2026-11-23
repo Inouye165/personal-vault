@@ -121,7 +121,7 @@ export function App() {
             )}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
-            currentTab === 'photos' && <PhotosPanel />}
+            currentTab === 'photos' && <PhotosPanel scanJobs={scanPanelProps} />}
           {state.phase === 'ready' &&
             state.vaultStatus.sourceCount > 0 &&
             currentTab === 'documents' && <DocumentsPanel />}

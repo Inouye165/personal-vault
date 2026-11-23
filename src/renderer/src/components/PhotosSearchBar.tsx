@@ -6,8 +6,11 @@
  */
 
 import { useState, type FormEvent, type ReactElement } from 'react'
-import { Search, X, Loader2, AlertCircle, Info } from 'lucide-react'
-import type { SemanticModelProvisionState } from '../../../shared/validation/ipc-schemas'
+import { Search, X, Loader2, AlertCircle, Info, Cpu, CheckCircle2 } from 'lucide-react'
+import type {
+  SemanticIndexJobStatus,
+  SemanticModelProvisionState
+} from '../../../shared/validation/ipc-schemas'
 
 export interface PhotosSearchBarResultMeta {
   readonly totalMatched: number
@@ -37,6 +40,30 @@ export interface PhotosSearchBarProps {
   readonly onSearch: (query: string) => void
   readonly onClear: () => void
   readonly disabled?: boolean
+  readonly modelDownloadProgress?: {
+    readonly downloadedBytes: number
+    readonly requiredBytes: number
+    readonly currentArtifact: string | null
+  } | null
+  readonly indexingProgress?: {
+    readonly status: SemanticIndexJobStatus
+    readonly processedPhotos: number
+    readonly totalPhotos: number
+    readonly currentIndexedPhotos: number
+    readonly totalCatalogPhotos: number
+  } | null
+  readonly setupError?: string | null
+  readonly searchReadyAnnouncement?: {
+    readonly indexedCount: number
+    readonly totalCount: number
+  } | null
+  readonly onEnablePhotoSearch?: () => Promise<void> | void
+  readonly onCancelEnablePhotoSearch?: () => Promise<void> | void
+  readonly onDismissSearchReady?: () => void
+}
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 export function PhotosSearchBar({
@@ -46,10 +73,18 @@ export function PhotosSearchBar({
   searchResult,
   onSearch,
   onClear,
-  disabled = false
+  disabled = false,
+  modelDownloadProgress = null,
+  indexingProgress = null,
+  setupError = null,
+  searchReadyAnnouncement = null,
+  onEnablePhotoSearch,
+  onCancelEnablePhotoSearch,
+  onDismissSearchReady
 }: PhotosSearchBarProps): ReactElement {
   const [inputValue, setInputValue] = useState(query)
   const [prevQuery, setPrevQuery] = useState(query)
+  const [showEnableConfirm, setShowEnableConfirm] = useState(false)
 
   if (query !== prevQuery) {
     setPrevQuery(query)
@@ -72,6 +107,28 @@ export function PhotosSearchBar({
   const isModelMissing = modelStatus === 'unprovisioned' || modelStatus === 'missing'
   const isModelCorrupt = modelStatus === 'corrupt'
   const isModelError = modelStatus === 'error'
+  const isModelDownloading = modelStatus === 'installing'
+  const needsModel = isModelMissing || isModelCorrupt || isModelError
+  const isIndexingActive =
+    indexingProgress?.status === 'running' || indexingProgress?.status === 'paused'
+
+  const downloadPct =
+    modelDownloadProgress && modelDownloadProgress.requiredBytes > 0
+      ? Math.min(
+          100,
+          Math.round(
+            (modelDownloadProgress.downloadedBytes / modelDownloadProgress.requiredBytes) * 100
+          )
+        )
+      : 0
+
+  const indexingPct =
+    indexingProgress && indexingProgress.totalPhotos > 0
+      ? Math.min(
+          100,
+          Math.round((indexingProgress.processedPhotos / indexingProgress.totalPhotos) * 100)
+        )
+      : 0
 
   return (
     <div className="photos-search-bar-container" data-testid="photos-search-bar">
@@ -111,9 +168,148 @@ export function PhotosSearchBar({
         >
           <span>Search</span>
         </button>
+        {needsModel && onEnablePhotoSearch && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm photos-enable-search-btn"
+            data-testid="enable-photo-search-btn"
+            aria-expanded={showEnableConfirm}
+            onClick={() => setShowEnableConfirm((prev) => !prev)}
+          >
+            <Cpu size={14} aria-hidden="true" />
+            <span>Enable photo search</span>
+          </button>
+        )}
       </form>
 
-      {isModelMissing && (
+      {showEnableConfirm && needsModel && !isModelDownloading && onEnablePhotoSearch && (
+        <div
+          className="search-onboarding-card"
+          role="region"
+          aria-label="Confirm one-time photo search model download"
+          data-testid="enable-photo-search-confirm"
+        >
+          <p className="search-onboarding-copy">
+            <strong>One-time offline AI model download (~149 MiB)</strong> is required to search
+            photos by description. Your photos stay on this device, and you can continue browsing
+            while it downloads and indexes.
+          </p>
+          <div className="search-onboarding-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              data-testid="confirm-enable-photo-search-btn"
+              onClick={() => {
+                setShowEnableConfirm(false)
+                void onEnablePhotoSearch()
+              }}
+            >
+              Download &amp; enable search (~149 MiB)
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              data-testid="cancel-enable-photo-search-btn"
+              onClick={() => setShowEnableConfirm(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isModelDownloading && (
+        <div
+          className="search-onboarding-progress"
+          role="status"
+          data-testid="photo-search-download-progress"
+        >
+          <div className="search-onboarding-progress-header">
+            <span>
+              Downloading photo search model…{' '}
+              {modelDownloadProgress
+                ? `${formatMiB(modelDownloadProgress.downloadedBytes)} / ${formatMiB(modelDownloadProgress.requiredBytes)} (${downloadPct}%)`
+                : ''}
+            </span>
+            {onCancelEnablePhotoSearch && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void onCancelEnablePhotoSearch()}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+          <progress
+            className="search-onboarding-meter"
+            max={100}
+            value={downloadPct}
+            aria-label="Model download progress"
+          />
+        </div>
+      )}
+
+      {!isModelDownloading && isIndexingActive && indexingProgress && (
+        <div
+          className="search-onboarding-progress"
+          role="status"
+          data-testid="photo-search-indexing-progress"
+        >
+          <div className="search-onboarding-progress-header">
+            <span>
+              {indexingProgress.status === 'paused'
+                ? 'Photo search indexing paused'
+                : 'Indexing photos for search…'}{' '}
+              {indexingProgress.processedPhotos} / {indexingProgress.totalPhotos} ({indexingPct}%)
+            </span>
+          </div>
+          <progress
+            className="search-onboarding-meter"
+            max={100}
+            value={indexingPct}
+            aria-label="Photo search indexing progress"
+          />
+        </div>
+      )}
+
+      {!isModelDownloading &&
+        !isIndexingActive &&
+        modelStatus === 'ready' &&
+        searchReadyAnnouncement && (
+          <div
+            className="search-ready-banner"
+            role="status"
+            data-testid="photo-search-ready-notice"
+          >
+            <div className="search-ready-banner-text">
+              <CheckCircle2 size={14} aria-hidden="true" />
+              <span>
+                Photo search is ready ({searchReadyAnnouncement.indexedCount} of{' '}
+                {searchReadyAnnouncement.totalCount} photos indexed). Try searching above.
+              </span>
+            </div>
+            {onDismissSearchReady && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={onDismissSearchReady}
+                aria-label="Dismiss search ready notice"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
+
+      {setupError && (
+        <div className="search-model-notice search-warning-banner" role="alert">
+          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
+          <span>{setupError}</span>
+        </div>
+      )}
+
+      {isModelMissing && !showEnableConfirm && !isModelDownloading && (
         <div
           className="search-model-notice search-warning-banner"
           role="status"
