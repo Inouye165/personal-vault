@@ -27,7 +27,10 @@ export function EmptyState({ currentTab, scanJobsProps }: EmptyStateProps) {
 
         {scanJobsProps && (
           <div className="empty-state-scan-section">
-            <ScanJobsPanel {...scanJobsProps} />
+            <ScanJobsPanel
+              {...scanJobsProps}
+              selectButtonLabel={currentTab === 'photos' ? 'Add photos' : undefined}
+            />
           </div>
         )}
       </div>

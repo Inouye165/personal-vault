@@ -42,8 +42,10 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { usePhotoReview } from '../hooks/usePhotoReview'
 import { usePhotoMetadata } from '../hooks/usePhotoMetadata'
+import { useSemanticIndex } from '../hooks/useSemanticIndex'
 import { SimilarityReviewPanel } from './SimilarityReviewPanel'
 import { SemanticIndexPanel } from './SemanticIndexPanel'
+import { ScanJobsPanel, type ScanJobsPanelProps } from './ScanJobsPanel'
 import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import { PhotosSearchBar } from './PhotosSearchBar'
 import { PhotoSelectedOcrSection } from './PhotoSelectedOcrSection'
@@ -271,7 +273,11 @@ function PhotoCardCell({
   )
 }
 
-export function PhotosPanel() {
+export interface PhotosPanelProps {
+  readonly scanJobs?: ScanJobsPanelProps
+}
+
+export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const {
     photos,
     cachedPageIndices,
@@ -353,6 +359,94 @@ export function PhotosPanel() {
   const [viewMode, setViewMode] = useState<'grid' | 'similarity'>('grid')
   const [showSemanticPanel, setShowSemanticPanel] = useState(false)
   const [showMetadataPanel, setShowMetadataPanel] = useState(false)
+  const [showAddScanPanel, setShowAddScanPanel] = useState(false)
+  const [onboardingTriggered, setOnboardingTriggered] = useState(false)
+  const [dismissedReadyKey, setDismissedReadyKey] = useState<string | null>(null)
+  const autoIndexStartedRef = useRef(false)
+  const lastCompletedScanJobIdRef = useRef<number | null>(
+    scanJobs?.job?.status === 'completed' ? scanJobs.job.jobId : null
+  )
+
+  const semanticIndex = useSemanticIndex()
+  const { startIndexing } = semanticIndex
+
+  const isScanActive = scanJobs?.job?.status === 'running' || scanJobs?.job?.status === 'paused'
+
+  const handleAddPhotosClick = useCallback(async () => {
+    if (!scanJobs) return
+    setShowAddScanPanel(true)
+    await scanJobs.onSelectRoots()
+  }, [scanJobs])
+
+  // Auto-refresh photo grid when a scan job completes without requiring manual Refresh
+  useEffect(() => {
+    const completedJob = scanJobs?.job
+    if (
+      completedJob?.status === 'completed' &&
+      completedJob.jobId !== lastCompletedScanJobIdRef.current
+    ) {
+      lastCompletedScanJobIdRef.current = completedJob.jobId
+      void refresh()
+    }
+  }, [scanJobs?.job, refresh])
+
+  const handleEnablePhotoSearch = useCallback(async () => {
+    autoIndexStartedRef.current = false
+    setDismissedReadyKey(null)
+    setOnboardingTriggered(true)
+    await semanticIndex.downloadModel()
+  }, [semanticIndex])
+
+  const handleCancelEnablePhotoSearch = useCallback(async () => {
+    setOnboardingTriggered(false)
+    autoIndexStartedRef.current = false
+    await semanticIndex.cancelModelProvisioning()
+  }, [semanticIndex])
+
+  // Automatically start indexing once model download completes during inline onboarding.
+  useEffect(() => {
+    if (!onboardingTriggered) return
+    if (semanticIndex.modelStatus.state !== 'ready') return
+    if (autoIndexStartedRef.current) return
+
+    const iProg = semanticIndex.indexProgress
+    autoIndexStartedRef.current = true
+    if (
+      iProg.status !== 'running' &&
+      iProg.status !== 'paused' &&
+      iProg.totalCatalogPhotos > 0 &&
+      iProg.currentIndexedPhotos < iProg.totalCatalogPhotos
+    ) {
+      void startIndexing()
+    }
+  }, [
+    onboardingTriggered,
+    semanticIndex.modelStatus.state,
+    semanticIndex.indexProgress,
+    startIndexing
+  ])
+
+  const readyAnnouncementKey =
+    semanticIndex.indexProgress.jobId ??
+    `ready-${semanticIndex.indexProgress.currentIndexedPhotos}-${semanticIndex.indexProgress.totalCatalogPhotos}`
+
+  const searchReadyAnnouncement =
+    onboardingTriggered &&
+    semanticIndex.modelStatus.state === 'ready' &&
+    semanticIndex.indexProgress.status !== 'running' &&
+    semanticIndex.indexProgress.status !== 'paused' &&
+    semanticIndex.indexProgress.status !== 'failed' &&
+    semanticIndex.indexProgress.status !== 'cancelled' &&
+    (semanticIndex.indexProgress.status === 'completed' ||
+      semanticIndex.indexProgress.totalCatalogPhotos === 0 ||
+      semanticIndex.indexProgress.currentIndexedPhotos >=
+        semanticIndex.indexProgress.totalCatalogPhotos) &&
+    dismissedReadyKey !== readyAnnouncementKey
+      ? {
+          indexedCount: semanticIndex.indexProgress.currentIndexedPhotos,
+          totalCount: semanticIndex.indexProgress.totalCatalogPhotos
+        }
+      : null
 
   const {
     progress: metadataProgress,
@@ -728,6 +822,19 @@ export function PhotosPanel() {
             </div>
 
             <div className="photos-toolbar-actions">
+              {scanJobs && (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  data-testid="photos-add-photos-btn"
+                  disabled={isScanActive}
+                  onClick={() => void handleAddPhotosClick()}
+                  title="Select read-only folders to scan for photographs"
+                >
+                  <FolderPlus size={14} aria-hidden="true" />
+                  <span>Add photos</span>
+                </button>
+              )}
               <button
                 ref={semanticToggleBtnRef}
                 id="photos-toggle-semantic-index"
@@ -765,10 +872,31 @@ export function PhotosPanel() {
               <PhotosSearchBar
                 query={searchQuery}
                 isSearching={isSearching}
-                modelStatus={modelStatus}
+                modelStatus={
+                  semanticIndex.modelStatus.state === 'installing' ? 'installing' : modelStatus
+                }
                 searchResult={searchResultMeta}
                 onSearch={setSearchQuery}
                 onClear={clearSearch}
+                modelDownloadProgress={
+                  modelStatus === 'installing'
+                    ? {
+                        downloadedBytes: semanticIndex.modelStatus.downloadedBytes,
+                        requiredBytes: semanticIndex.modelStatus.requiredBytes,
+                        currentArtifact: semanticIndex.modelStatus.currentArtifact
+                      }
+                    : null
+                }
+                indexingProgress={semanticIndex.indexProgress}
+                setupError={
+                  semanticIndex.actionError ??
+                  semanticIndex.modelStatus.error ??
+                  semanticIndex.indexProgress.lastError
+                }
+                searchReadyAnnouncement={searchReadyAnnouncement}
+                onEnablePhotoSearch={handleEnablePhotoSearch}
+                onCancelEnablePhotoSearch={handleCancelEnablePhotoSearch}
+                onDismissSearchReady={() => setDismissedReadyKey(readyAnnouncementKey)}
               />
             </div>
           )}
@@ -830,6 +958,33 @@ export function PhotosPanel() {
             )}
           </div>
         </div>
+
+        {scanJobs &&
+          (scanJobs.selectedRoots.length > 0 ||
+            Boolean(scanJobs.actionError) ||
+            Boolean(
+              scanJobs.job &&
+              (showAddScanPanel ||
+                isScanActive ||
+                scanJobs.job.status === 'interrupted' ||
+                scanJobs.job.status === 'failed')
+            )) && (
+            <section
+              className="photos-add-scan-banner"
+              aria-label="Add photos scan status"
+              data-testid="photos-add-scan-banner"
+            >
+              <ScanJobsPanel
+                {...scanJobs}
+                job={scanJobs.selectedRoots.length > 0 ? null : scanJobs.job}
+                selectButtonLabel="Add photos"
+                onDismissJob={(jobId) => {
+                  setShowAddScanPanel(false)
+                  scanJobs.onDismissJob?.(jobId)
+                }}
+              />
+            </section>
+          )}
 
         {isFiltersDrawerOpen && (
           <>
