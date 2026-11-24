@@ -873,6 +873,8 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const endRow = Math.min(totalRows, startRow + visibleRowCount)
 
   const renderGridCells = !isSearchActive || showOtherResults
+  const isTopResultsInViewport =
+    !renderGridCells || scrollTop <= effectiveSearchHeaderHeight + containerHeight
   const startIndex = gridItemOffset + startRow * columns
   const rawEndIndex = gridItemOffset + endRow * columns
   const endIndex = renderGridCells
@@ -882,7 +884,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   // Trigger loading of required page range
   useEffect(() => {
     if (totalCount > 0) {
-      if (isSearchActive) {
+      if (isSearchActive && isTopResultsInViewport) {
         ensureRangeLoaded(0, Math.min(totalCount, topResultCount))
       }
       if (renderGridCells && endIndex > startIndex) {
@@ -892,6 +894,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   }, [
     totalCount,
     isSearchActive,
+    isTopResultsInViewport,
     topResultCount,
     renderGridCells,
     startIndex,

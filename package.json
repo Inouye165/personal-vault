@@ -10,6 +10,7 @@
     "build": "electron-vite build",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:installer": "npm run verify:vcredist && npm run build && electron-builder --win",
+    "verify:windows-candidate": "node scripts/verify-windows-candidate.mjs",
     "fetch:vcredist": "node scripts/fetch-vcredist-x64.mjs",
     "verify:vcredist": "node scripts/fetch-vcredist-x64.mjs --verify-only",
     "smoke:dev": "node scripts/smoke.mjs --mode=dev",
