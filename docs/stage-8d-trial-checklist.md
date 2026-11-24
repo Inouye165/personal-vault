@@ -1,74 +1,58 @@
-# Stage 8D — Representative Mixed-Library Trial Checklist
+# Stage 8D — Personal Windows Trial Checklist & Readiness Record
 
-**Installed Build:** `D:\organizer\dist\Personal Vault Setup 0.1.0.exe` (SHA-256 `9f0d5ee78038c00371d4bfa68b3275ebfd332c021c7a31ad452b1938390aa998`; 8C-1 `f122ede`, 8C-2 `70f0616`, plus Stage 8D **Open original** slice)
-**Rule:** Use a **disposable installation directory, disposable profile, disposable vault, and disposable copy of an explicitly approved local sample** outside `D:\organizer` (e.g., `D:\pv-stage-8d-trial\`). **Leave any existing installation, profile, and vault alone.** Keep source files strictly read-only.
-
----
-
-## 1. Pre-Trial Setup & Source SHA-256 Evidence
-
-- [ ] Copy an **explicitly approved** local sample into `D:\pv-stage-8d-trial\sources\`:
-  - Full-resolution iPhone `.heic` photos (including EXIF-rotated/portrait) and full-resolution `.jpg`/`.jpeg` photos
-  - Mixed `.pdf` (native text + scanned image-only), `.docx`, and `.txt`/`.md` documents (plus intentional duplicates and clutter files)
-- [ ] Capture the pre-trial source SHA-256 manifest before launching Personal Vault:
-  ```powershell
-  Get-ChildItem -Path D:\pv-stage-8d-trial\sources -Recurse -File | Get-FileHash -Algorithm SHA256 | Export-Csv D:\pv-stage-8d-trial\source-hashes-before.csv -NoTypeInformation
-  ```
-- [ ] Install `Personal Vault Setup 0.1.0.exe` into a **disposable installation directory** (`D:\pv-stage-8d-trial\app`), **skip automatic launch from the installer** (uncheck "Run Personal Vault" or use `/S /D=D:\pv-stage-8d-trial\app`), and pass `--user-data-dir=D:\pv-stage-8d-trial\profile` on **every** trial launch (including after restart).
-- [ ] Explicitly provision offline CLIP, BGE, and `eng.traineddata` models (confirm zero automatic downloads).
+- **Candidate Commit:** `b6e608bb5b3bd799545200fd2e657e6198a86bd0` (`b6e608b`, branch `chore/windows-closeout` on top of merged `main` `a61e0a10791519ea51a1296c5a90c538119f2704`)
+- **Installer Executable:** `D:\workspace\personal-vault\dist\Personal Vault Setup 0.1.0.exe` (`259,312,272` bytes)
+- **Installer SHA-256:** `fef0b47b358253b16df82283ab2d2a83a14c7ff200bcf7b374b316779212cb74`
+- **Unpacked Executable SHA-256 (`dist/win-unpacked/Personal Vault.exe`):** `e88517887614a2d72197067f4b79e35558bc190aed56207d2de326a2bcd3f24e`
+- **Status:** **Ready for Ron's real-library trial — Personal Acceptance Pending Ron's Confirmation**
 
 ---
 
-## 2. Trial Execution & Pass/Fail Criteria
+## 1. Safe Execution Rules Before You Start
 
-| Step                                                                    | Action                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Pass Criteria                                                                                                                                                                                                     | Fail Criteria                                                                                                              |
-| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **A. Scan & Concurrent Browsing + Photo Opening**                       | Add `sources\`, run **Start Scan**, then immediately scroll the **Photos** thumbnail grid continuously during scan and **Semantic Indexing**. Also **open representative full-resolution iPhone HEIC and JPEG photos** in the detail/viewer pane during/after indexing.                                                                                                                                                                                  | Scan & indexing complete; grid scrolls without persistent blank cells; opened full-resolution HEIC and JPEG photos render crisply with accurate orientation; record how any stall was measured or observed.       | Crash, worker hang, corrupted thumbnail or opened image, wrong HEIC rotation, or unrecovered UI freeze.                    |
-| **B. Cold-Launch First Search & Repeat Searches**                       | Quit the app completely, cold-launch `D:\pv-stage-8d-trial\app\Personal Vault.exe --user-data-dir=D:\pv-stage-8d-trial\profile`, run the **first photo semantic search** immediately, then run repeat photo, document, and **All Items** searches.                                                                                                                                                                                                       | First and repeat searches return relevant items with accurate provenance; record first-query and repeat timings (compare against 8C-2 `681.4 ms` observation).                                                    | Search error, stuck spinner, wrong/missing provenance, or unresponsive UI.                                                 |
-| **C. Mixed PDF/DOCX Ingestion & OCR**                                   | Open **Documents**, run extraction and **Run OCR** on scanned PDFs; test `Show all` vs `Hide clutter` and a classification override, then restart with `--user-data-dir=D:\pv-stage-8d-trial\profile`.                                                                                                                                                                                                                                                   | Native PDF/DOCX text and scanned-PDF OCR text extract cleanly; classification override persists across restart.                                                                                                   | Extraction/OCR crash, garbled/missing text on clear scans, or lost override after restart.                                 |
-| **D. Duplicate Review, Annotations & Vault Import**                     | Review a duplicate group (mark reviewed + preferred location); set photo ratings/flags and a collection; initialize `D:\pv-stage-8d-trial\vault` and run **Start Verified Import**.                                                                                                                                                                                                                                                                      | Duplicate decision, annotations, and collection persist across restart (`--user-data-dir=D:\pv-stage-8d-trial\profile`); vault payloads match source SHA-256 hashes.                                              | Stale/lost review or annotation, import failure, or any vault/source hash mismatch.                                        |
-| **E. Pre-Backup Vault Inventory, Local Backup & Restore After Restart** | Record every imported vault payload's relative path and SHA-256 (`vault-hashes-before.csv`). Configure `D:\pv-stage-8d-trial\backup`, run **Back up now** and **Verify backup**, restart app (`--user-data-dir=D:\pv-stage-8d-trial\profile`), then **Restore Files** into `D:\pv-stage-8d-trial\restore`. Relaunch with `--user-data-dir` pointing to the **actual restored profile** (`D:\pv-stage-8d-trial\restore\profile` or restored profile dir). | Restored profile launches cleanly; catalog, duplicate decisions, annotations, and collections are intact; restored vault payload relative paths, file counts, and SHA-256 hashes match `vault-hashes-before.csv`. | Backup/verify/restore error, missing annotations/catalog data, count/path mismatch, or any restored-file SHA-256 mismatch. |
-
----
-
-## 3. Vault Payload & Source Invariance SHA-256 Evidence
-
-- [ ] **Pre-backup vault payload manifest** (relative path + SHA-256 for every imported payload, excluding `manifest.json` sidecars):
-  ```powershell
-  $vRoot = 'D:\pv-stage-8d-trial\vault\files'
-  Get-ChildItem -Path $vRoot -Recurse -File | Where-Object { $_.Name -ne 'manifest.json' } | ForEach-Object {
-    [pscustomobject]@{ RelPath = $_.FullName.Substring($vRoot.Length + 1); Hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
-  } | Sort-Object RelPath | Export-Csv D:\pv-stage-8d-trial\vault-hashes-before.csv -NoTypeInformation
-  ```
-- [ ] **Post-restore vault payload comparison** (relative paths, counts, and SHA-256 hashes against `vault-hashes-before.csv`):
-  ```powershell
-  $rRoot = 'D:\pv-stage-8d-trial\restore\vault\files'
-  Get-ChildItem -Path $rRoot -Recurse -File | Where-Object { $_.Name -ne 'manifest.json' } | ForEach-Object {
-    [pscustomobject]@{ RelPath = $_.FullName.Substring($rRoot.Length + 1); Hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
-  } | Sort-Object RelPath | Export-Csv D:\pv-stage-8d-trial\vault-hashes-restored.csv -NoTypeInformation
-  Compare-Object (Import-Csv D:\pv-stage-8d-trial\vault-hashes-before.csv) (Import-Csv D:\pv-stage-8d-trial\vault-hashes-restored.csv) -Property RelPath, Hash
-  ```
-- [ ] **Separate before/after source SHA-256 comparison** (`0` differences allowed):
-  ```powershell
-  Get-ChildItem -Path D:\pv-stage-8d-trial\sources -Recurse -File | Get-FileHash -Algorithm SHA256 | Export-Csv D:\pv-stage-8d-trial\source-hashes-after.csv -NoTypeInformation
-  Compare-Object (Import-Csv D:\pv-stage-8d-trial\source-hashes-before.csv) (Import-Csv D:\pv-stage-8d-trial\source-hashes-after.csv) -Property Path, Hash
-  ```
+1. **Protect existing personal data first**:
+   - Leave your real `%APPDATA%\Personal Vault` profile, real vault, and prior trial folder (`D:\pv-stage-8d-trial\`) untouched—or run this candidate in an isolated trial directory (`D:\pv-stage-8d-candidate-trial\`).
+   - To run completely isolated on the same Windows PC without touching `%APPDATA%\Personal Vault`, either install into a dedicated folder (or run `D:\workspace\personal-vault\dist\win-unpacked\Personal Vault.exe`) and launch with `--user-data-dir=D:\pv-stage-8d-candidate-trial\profile` on every launch, or if upgrading/replacing the installed app on disk, first copy `%APPDATA%\Personal Vault` and verify a backup of your active vault.
+2. **Verify installer integrity before installing**:
+   ```powershell
+   (Get-FileHash 'D:\workspace\personal-vault\dist\Personal Vault Setup 0.1.0.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+   # Expected: fef0b47b358253b16df82283ab2d2a83a14c7ff200bcf7b374b316779212cb74
+   ```
+3. **Keep original folders strictly read-only**: Personal Vault reads originals (`O_RDONLY`) and never edits, moves, or deletes source files. Optional source-hash snapshot before/after a disposable copy check:
+   ```powershell
+   Get-ChildItem -Path D:\pv-stage-8d-candidate-trial\sources -Recurse -File | Get-FileHash -Algorithm SHA256 | Export-Csv D:\pv-stage-8d-candidate-trial\source-hashes-before.csv -NoTypeInformation
+   ```
+4. **Provision offline models explicitly**: Download or import CLIP, BGE, and `eng.traineddata` (`tessdata_fast`) only if needed for offline search/OCR. If using encrypted Google Drive backup, keep `PV_GOOGLE_CLIENT_ID` / `PV_GOOGLE_CLIENT_SECRET` configured in your environment and save the recovery passphrase in your password manager.
 
 ---
 
-## 4. Recording Stalls, Renderer Errors & Recovery Failures
+## 2. Quick Real-Library Verification Checklist (For Ron)
 
-- Record any defect in `D:\pv-stage-8d-trial\trial-notes.md` with:
-  1. **Timestamp, step (`A`–`E`), and operation** (e.g., `"Step A: opening full-res HEIC while CLIP indexing"`).
-  2. **Measurement method & symptom**: State how any stall was measured or observed (wall-clock stopwatch, DevTools Performance/frame gap, or visual observation) and exact duration/error text.
-  3. **Logs & DevTools**: Copy relevant lines from `<disposableProfile>\startup.log` (verifying zero OAuth tokens or recovery secrets appear) and any DevTools Console / `Runtime.exceptionThrown` error.
-  4. **Recovery failure details**: Exact backup/restore/verify error code, destination path, and whether partial files were left behind.
+- [ ] **UI Theme & Navigation**: Confirm default Light theme and **App menu -> Appearance -> Dark** switch persist cleanly across app restart (`All Items`, `Photos`, `Documents`, `Review`, `Duplicates`, `Backup & Restore`).
+- [ ] **Scan & Verified Vault Import**: Scan a representative sample folder, initialize or open a dedicated vault outside source roots, run **Start Verified Import**, and verify imported copies succeed without altering source files.
+- [ ] **HEIC, Thumbnails & Open Original**: Scroll Photos smoothly during scanning/indexing; open portrait/landscape iPhone `.heic` and `.jpg` files via **Open original**; confirm crisp resolution, accurate orientation, and clean reset when switching selection (`A -> B -> A`).
+- [ ] **Photo, Document & Unified Search**: Run natural-language searches in **Photos** (**Top results** + **Show other results (N)** + **Search Relevance** detail + deep scroll), **Documents** (text extraction, **Run OCR**, `Hide clutter`, **Copy text**), and **All Items** (unified grouped results).
+- [ ] **Duplicate Review & Selective Export to Non-Default Folder**: Mark a duplicate group reviewed with a preferred original; selectively export items to a **non-default folder** via **Browse** and inspect `.pv-meta.json` privacy defaults (no unintended source paths or extracted text unless opted in).
+- [ ] **Local / Optional Encrypted Backup, Restore & Catalog Recovery**: Create and **Verify** a backup, perform a **Restore Files** drill into a fresh destination folder confirming SHA-256 integrity, and optionally verify **Recover from an existing vault** opens imported files read-only while refusing new imports.
+- [ ] **Zero Source Modification & Log Hygiene**: Confirm source files remain bitwise unchanged (if snapshotting hashes, `Compare-Object` returns zero differences) and `<profile>\startup.log` contains no tokens or secrets.
 
 ---
 
-## 5. Disposable Mixed-Library Execution Notes (November 22, 2026)
+## 3. Preserved Pre-Trial Verification Evidence (Do Not Conflate Builds)
 
-- **Steps B–E (`D:\pv-stage-8d-trial\trial-report.json`, preserved)**: Cold-launch first photo search (`487.9 ms`), repeat searches (`142.6`, `3.3`, `3.1`, `3.2 ms`), mixed PDF/DOCX extraction + OCR (`45` chars) + classification override persistence, duplicate review + annotations + verified vault import (`38` candidates / `37` payloads), and local backup/restore after restart (`37/37` restored vault payloads matching SHA-256; `38/38` source hashes unchanged) passed.
-- **Step A Open original (`D:\pv-stage-8d-trial\step-a-open-original-report.json`, `SHA-256: 9f0d5ee78038c00371d4bfa68b3275ebfd332c021c7a31ad452b1938390aa998`)**: `fullres-01-landscape.jpg` (`4032x3024`), `fullres-02-portrait.jpg` (`3024x4032`), repo HEICs (`landscape.heic` `160x100`, `portrait_exif6.heic` `100x160`, `sunset_heic.heic` `256x256`), live `A -> B -> A` selection-race check (`openBeforeSwitch`, `closedOnB`, `stayedClosedOnReturnA`, `reopenedOnExplicitClick`), and `38/38` source SHA-256 invariance passed (`0` runtime errors).
-- **Genuine iPhone HEIC Check (`D:\pv-stage-8d-heic-trial\iphone-heic-report.json`, `IMG_2121.HEIC`)**: **PASS** in installed `0.1.0` (`SHA-256: 9f0d5ee78038c00371d4bfa68b3275ebfd332c021c7a31ad452b1938390aa998`). Grid thumbnail + `384x512` Details preview loaded, **Open original** displayed `2316 × 3088` (`portrait`), `0` runtime errors, and before/after SHA-256 matched (`d6fc98447e3db4e188d16909a27a590753fe09b089e70e2b67d2f9ace0362c4d`).
-- **Remaining Open Gates**: Clean Windows x64 VM verification remains open.
+- **Clean Windows x64 Sandbox (`4033b243`, Nov 22, 2026)**: Preserved build `D:\pv-sandbox-stage\Personal Vault Setup 0.1.0-4033b243.exe` (SHA-256 `4033b2431e7bc75a96df50890120eb9c03e0772050204a8c33d21c486db41d2d`) passed **8/8 checks** (`D:\pv-sandbox-out-4033b243-2\results.json`), including fresh `vc_redist.x64.exe` (`exit 0`), `0.0.9 -> 0.1.0` upgrade, `v1 -> v19` SQLite migration, uninstall/reinstall preservation, and recovered-profile background coordinators.
+- **Earlier Host Trial & Genuine iPhone HEIC (`9f0d5ee7`, Nov 22, 2026)**: Installed `0.1.0` build (SHA-256 `9f0d5ee78038c00371d4bfa68b3275ebfd332c021c7a31ad452b1938390aa998`) passed disposable Steps B–E (`D:\pv-stage-8d-trial\trial-report.json`: cold-launch photo search `487.9 ms`, repeat `3.1–142.6 ms`, mixed PDF/DOCX + OCR, `37/37` restored payloads), Step A (`D:\pv-stage-8d-trial\step-a-open-original-report.json`), and genuine iPhone `IMG_2121.HEIC` (`D:\pv-stage-8d-heic-trial\iphone-heic-report.json`: `1,651,588` bytes, EXIF Orientation `6`, `384x512` Details preview, `2316 × 3088` `portrait` **Open original**, `0` runtime errors, before/after SHA-256 match `d6fc98447e3db4e188d16909a27a590753fe09b089e70e2b67d2f9ace0362c4d`).
+- **Current Merged-UI Windows Closeout Candidate (`b6e608b`, Nov 24, 2026 — Candidate Ready for Trial)**: Installer SHA-256 `fef0b47b358253b16df82283ab2d2a83a14c7ff200bcf7b374b316779212cb74` passed full `npm test` (`136/136` files, `1,739/1,739` tests), real-Electron unpacked suites across photos, search (`38/38`, including PR #2 search LRU eviction fix), documents (`19/19`), document semantic search (`8/8`), unified search, backup (`5/5`), recovery (`5/5`), and `npm run verify:windows-candidate` (HEIC + Open original, non-default export folder, isolated-`appId` `0.0.9 -> 0.1.0` & `v1 -> v19` upgrade/uninstall/reinstall, and `100%` bitwise source preservation). Synthetic fixtures establish candidate readiness for the trial only; personal acceptance awaits Ron's confirmation below.
+
+---
+
+## 4. Personal Acceptance Sign-Off (Ron)
+
+| Field                     | Value                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| Candidate Commit          | `b6e608bb5b3bd799545200fd2e657e6198a86bd0` (`chore/windows-closeout`)               |
+| Verified Installer        | `D:\workspace\personal-vault\dist\Personal Vault Setup 0.1.0.exe` (`259,312,272` B) |
+| Installer SHA-256         | `fef0b47b358253b16df82283ab2d2a83a14c7ff200bcf7b374b316779212cb74`                  |
+| Fixture / Candidate Ready | **Verified (Nov 24, 2026)** — all automated & Electron checks passed                |
+| Ron Real-Library Trial    | **Pending Ron's confirmation**                                                      |
+| Personal Acceptance       | **Awaiting Ron**                                                                    |

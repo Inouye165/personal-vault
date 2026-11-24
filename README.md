@@ -10,15 +10,15 @@ Personal Vault guarantees strict source file preservation: discovered originals 
 
 - **Node.js**: `v20.0.0` or higher (tested on Node `v22.18.0`)
 - **npm**: `v10.0.0` or higher (tested on npm `v10.9.3`)
-- **OS**: Windows, macOS, or Linux
+- **OS**: Windows x64 (supported platform for the personal desktop closeout; macOS/Linux installers and public distribution are outside current scope)
 
 ---
 
 ## Setup & Installation
 
-For the internal Windows installer, see the [Windows user guide](docs/windows-user-guide.md). For performance verification, see the [Stage 8C-2 benchmark](docs/stage-8c2-windows-baseline.md).
+For the Windows desktop setup guide, see the [Windows user guide](docs/windows-user-guide.md). For performance verification, see the [Stage 8C-2 benchmark](docs/stage-8c2-windows-baseline.md). For the candidate real-library trial checklist, see the [Stage 8D trial checklist](docs/stage-8d-trial-checklist.md).
 
-Clone or open the repository at `D:\organizer`, then install dependencies:
+Clone or open the repository at its checkout root (e.g., `D:\workspace\personal-vault`), then install dependencies:
 
 ```bash
 npm install
@@ -52,6 +52,9 @@ npm run dev
 Run the automated test suite and code quality gates:
 
 ```bash
+# Build bundles first on a clean checkout (`doc-classification-worker.test.ts` runs against `out/main/document_classify_worker.js`)
+npm run build
+
 # Run unit and behavioral tests (Vitest + jsdom)
 npm test
 
@@ -61,8 +64,9 @@ npm run typecheck
 # Check linting rules (ESLint)
 npm run lint
 
-# Check formatting compliance (Prettier)
+# Check formatting compliance (use `--end-of-line auto` on Windows checkouts with Git `core.autocrlf=true`)
 npm run format:check
+npx prettier --end-of-line auto --check .
 
 # Auto-format codebase
 npm run format
@@ -113,9 +117,16 @@ npm run verify:doc-classify-ui # real Electron Stage 7E Slice 3 classification I
 npm run verify:doc-classify-ui:unpacked # real Electron classification UI verification in isolated unpacked binary
 npm run verify:unified-search # real Electron Stage 7F Slice 3 unified photo + document search verification
 npm run verify:unified-search:unpacked # real Electron unified search verification in isolated unpacked binary
+npm run verify:backup # real Electron Stage 8B Slice 1 local backup/restore verification
+npm run verify:backup:unpacked # real Electron local backup/restore verification in unpacked binary
+npm run verify:recovery # real Electron Stage 8B Slice 2 vault catalog recovery verification
+npm run verify:recovery:unpacked # real Electron vault catalog recovery verification in unpacked binary
+npm run verify:windows-candidate # isolated Windows candidate installer payload, workflows, non-default export & NSIS lifecycle verification
 ```
 
-Add `-- --screenshot=name.png` after the script name (for example `npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.
+Note: legacy Stage 7D/7E/7F unpacked verification scripts (`verify:doc-semantic-search:unpacked`, `verify:unified-search:unpacked`, `verify:doc-classify-ui:unpacked`) default to stage-specific output folders (`dist-stage-7*-verify\win-unpacked`); set `PV_UNPACKED_DIR=D:\workspace\personal-vault\dist\win-unpacked` when running them against `npm run build:unpack` or `npm run build:installer`.
+
+Add `-- --screenshot=name.png` after `smoke:*` scripts (`npm run smoke:built -- --screenshot=shell.png`) to also save a screenshot; `smoke-*.png` files are git-ignored, other names are not.
 
 ---
 
@@ -180,5 +191,5 @@ The output executable is generated at:
 - **Explicit Offline OCR (`doc_ocr_v1`)**: Scanned PDFs and explicitly selected raster document images can be OCR'd offline (`tesseract.js-core` WASM SIMD + SHA-256-verified `tessdata_fast` `eng.traineddata` + `pdfjs-dist`/`@napi-rs/canvas` page rasterization) under the shared `<= 3` app worker budget (`64 MiB` OCR source limit, conservative mixed-PDF page policy, dual-track persistence without overwriting native text, and never bulk-OCRing `category = 'photo'`).
 - **Explicit Offline Document Semantic Search (`Stage 7D`)**: Semantic indexing and search over extracted (`Native text`) and OCR'd (`OCR text (machine-recognized)`) document tracks use a separate, explicitly provisioned offline text-embedding model (`Xenova/bge-small-en-v1.5`, 384-d, 512-token window, zero automatic downloads) inside bounded worker threads under the shared `<= 3` app worker budget, returning inert `<pre>` winning-chunk excerpts with provenance badges and explicit partial-index/coverage disclosures. Evaluation used synthetic fixtures; real-world semantic search quality across diverse document collections has not been evaluated, and original-layout document viewing remains out of scope.
 - **Explicit Offline Document Classification & Reversible Clutter Filtering (`Stage 7E`)**: Pure deterministic rules (`doc_classify_rules_v1`, zero downloads, zero network calls) classify cataloged documents across purpose (`legal`, `lists`, `instructions`, `receipts`, `recipes`, distinct `Other / No structured match` vs `Unclassified / Needs text extraction or OCR`) and origin (`personal`, `software_project`, `application_system`, `unknown`). Browsing defaults to `Show all` with opt-in `Hide clutter`, scoped hidden counts + `Inspect hidden`, explicit provenance/uncertainty disclosures, durable two-phase `AnnotationJournal` user overrides, and pre-ranking SQL filtering in Stage 7D semantic search. Evaluation used synthetic corpora; real-world accuracy across diverse archives has not been evaluated.
-- **Unified Multi-Modal Search (`Stage 7F`, `All Items`)**: When sources are connected (`sourceCount > 0`), the `All Items` header search dispatches modality-scoped offline searches (`unified:search-photos` with CLIP and `unified:search-documents` with BGE) independently without waiting for the slower modality, rendering grouped `Photos` and `Documents` sections (`limit = 20` per page, isolated pagination and per-modality retry, `All` / `Photos` / `Documents` modality toggle, explicitly scoped quick filters with `aria-live="polite"` scope/clutter disclosures, `Enter` submit, Clear/`Escape` cancellation & focus restoration). Photo (CLIP) and document (BGE) similarity scores are uncalibrated and never merged or summed into combined counts; missing/corrupt models in one modality do not block the other or trigger automatic downloads. Stage 7 verification used synthetic mixed-media fixtures rather than real-world retrieval/classification accuracy benchmarks; Stage 8 (export, recovery, and release validation) remains planned (see `STAGES.md`).
+- **Unified Multi-Modal Search (`Stage 7F`, `All Items`)**: When sources are connected (`sourceCount > 0`), the `All Items` header search dispatches modality-scoped offline searches (`unified:search-photos` with CLIP and `unified:search-documents` with BGE) independently without waiting for the slower modality, rendering grouped `Photos` and `Documents` sections (`limit = 20` per page, isolated pagination and per-modality retry, `All` / `Photos` / `Documents` modality toggle, explicitly scoped quick filters with `aria-live="polite"` scope/clutter disclosures, `Enter` submit, Clear/`Escape` cancellation & focus restoration). Photo (CLIP) and document (BGE) similarity scores are uncalibrated and never merged or summed into combined counts; missing/corrupt models in one modality do not block the other or trigger automatic downloads. Stage 7 verification used synthetic mixed-media fixtures rather than real-world retrieval/classification accuracy benchmarks; Stage 8A–8C (selective export, backup/restore, catalog recovery, and Windows x64 NSIS packaging) are Complete and Stage 8D is ready for Ron's personal real-library trial (`docs/stage-8d-trial-checklist.md`), while public release (Stage 8E), public signing, macOS/Linux installers, and auto-updater feeds are outside current scope (see `STAGES.md`).
 - **Inert Text Previews & Honest Statuses**: Previews render strictly as inert plain text (`<pre>`) with separate `"Extracted text"` and `"OCR text (machine-recognized)"` sections and no original-layout document viewer or File Explorer actions. Encrypted files report `Password protected`, and unsupported formats (e.g. `.doc`, `.odt`, `.xlsx`, `.pptx`, `.epub`) report `Unsupported`.

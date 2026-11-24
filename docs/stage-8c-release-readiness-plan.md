@@ -1,110 +1,49 @@
-# Stage 8C — Release-Readiness Plan
+# Stage 8C — Windows Personal-Use Packaging & Readiness Record
 
-**Status:** Draft for Review (Stage 8B closed at `8cfebe6`; Stage 8C starting)  
-**Baseline:** Branch `feat/stage-7b-document-extraction`, commit `8cfebe6` (`128/128` test files, `1,712/1,712` tests passing on Windows x64)
+**Status:** Complete for personal Windows x64 desktop use (Candidate commit `b6e608bb5b3bd799545200fd2e657e6198a86bd0` / `b6e608b`; `Personal Vault Setup 0.1.0.exe` SHA-256 `fef0b47b358253b16df82283ab2d2a83a14c7ff200bcf7b374b316779212cb74`).
 
----
-
-## 1. Supported Platforms & Installer Status
-
-### What already has evidence
-
-- **Windows x64 unpacked build (`dir`)**: `electron-builder.json5` packages `dist/win-unpacked/Personal Vault.exe` (Electron `45.2.3`), unpacking native/WASM runtime assets (`sharp`, `@img`, `@napi-rs`, `tesseract.js-core/*.wasm`, `onnxruntime-node/bin/napi-v6/win32/x64/**/*`) and bundling `THIRD_PARTY_NOTICES.md`.
-- **Packaged runtime verification**: All Stage 1–8B unpacked Electron verification suites (`smoke:unpacked`, `verify:backup:unpacked`, `verify:recovery:unpacked`, `verify:unified-search:unpacked`, etc.) pass against `dist/win-unpacked/Personal Vault.exe` on Windows 11 x64.
-
-### What still needs verification
-
-- **Installers & upgrade/uninstall**: The Windows x64 NSIS installer passed install, upgrade, uninstall, and reinstall checks using isolated test data on the current host. The `0.0.9` installer was built from the same source as `0.1.0`, using an overridden package version. The v1 to v19 catalog schema migration was exercised separately. Clean-VM verification and macOS/Linux installers remain open.
-- **Branding & build resources**: `build/` does not exist yet; `electron-builder` currently falls back to the default Electron icon.
-- **Cross-platform native/lock gaps** (if macOS/Linux are included in v1):
-  - `electron-builder.json5` `asarUnpack` only includes `onnxruntime-node/bin/napi-v6/win32/x64/**/*`.
-  - `acquireOsProfileLock` (`src/main/services/backup/catalog-recovery.ts`) uses POSIX `.sock` files in `os.tmpdir()` without stale-socket cleanup after `SIGKILL`.
-
-### Release blockers & decisions required
-
-1. **Platform scope decision (8C-1 Locked for internal build: Windows x64 first)**: Slice 8C-1 targets an internal **Windows x64** NSIS installer (`dist/Personal Vault Setup 0.1.0.exe` alongside `dist/win-unpacked/Personal Vault.exe`). macOS / Linux packaging (`asarUnpack` rules, POSIX `.sock` cleanup in `acquireOsProfileLock`, and clean-machine OS verification) remains deferred.
-2. **Code signing & SmartScreen / notarization decision (Open — deferred)**: `electron-builder` skips Authenticode signing (_"no code signing certificate configured"_). Public Windows distribution decisions (Authenticode signing / SmartScreen) remain open for later.
-3. **Google Drive OAuth distribution decision (8C-1 Kept Opt-In; Public distribution Open — deferred)**: Live Drive OAuth remains opt-in using the existing `PV_GOOGLE_CLIENT_ID` / `PV_GOOGLE_CLIENT_SECRET` environment configuration. Public distribution decisions (embedded public Desktop OAuth client ID + Google OAuth app verification for `drive.file`) remain open for later.
+**Scope Decision (Ron):** Windows x64 is the only supported platform for this closeout. Public release (Stage 8E), public Authenticode signing / SmartScreen reputation, public Google Drive OAuth app verification / embedded client credentials, macOS / Linux installers, mobile, and enabled public auto-update feeds are **out of scope**. Private local/USB/NAS backup, opt-in env-var Google Drive encrypted backup (`PV_GOOGLE_CLIENT_ID` / `PV_GOOGLE_CLIENT_SECRET`), and catalog recovery remain active and verified.
 
 ---
 
-## 2. Security & Privacy Checks
+## 1. Windows x64 Packaging & Clean-Machine Verification
 
-### What already has evidence
-
-- **Process isolation & navigation**: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, strict CSP, `will-navigate` and `setWindowOpenHandler` denial (`src/main/index.ts`, `tests/main/navigation.test.ts` 22/22), and 100% Zod-validated IPC/preload (`tests/preload/bridge.test.ts` 20/20, `tests/main/ipc.test.ts` 746/746).
-- **Source preservation**: Read-only discovery, hashing, thumbnails, EXIF, OCR, semantic indexing, export, backup, and catalog recovery verified bitwise invariant across all Stage 2–8B suites.
-- **Encryption & secrets**: Google Drive tokens stored via Electron `safeStorage`; cloud backups use `aes-256-gcm-v1` (`scrypt` + HKDF + HMAC-SHA256 chunk IDs + encrypted `snapshot.pvenc`), failing closed on wrong/missing secrets without creating target directories.
-- **Offline-first AI/OCR**: CLIP, BGE, and `tesseract.js-core` `eng.traineddata` never auto-download and send zero personal files/queries over the network.
-
-### What still needs verification
-
-- **Fresh dependency vulnerability & license audit**: Run `npm audit` and verify `THIRD_PARTY_NOTICES.md` covers all production runtime dependencies (Stages 1–8B).
-- **Recovered profile read-only coordinators**: `HANDOFF.md` notes `PhotoMetadataCoordinator`, `SemanticIndexCoordinator`, and `DocumentOcrCoordinator` are not yet wired through `resolveReadableFileLocation` for Stage 8B Slice 2 read-only recovered profiles — verify or explicitly gate/disclose before release.
-- **Log & crash-report redaction review**: Confirm `startup.log` and backup/export error messages never persist OAuth tokens, recovery passphrases, or unintended PII.
-
-### Release blockers
-
-- Any unresolved `high` or `critical` production dependency vulnerability in `npm audit`.
-- Missing Google OAuth app verification if shipping a built-in `PV_GOOGLE_CLIENT_ID` to public users.
+- **Bundled Installer & Unpacked Build (`electron-builder.json5`, `build/installer.nsh`)**:
+  - `dist/Personal Vault Setup 0.1.0.exe` (`259,312,272` bytes, SHA-256 `fef0b47b358253b16df82283ab2d2a83a14c7ff200bcf7b374b316779212cb74`) alongside `dist/win-unpacked/Personal Vault.exe` (`249,831,936` bytes, SHA-256 `e88517887614a2d72197067f4b79e35558bc190aed56207d2de326a2bcd3f24e`).
+  - `build/icon.ico` bundled; native/WASM assets (`sharp`, `@img`, `@napi-rs/canvas`, `tesseract.js-core/*.wasm`, `onnxruntime-node/bin/napi-v6/win32/x64/**/*`) unpacked into `app.asar.unpacked` with zero `spikes/` packaged.
+  - Embeds Microsoft-signed `vc_redist.x64.exe` (`14.44.35211.0`, SHA-256 `cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b`, `Valid` Microsoft Authenticode signature), installed automatically when any of the 5 VC++ 2015–2022 runtime DLLs is absent from `System32`.
+- **Clean Windows x64 Sandbox Evidence (`4033b243`)**:
+  - Preserved build `Personal Vault Setup 0.1.0-4033b243.exe` (SHA-256 `4033b2431e7bc75a96df50890120eb9c03e0772050204a8c33d21c486db41d2d`) passed **8/8 checks** in fresh Windows Sandbox (`D:\pv-sandbox-out-4033b243-2\results.json`), including fresh `vc_redist.x64.exe` install from zero preinstalled DLLs (`exit 0`), bridge smoke, `0.0.9 -> 0.1.0` upgrade, `v1 -> v19` SQLite migration, uninstall/reinstall profile & vault preservation, and `recoveredProfileChecks` across all 4 coordinators (`PhotoMetadataCoordinator`, `SemanticIndexCoordinator`, `DocumentExtractionCoordinator`, `DocumentOcrCoordinator`).
+- **Merged-UI Candidate Verification (`b6e608b`)**:
+  - Passes all quality gates (`typecheck`, `lint`, `npm test` `136/136` files / `1,739/1,739` tests after `npm run build`, `npm audit --omit=dev` = `0` vulnerabilities, `npx prettier --end-of-line auto --check .`), unpacked Electron suites (`smoke:unpacked`, `verify:vault:unpacked`, `verify:duplicates:unpacked`, `verify:photos:unpacked`, `verify:semantic-search:unpacked`, `verify:documents:unpacked`, `verify:doc-semantic-search:unpacked`, `verify:unified-search:unpacked`, `verify:backup:unpacked`, `verify:recovery:unpacked`), and `verify:windows-candidate` (including non-default export folder, search LRU eviction fix, Dark/Light theme persistence, and isolated-`appId` NSIS lifecycle).
 
 ---
 
-## 3. Performance & Reliability Baselines
+## 2. Security, Privacy & License Summary
 
-### What already has evidence
-
-- **Photo browsing & search at 10k+ scale**: Stage 5A (`10,000` photos: `rAF` p95 `4.30 ms <= 33 ms`, main-loop p95 `35.91–57.38 ms <= 100 ms`, `<= 200` mounted DOM cells) and Stage 6E (`10,216` vectors: `mainLoopP95 = 17.1–18.2 ms`, `rAF p95 = 4.3 ms`).
-- **Bounded workers**: `AppWorkerBudget(3)` enforces bounded concurrency, cancellation, and startup `interrupted` recovery across thumbnail, metadata, semantic, OCR, document, and backup workers.
-- **Backup & restore**: Verified cross-drive atomic restore, crash-boundary cleanup, and live Google Drive cold-restart verify/restore with exact SHA-256 match.
-
-### What still needs verification
-
-- **Realistic mixed-library end-to-end validation**: Run a realistic personal corpus (large photos, multi-page PDFs, DOCX, duplicates, annotations, export, and backup/restore) rather than synthetic fixtures alone.
-- **Live NAS SMB/UNC throttling**: `TransferRateLimiter` is unit-tested, but live Windows UNC/SMB throttling remains unverified.
-- **Packaged installer cold-start & upgrade migration**: Verify SQLite schema migrations (`1 -> 19`) and `<userData>` retention across an actual installed upgrade.
-
-### Release blockers
-
-- Any unbounded memory growth, worker leak, or main-thread stall on realistic mixed-library runs.
+- **Process Isolation & IPC Validation**: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, strict CSP, restricted `will-navigate`/`setWindowOpenHandler`, top-frame sender validation, sandboxed preload requiring only `electron` (`147`-method typed `window.api`), and bidirectional Zod validation.
+- **Source Preservation**: Strict `O_RDONLY` reads across discovery, hashing, thumbnails, **Open original** (`photos:get-original`), EXIF, semantic indexing, document extraction, OCR, export, backup, and catalog recovery; zero in-app file deletion.
+- **Dependency & License Hygiene**: `npm audit --omit=dev` reported `0` vulnerabilities; `THIRD_PARTY_NOTICES.md` and `tests/main/release-audit.test.ts` cover production packages, models, and secret/token redaction in `startup.log` and Drive auth errors.
+- **Manual Upgrade Path (No Feed Enabled)**: Ron installs updates manually using a verified Windows NSIS build; `%APPDATA%\Personal Vault` (`vault-catalog.db`) and external vaults are preserved across manual installs and uninstalls.
 
 ---
 
-## 4. User Documentation
+## 3. Audit of Separate Local Auto-Updater Work (`D:\organizer` commit `809b0b8`)
 
-### What already has evidence
+Inspecting `D:\organizer` read-only on branch `feat/windows-release-updater` (`809b0b8`, _`"feat(release): add Windows release pipeline and safe NSIS auto-updater"`_, kept separate and **not** integrated here):
 
-- **Developer & contributor docs**: `README.md` (dev setup, verification scripts, Stage 6–7F workflows/limitations), `ARCHITECTURE.md`, `THIRD_PARTY_NOTICES.md`, and stage evaluation plans in `docs/`.
-
-### What still needs creation
-
-1. **User Installation & Quick-Start Guide**: Installing/uninstalling, choosing source folders, initializing a vault, and understanding read-only source guarantees.
-2. **Privacy & Offline Guarantees**: What stays strictly local, when network access occurs (explicit model downloads, opt-in Google Drive backup), and how `Export` / `Backup` handle metadata.
-3. **Backup, Recovery Secret & Disaster Recovery Guide**: Local USB/NAS vs. encrypted Google Drive, custody of the recovery secret (cannot be reset if lost), full profile restore vs. `"Recover from an existing vault"`.
-4. **Known Limitations & Support Route**: Supported formats (e.g., camera RAW/SVG unsupported, uncalibrated AI similarity scores), and where users report defects.
-
-### Release blockers
-
-- Shipping without user-facing backup/recovery-secret custody guidance and a documented issue-reporting route.
+- **What `809b0b8` contains (`43` files changed, `+4,632/-381` lines)**:
+  - Adds runtime dependency `electron-updater@^6.8.11` and Windows updater subsystem (`src/main/services/updater/coordinator.ts`, `electron-adapter.ts`, `index.ts`), active backup/vault job deferral hooks (`src/main/services/backup/coordinator.ts`, `src/main/services/vault/coordinator.ts`), updater IPC/schemas (`src/main/ipc/update-handlers.ts`, `src/shared/validation/update-ipc-schemas.ts`, `channels.ts`), UI banner & hook (`src/renderer/src/components/UpdateBanner.tsx`, `src/renderer/src/hooks/useAppUpdater.ts`, `App.tsx`, `Sidebar.tsx`, `index.css`), GitHub Actions workflows (`.github/workflows/ci-pr.yml`, `release-candidate.yml`, `publish-update-feed.yml`, `.github/CODEOWNERS`), release scripts (`scripts/build-release.mjs`, `scripts/verify-release-bundle.mjs`, `scripts/verify-updater-windows.mjs`), documentation (`docs/windows-release-pipeline.md`, `THIRD_PARTY_NOTICES.md`), and unit tests (`tests/main/{release-pipeline,update-coordinator,update-ipc}.test.ts`, `tests/renderer/update-banner.test.tsx`).
+- **What would be required to integrate and verify it later (only if Ron decides to add auto-updates)**:
+  1. **Rebase/Merge onto `main` and Resolve UI & Contract Conflicts**: `809b0b8` branched from `00f3f5d` _before_ PR #1 (`ba1fa94` onboarding) and PR #2 (`e50cecb` Light/Dark theme + Photos search UX), so `src/renderer/src/App.tsx`, `Sidebar.tsx`, `index.css`, `scripts/smoke.mjs` (`147` current `window.api` methods vs updater's extra methods), and top-level docs (`HANDOFF.md`, `TODO.md`, `README.md`, `AGENTS.md`, `ARCHITECTURE.md`) require clean reconciliation and `tests/preload/bridge.test.ts` updates.
+  2. **Align Repository Metadata & Formatting Rules**: Update GitHub default branch `origin/HEAD` (currently pointing to `refs/heads/feat/stage-1-foundation`) to `main` before activating `.github/CODEOWNERS` or workflows; reconcile `.github/workflows/ci-pr.yml` (`npm run format:check` fails on Windows checkouts under Git `core.autocrlf=true` unless `--end-of-line auto` or `.gitattributes` is configured).
+  3. **Define Signing, Feed Hosting & Safety Policy**: Choose whether an update feed is private/local or GitHub Releases (`publish-update-feed.yml`), configure Windows Authenticode signing or explicit signature-check policy, define rollback/channel metadata, and review `electron-updater` in `THIRD_PARTY_NOTICES.md` and `npm audit --omit=dev`.
+  4. **Run Dedicated Updater & Release Verification**: Install dependencies (`electron-updater`), rebuild, run full unit + Electron tests including the updater unit/IPC/banner suites, run `npm run build:release` and `npm run verify:release-bundle`, and run the two-build installed Windows updater E2E test (`npm run verify:updater`) against an isolated test feed before publishing any release feed.
+  - **Current Status**: Kept strictly separate in `D:\organizer`; no update feed is enabled or published.
 
 ---
 
-## 5. Recommended First Bounded 8C Implementation Slice
+## 4. Explicitly Out of Scope / Deferred
 
-### Slice 8C-1: Release Scope Lock, Dependency/Security Audit & Windows NSIS Installer
-
-**Goal:** Lock v1 platform scope (Windows x64 first, with macOS/Linux explicitly deferred or scheduled), verify dependency/notice hygiene, and produce a working, tested Windows installer.
-
-**Deliverables:**
-
-1. Record platform, signing, and Google Drive OAuth distribution decisions in `STAGES.md` / `docs/stage-8c-release-readiness-plan.md`.
-2. Add Windows app icon / build resources (`build/`) and configure `nsis` target in `electron-builder.json5` (producing an installer alongside `dir`).
-3. Run `npm audit --omit=dev`, audit `THIRD_PARTY_NOTICES.md` against `package-lock.json`, and audit `startup.log`/error paths for secret/token redaction.
-4. Execute clean-environment Windows install → smoke check → upgrade → uninstall test verifying `<userData>` and vault preservation.
-
-**Acceptance Tests for Slice 8C-1:**
-
-- `npm audit --omit=dev` reports `0` high/critical vulnerabilities (or documented, mitigated exceptions).
-- `THIRD_PARTY_NOTICES.md` matches all bundled production packages and model artifacts.
-- `electron-builder` produces a clean Windows NSIS installer that installs, launches with passing `window.api` bridge & CSP checks, upgrades without data loss, and uninstalls cleanly while preserving user vault/profile data.
-- `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check`, and `npm run smoke:unpacked` all pass (`exit 0`).
+- **Out of Scope**: Stage 8E public release, Authenticode/SmartScreen public signing, public Google Drive OAuth app verification / embedded client ID, macOS & Linux installers (`asarUnpack` rules + POSIX `.sock` stale cleanup in `acquireOsProfileLock`), mobile clients, and public update feeds.
+- **Deferred (Non-Blocking)**: Remaining Pre-Stage-7 modularity splits, Stage 7D `F2`/`F3` doc-search polish, Stage 8A orphaned top-level `.pv-meta.json` inspection note, live NAS UNC throttling benchmark, in-app file deletion (excluded/not implemented), and `D:\organizer` `809b0b8` auto-updater (awaiting Ron decision if wanted post-closeout).
