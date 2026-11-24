@@ -1,6 +1,14 @@
-import { Menu, Search, X } from 'lucide-react'
-import { useRef, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
+import { Check, Menu, Moon, MoreHorizontal, Search, Sun, X } from 'lucide-react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type RefObject
+} from 'react'
 import type { BridgeState } from '../hooks/useVaultApi'
+import type { ThemeMode } from '../hooks/useTheme'
 import type { NavigationTab } from '../../../shared/validation/ipc-schemas'
 
 interface HeaderProps {
@@ -15,6 +23,8 @@ interface HeaderProps {
   isNavOpen?: boolean
   onToggleNav?: () => void
   navToggleRef?: RefObject<HTMLButtonElement | null>
+  theme?: ThemeMode
+  onSelectTheme?: (theme: ThemeMode) => void
 }
 
 function statusLabel(state: BridgeState): string {
@@ -41,13 +51,40 @@ export function Header({
   currentTab,
   isNavOpen = false,
   onToggleNav,
-  navToggleRef
+  navToggleRef,
+  theme = 'light',
+  onSelectTheme
 }: HeaderProps) {
   const internalInputRef = useRef<HTMLInputElement | null>(null)
   const resolvedInputRef = searchInputRef ?? internalInputRef
+  const [isAppMenuOpen, setIsAppMenuOpen] = useState(false)
+  const appMenuWrapperRef = useRef<HTMLDivElement>(null)
+  const appMenuBtnRef = useRef<HTMLButtonElement>(null)
   const hideGlobalSearch = currentTab === 'photos' || currentTab === 'documents'
   const searchAvailable =
     state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && !hideGlobalSearch
+
+  useEffect(() => {
+    if (!isAppMenuOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      if (appMenuWrapperRef.current && !appMenuWrapperRef.current.contains(event.target as Node)) {
+        setIsAppMenuOpen(false)
+      }
+    }
+    const handleDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setIsAppMenuOpen(false)
+        appMenuBtnRef.current?.focus()
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleDocumentKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleDocumentKeyDown)
+    }
+  }, [isAppMenuOpen])
 
   const triggerSubmit = () => {
     if (!searchAvailable) return
@@ -134,6 +171,70 @@ export function Header({
           <span className={`status-dot ${state.phase}`} aria-hidden="true" />
           <span>{statusLabel(state)}</span>
         </span>
+
+        <div ref={appMenuWrapperRef} className="app-menu-wrapper">
+          <button
+            ref={appMenuBtnRef}
+            type="button"
+            className="app-menu-trigger-btn"
+            data-testid="app-menu-btn"
+            aria-label="App menu"
+            aria-haspopup="menu"
+            aria-expanded={isAppMenuOpen}
+            aria-controls="app-appearance-menu"
+            onClick={() => setIsAppMenuOpen((prev) => !prev)}
+          >
+            <MoreHorizontal size={16} aria-hidden="true" />
+          </button>
+
+          {isAppMenuOpen && (
+            <div
+              id="app-appearance-menu"
+              className="app-menu-popover"
+              data-testid="app-menu"
+              role="menu"
+              aria-label="App menu"
+            >
+              <div className="app-menu-section-title" role="presentation">
+                Appearance
+              </div>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={theme === 'light'}
+                data-testid="theme-option-light"
+                className={`app-menu-item ${theme === 'light' ? 'selected' : ''}`}
+                onClick={() => {
+                  onSelectTheme?.('light')
+                  setIsAppMenuOpen(false)
+                }}
+              >
+                <span className="app-menu-item-label">
+                  <Sun size={15} aria-hidden="true" />
+                  <span>Light</span>
+                </span>
+                {theme === 'light' && <Check size={14} aria-hidden="true" />}
+              </button>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={theme === 'dark'}
+                data-testid="theme-option-dark"
+                className={`app-menu-item ${theme === 'dark' ? 'selected' : ''}`}
+                onClick={() => {
+                  onSelectTheme?.('dark')
+                  setIsAppMenuOpen(false)
+                }}
+              >
+                <span className="app-menu-item-label">
+                  <Moon size={15} aria-hidden="true" />
+                  <span>Dark</span>
+                </span>
+                {theme === 'dark' && <Check size={14} aria-hidden="true" />}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   )

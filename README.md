@@ -156,14 +156,16 @@ The output executable is generated at:
 3. **Extract Technical Metadata & Build Semantic Index (`Photos`)**:
    - Run **Extract Metadata** (works without a semantic model) to parse read-only EXIF/header capture dates (`DateTimeOriginal`, or `DateTimeDigitized` fallback when absent), camera/lens names, orientation-adjusted display dimensions, and container formats.
    - Run **Index Photos** to compute 512-dimensional L2-normalized CLIP image embeddings (`clip_vit_b32_224_bicubic_center_rgb_v1`) in background worker threads. Jobs support pause, cancel, resume, and crash-restart recovery with exact snapshotted scope.
-4. **Search & Filter (`Photos` Toolbar)**:
+4. **Search, Filter & Appearance (`Photos` Toolbar & App Menu)**:
    - Enter a natural-language query ($\le 500$ characters) in the Photos search bar and optionally combine it with rating, flag, collection, capture date range, camera, lens, minimum display resolution, file-type (`detected_format` or `filename_extension`), and `Unknown` filters.
+   - Search results lead prominently with **Top results** (with direct **Open** and plain-language provenance) and keep remaining ranked matches accessible via **Show other results (N)** without altering ranking or hiding items from the catalog. Raw similarity scores are shown inside Photograph Details rather than overlaid on thumbnails, and **Copy text** appears where extracted OCR/document text and clipboard support are available.
+   - Switch between **Light** (default) and **Dark** themes from the top-right **App menu -> Appearance** selector; preferences persist locally across restarts (`localStorage`).
    - SQL filters prune candidates before cosine similarity ranking (`TopKMinHeap` for `offset + limit <= 1,000`; bounded disk-backed temporary SQLite ranker for `offset + limit > 1,000`).
    - Clear the search bar at any time to restore ordinary browsing.
 
 ### Known Limitations & Honesty Disclosures
 
-- **Machine Inferences vs. Recorded Facts**: Semantic similarity badges (`xx% match`) are uncalibrated cosine similarity inferences from CLIP embeddings, not factual object labels or ground-truth classifications. Absent capture dates, cameras, lenses, or dimensions remain explicit `Unknown` (`null`) and are never fabricated from filesystem timestamps or filenames.
+- **Machine Inferences vs. Recorded Facts**: Semantic search rankings and raw similarity scores shown in Photograph Details are uncalibrated cosine similarity inferences from CLIP embeddings, not factual object labels, probabilities, or ground-truth classifications. Absent capture dates, cameras, lenses, or dimensions remain explicit `Unknown` (`null`) and are never fabricated from filesystem timestamps or filenames.
 - **77-Token CLIP Context Window**: Queries exceeding 77 BPE tokens are truncated at 77 tokens and explicitly disclosed in the UI (`truncated: true`, `tokenCount: 77`).
 - **Supported Image Formats**: JPEG, PNG, WebP, GIF (frame 0), AVIF, TIFF, and Apple HEIC/HEIF (via bundled `libheif-js` WASM) are supported for thumbnail decoding, EXIF/header extraction, and CLIP indexing. Camera RAW formats (`.cr2`, `.nef`, `.arw`, `.dng`, `.orf`, `.rw2`, `.raf`) and SVG/BMP are reported honestly as `unsupported`.
 - **OS Read-Access Timestamps (`atime`)**: Source files are opened strictly read-only (`open(path, 'r')`), preserving exact bytes, SHA-256 digests, sizes, creation times (`birthtimeMs`), and modification times (`mtimeMs`). Depending on OS/mount settings, read-only opens may update the filesystem access timestamp (`atime`).

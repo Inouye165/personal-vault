@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { FileText, Search, X } from 'lucide-react'
+import { CopyTextButton } from './CopyTextButton'
 import type {
   DocumentClutterFilter,
   DocumentClutterOverride,
@@ -1742,12 +1743,21 @@ export function DocumentsPanel() {
 
                           {docs.preview.extractedText !== null &&
                           docs.preview.extractedText.length > 0 ? (
-                            <pre
-                              className="documents-extracted-text"
-                              data-testid="document-extracted-text-preview"
-                            >
-                              {docs.preview.extractedText}
-                            </pre>
+                            <>
+                              <div className="extracted-text-actions-row">
+                                <CopyTextButton
+                                  text={docs.preview.extractedText}
+                                  testId="document-copy-extracted-text-btn"
+                                  ariaLabel="Copy extracted document text"
+                                />
+                              </div>
+                              <pre
+                                className="documents-extracted-text"
+                                data-testid="document-extracted-text-preview"
+                              >
+                                {docs.preview.extractedText}
+                              </pre>
+                            </>
                           ) : (
                             <p
                               className="documents-preview-empty"
@@ -1861,12 +1871,21 @@ export function DocumentsPanel() {
 
                           {docs.ocrPreview.extractedText !== null &&
                           docs.ocrPreview.extractedText.length > 0 ? (
-                            <pre
-                              className="documents-extracted-text"
-                              data-testid="document-ocr-text-preview"
-                            >
-                              {docs.ocrPreview.extractedText}
-                            </pre>
+                            <>
+                              <div className="extracted-text-actions-row">
+                                <CopyTextButton
+                                  text={docs.ocrPreview.extractedText}
+                                  testId="document-copy-ocr-text-btn"
+                                  ariaLabel="Copy document OCR text"
+                                />
+                              </div>
+                              <pre
+                                className="documents-extracted-text"
+                                data-testid="document-ocr-text-preview"
+                              >
+                                {docs.ocrPreview.extractedText}
+                              </pre>
+                            </>
                           ) : (
                             <p
                               className="documents-preview-empty"

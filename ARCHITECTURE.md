@@ -122,9 +122,9 @@ src/
     └── src/
         ├── main.tsx       # React 19 root bootstrap
         ├── App.tsx        # Application shell container
-        ├── index.css      # Design tokens, typography, dark theme layout
-        ├── hooks/         # Custom hooks (useVaultApi, useScanJobs, usePhotos, usePhotoMetadata, usePhotoReview, useSimilarityReview, useFocusTrap, useMediaQuery)
-        └── components/    # Layout, Sidebar, Header, and EmptyState views
+        ├── index.css      # Shared Light/Dark design tokens, typography, and layout
+        ├── hooks/         # Custom hooks (useTheme, useVaultApi, useScanJobs, usePhotos, usePhotoMetadata, usePhotoReview, useSimilarityReview, useFocusTrap, useMediaQuery)
+        └── components/    # Layout, Sidebar, Header (App Appearance menu), CopyTextButton, and view panels
 ```
 
 ---

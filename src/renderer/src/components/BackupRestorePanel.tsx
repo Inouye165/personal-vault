@@ -1868,7 +1868,9 @@ export function BackupRestorePanel() {
                     </div>
 
                     {job?.errorMessage && (
-                      <div style={{ color: '#ff8787', fontSize: '13px' }}>{job.errorMessage}</div>
+                      <div style={{ color: 'var(--danger-text)', fontSize: '13px' }}>
+                        {job.errorMessage}
+                      </div>
                     )}
 
                     {isExpanded && (
@@ -2174,7 +2176,11 @@ export function BackupRestorePanel() {
             {restoreResult && (
               <div className="backup-restore-result-box" role="status">
                 <div className="backup-restore-step-header">
-                  <CheckCircle2 size={18} color="#6ed49b" aria-hidden="true" />
+                  <CheckCircle2
+                    size={18}
+                    style={{ color: 'var(--success-text)' }}
+                    aria-hidden="true"
+                  />
                   <span>Restore complete — {restoreResult.verifiedFileCount} files restored</span>
                 </div>
 
@@ -2314,7 +2320,11 @@ export function BackupRestorePanel() {
                 data-testid="recover-catalog-result"
               >
                 <div className="backup-restore-step-header">
-                  <CheckCircle2 size={18} color="#6ed49b" aria-hidden="true" />
+                  <CheckCircle2
+                    size={18}
+                    style={{ color: 'var(--success-text)' }}
+                    aria-hidden="true"
+                  />
                   <span>
                     Catalog rebuilt — {recoverResult.recoveredVaultCopies} verified vault copies (
                     {recoverResult.recoveredFileLocations} locations)
