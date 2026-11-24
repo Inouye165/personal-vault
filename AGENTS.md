@@ -1,7 +1,7 @@
 # Personal Vault — Standing Engineering Instructions (AGENTS.md)
 
 Project Slug: `personal-vault`  
-Workspace: `D:\organizer`
+Workspace: Repository checkout root (closeout baseline in `D:\workspace\personal-vault`; keep `D:\organizer` separate/read-only)
 
 ## 1. Core Mission & Inviolable Principles
 
@@ -67,18 +67,21 @@ Personal Vault discovers photographs and documents, supports review and classifi
 
 ## 3. Standard Development & Verification Commands
 
-All commands run from project root (`D:\organizer`):
+All commands run from the active repository root (e.g., `D:\workspace\personal-vault`):
 
 - **Development server**: `npm run dev`
+- **Full bundle build**: `npm run build` (run before `npm test` on a clean checkout so `out/main/document_classify_worker.js` exists)
 - **Unit & behavioral tests**: `npm test`
 - **Test watcher**: `npm run test:watch`
 - **Strict type checking**: `npm run typecheck`
 - **Linting**: `npm run lint`
-- **Formatting check**: `npm run format:check`
+- **Formatting check**: `npm run format:check` (on Windows `core.autocrlf=true` checkouts, `npx prettier --end-of-line auto --check .` and `npx prettier --check <changed-files>` avoid CRLF false positives)
 - **Format codebase**: `npm run format`
-- **Full bundle build**: `npm run build`
 - **Unpacked desktop binary build**: `npm run build:unpack`
-- **Real Electron bridge smoke checks**: `npm run smoke:dev`, `npm run smoke:built`, `npm run smoke:unpacked` (the unpacked check requires `npm run build:unpack` first)
+- **Pinned VC++ Redistributable download/verify**: `npm run fetch:vcredist` and `npm run verify:vcredist`
+- **Windows x64 NSIS candidate build**: `npm run build:installer`
+- **Isolated Windows candidate E2E & lifecycle check**: `npm run verify:windows-candidate`
+- **Real Electron bridge smoke checks**: `npm run smoke:dev`, `npm run smoke:built`, `npm run smoke:unpacked` (the unpacked check requires `npm run build:unpack` or `npm run build:installer` first)
 - **Electron SQLite driver check**: `npm run verify:sqlite`
 
 ---

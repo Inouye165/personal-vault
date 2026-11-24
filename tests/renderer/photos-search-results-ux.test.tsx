@@ -224,6 +224,108 @@ describe('Photos search results hierarchy and Copy text UX', () => {
     })
   })
 
+  it('evicts Page 0 during deep search scroll and reloads Page 0 only when returning to top', async () => {
+    const totalMatched = 2500
+    const offsetZeroRequests: number[] = []
+    vi.mocked(window.api.searchPhotosSemantic).mockImplementation(async (req) => {
+      const offset = req.offset ?? 0
+      const limit = req.limit ?? 50
+      if (offset === 0) {
+        offsetZeroRequests.push(offset)
+      }
+      const items = Array.from({ length: Math.min(limit, totalMatched - offset) }, (_, i) => {
+        const id = offset + i + 1
+        return {
+          photo: makePhoto(id, `search_photo_${id}.jpg`),
+          score: 0.9 - id * 0.0001,
+          rank: id
+        }
+      })
+      return {
+        items,
+        totalMatched,
+        eligibleCount: totalMatched,
+        unindexedCount: 0,
+        staleCount: 0,
+        corruptCount: 0,
+        offset,
+        limit,
+        hasMore: offset + items.length < totalMatched,
+        queryLatencyMs: 12,
+        truncated: false,
+        tokenCount: 2,
+        modelStatus: 'ready'
+      }
+    })
+
+    await act(async () => {
+      render(<PhotosPanel />)
+    })
+
+    const searchInput = await screen.findByPlaceholderText(/search photos by description/i)
+    await act(async () => {
+      fireEvent.change(searchInput, { target: { value: 'ocean landscape' } })
+      fireEvent.submit(searchInput.closest('form')!)
+    })
+
+    const toggleBtn = await screen.findByTestId('photos-toggle-other-results-btn')
+    await act(async () => {
+      fireEvent.click(toggleBtn)
+    })
+
+    const grid = document.querySelector('.photos-grid-container') as HTMLDivElement
+    expect(grid).not.toBeNull()
+    const scrollHeight = Number.parseInt(
+      (document.querySelector('.photos-virtual-container') as HTMLDivElement).style.height ||
+        '120000',
+      10
+    )
+
+    // Traverse through 42+ pages while scrolled deep past the Top results header
+    const observedPages = new Set<number>([0])
+    for (let p = 1; p <= 44; p += 1) {
+      const targetScroll = Math.max(
+        2000,
+        Math.floor(((p * 50) / totalMatched) * Math.max(1, scrollHeight))
+      )
+      await act(async () => {
+        fireEvent.scroll(grid, { target: { scrollTop: targetScroll } })
+      })
+      await waitFor(() => {
+        const pagesAttr = grid.getAttribute('data-cached-pages') ?? ''
+        const cached = pagesAttr.split(',').filter(Boolean).map(Number)
+        for (const cp of cached) observedPages.add(cp)
+        expect(cached).toContain(p)
+      })
+    }
+
+    expect(observedPages.size).toBeGreaterThan(40)
+    // Page 0 must have been evicted rather than pinned MRU by Top results
+    const pagesAfterDeepScroll = (grid.getAttribute('data-cached-pages') ?? '')
+      .split(',')
+      .filter(Boolean)
+      .map(Number)
+    expect(pagesAfterDeepScroll).not.toContain(0)
+    expect(Number(grid.getAttribute('data-search-score-count'))).toBe(2000)
+    expect(offsetZeroRequests).toHaveLength(1)
+
+    // Scroll back to top (scrollTop = 0) and confirm Page 0 reloads cleanly
+    await act(async () => {
+      fireEvent.scroll(grid, { target: { scrollTop: 0 } })
+    })
+    await waitFor(() => {
+      const cached = (grid.getAttribute('data-cached-pages') ?? '')
+        .split(',')
+        .filter(Boolean)
+        .map(Number)
+      expect(cached).toContain(0)
+    })
+    expect(offsetZeroRequests).toHaveLength(2)
+    expect(
+      within(screen.getByTestId('photos-top-results')).getByText('search_photo_1.jpg')
+    ).toBeInTheDocument()
+  })
+
   it('shows Copy text in PhotoSelectedOcrSection only when extracted text and clipboard writeText exist', async () => {
     const writeTextMock = vi.fn(async () => {})
     Object.defineProperty(navigator, 'clipboard', {

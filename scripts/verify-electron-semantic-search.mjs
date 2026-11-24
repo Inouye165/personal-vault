@@ -977,14 +977,13 @@ async function main() {
     const searchP1 = evaluate(
       app.cdp,
       `window.api.searchPhotosSemantic({ queryText: 'yellow sunrise daylight morning' })`
+    ).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
     )
     await evaluate(app.cdp, `window.api.cancelPhotosSemanticSearch()`)
-    let cancelError = null
-    try {
-      await searchP1
-    } catch (err) {
-      cancelError = err
-    }
+    const p1Outcome = await searchP1
+    const cancelError = p1Outcome.ok ? null : p1Outcome.error
     if (!cancelError || !String(cancelError).toLowerCase().includes('cancel')) {
       throw new Error(`Expected search to reject with cancellation error, got: ${cancelError}`)
     }
@@ -994,23 +993,28 @@ async function main() {
     const replaceP1 = evaluate(
       app.cdp,
       `window.api.searchPhotosSemantic({ queryText: 'first replacement query' })`
+    ).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
     )
     const replaceP2 = evaluate(
       app.cdp,
       `window.api.searchPhotosSemantic({ queryText: 'second replacement query' })`
+    ).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
     )
-    let p1SupersededError = null
-    try {
-      await replaceP1
-    } catch (err) {
-      p1SupersededError = err
-    }
+    const [r1Outcome, r2Outcome] = await Promise.all([replaceP1, replaceP2])
+    const p1SupersededError = r1Outcome.ok ? null : r1Outcome.error
     if (!p1SupersededError || !String(p1SupersededError).toLowerCase().includes('superseded')) {
       throw new Error(
         `Expected first query to reject with supersession error, got: ${p1SupersededError}`
       )
     }
-    const r2Success = await replaceP2
+    if (!r2Outcome.ok) {
+      throw r2Outcome.error
+    }
+    const r2Success = r2Outcome.value
     if (!r2Success || r2Success.modelStatus !== 'ready') {
       throw new Error('Replacement query failed to resolve successfully')
     }
@@ -1513,20 +1517,60 @@ async function main() {
     }
     pass('Semantic match non-factual disclaimer rendered in DOM')
 
-    // Check similarity badge on photo card
-    let cardBadge = ''
+    // Check Top results UI (no raw % match overlays on thumbnails; raw score inside Photograph Details)
+    let topResultsText = ''
     for (let i = 0; i < 40; i++) {
-      cardBadge = await evaluate(
+      topResultsText = await evaluate(
         app.cdp,
-        `document.querySelector('.badge-similarity-score')?.textContent ?? ''`
+        `document.querySelector('[data-testid="photos-top-results"]')?.textContent ?? ''`
       )
-      if (cardBadge.includes('% match')) break
+      if (topResultsText.includes('sunset_beach.jpg')) break
       await sleep(150)
     }
-    if (!cardBadge.includes('% match')) {
-      throw new Error(`Expected similarity badge on card, got: '${cardBadge}'`)
+    if (!topResultsText.includes('sunset_beach.jpg')) {
+      throw new Error(`Expected sunset_beach.jpg in Top results, got: '${topResultsText}'`)
     }
-    pass(`Photo card rendered similarity match badge: '${cardBadge}'`)
+    const thumbOverlayCount = await evaluate(
+      app.cdp,
+      `document.querySelectorAll('.badge-similarity-score').length`
+    )
+    if (thumbOverlayCount !== 0) {
+      throw new Error(
+        `Expected zero raw .badge-similarity-score overlays on cards, found ${thumbOverlayCount}`
+      )
+    }
+
+    await evaluate(
+      app.cdp,
+      `(() => {
+        const card = document.querySelector('[data-testid="photos-top-results"] .photo-featured-card')
+        if (card) card.click()
+      })()`
+    )
+    let detailsScoreText = ''
+    for (let i = 0; i < 40; i++) {
+      detailsScoreText = await evaluate(
+        app.cdp,
+        `document.querySelector('[data-testid="photo-search-similarity-detail"]')?.textContent ?? ''`
+      )
+      if (/not a probability/i.test(detailsScoreText) && /\d+\.\d{3}/.test(detailsScoreText)) break
+      await sleep(150)
+    }
+    if (!/not a probability/i.test(detailsScoreText) || !/\d+\.\d{3}/.test(detailsScoreText)) {
+      throw new Error(
+        `Expected raw similarity score + provenance in Photograph Details, got: '${detailsScoreText}'`
+      )
+    }
+    await evaluate(
+      app.cdp,
+      `(() => {
+        const closeBtn = document.querySelector('.details-close-btn')
+        if (closeBtn) closeBtn.click()
+      })()`
+    )
+    pass(
+      `Photos search UI rendered Top results and Search Relevance details cleanly: '${detailsScoreText.trim()}'`
+    )
 
     // Clear search and verify restoration of ordinary browsing
     await evaluate(
@@ -1788,7 +1832,28 @@ async function main() {
       `Photos UI rendered large-catalog match badge ('${largeMatchBadge}') and corrupt vector warning ('${corruptDomWarning}')`
     )
 
-    // Scroll virtual grid to bottom (beyond offset 10,000) and verify deep cards mount with similarity badges and bounded DOM cells (<= 200)
+    // Expand "Show other results" so virtualized grid cells mount for deep scroll & LRU traversal
+    let otherExpanded = false
+    for (let i = 0; i < 40; i++) {
+      otherExpanded = await evaluate(
+        app.cdp,
+        `(() => {
+          const btn = document.querySelector('[data-testid="photos-toggle-other-results-btn"]')
+          if (!btn) return false
+          if (btn.getAttribute('aria-expanded') !== 'true') {
+            btn.click()
+          }
+          return btn.getAttribute('aria-expanded') === 'true'
+        })()`
+      )
+      if (otherExpanded) break
+      await sleep(100)
+    }
+    if (!otherExpanded) {
+      throw new Error('Could not expand "Show other results" toggle for deep scroll verification')
+    }
+
+    // Scroll virtual grid to bottom (beyond offset 10,000) and verify deep cards mount with search scores and bounded DOM cells (<= 200)
     await evaluate(
       app.cdp,
       `(() => {
@@ -1805,26 +1870,27 @@ async function main() {
       deepGridState = await evaluate(
         app.cdp,
         `(() => {
+          const grid = document.querySelector('.photos-grid-container')
           const cards = Array.from(document.querySelectorAll('.photo-card'))
           const names = cards.map((c) => c.querySelector('.photo-filename')?.textContent ?? '')
-          const badges = cards.filter((c) => c.querySelector('.badge-similarity-score')).length
           const deepNames = names.filter((n) => n.startsWith('synthetic_scale_10'))
           return {
             mountedCells: cards.length,
             hasDeepSynthetic: deepNames.length >= 6 && !names.some((n) => n.includes('Loading')),
-            badges,
+            searchScoreCount: Number(grid?.getAttribute('data-search-score-count') ?? 0),
             sampleNames: deepNames.slice(-3)
           }
         })()`
       )
       await collectLargeDiagSample()
-      if (deepGridState.hasDeepSynthetic && deepGridState.badges > 0) break
+      if (deepGridState.hasDeepSynthetic && deepGridState.searchScoreCount > 0) break
       await sleep(150)
     }
     if (
       !deepGridState ||
       !deepGridState.hasDeepSynthetic ||
-      deepGridState.badges === 0 ||
+      deepGridState.searchScoreCount <= 0 ||
+      deepGridState.mountedCells <= 0 ||
       deepGridState.mountedCells > 200
     ) {
       throw new Error(
@@ -1832,21 +1898,25 @@ async function main() {
       )
     }
     pass(
-      `Real renderer virtual grid scrolled beyond offset 10,000 (${deepGridState.sampleNames.join(', ')}) with ${deepGridState.badges} similarity badges and ${deepGridState.mountedCells} mounted DOM cells (<= 200 bound)`
+      `Real renderer virtual grid scrolled beyond offset 10,000 (${deepGridState.sampleNames.join(', ')}) with ${deepGridState.searchScoreCount} retained search scores and ${deepGridState.mountedCells} mounted DOM cells (<= 200 bound)`
     )
 
     // Deterministically traverse > 40 distinct pages (1..44), waiting for each completed page load in cache,
     // verify Page 0 eviction, then return to scrollTop = 0 and verify Page 0 reload + retained page scores.
     const observedPagesSet = new Set([0])
-    const totalScrollRange = await evaluate(
+    const scrollMetrics = await evaluate(
       app.cdp,
       `(() => {
         const grid = document.querySelector('.photos-grid-container')
-        return grid ? Math.max(1, grid.scrollHeight - grid.clientHeight) : 1
+        const headerHeight = document.querySelector('.photos-search-results-showcase')?.offsetHeight ?? 0
+        const virtualRange = grid ? Math.max(1, grid.scrollHeight - headerHeight - grid.clientHeight) : 1
+        return { headerHeight, virtualRange }
       })()`
     )
     for (let p = 1; p <= 44; p++) {
-      const targetScroll = Math.floor(((p * 50) / expectedLargeMatchCount) * totalScrollRange)
+      const targetScroll =
+        scrollMetrics.headerHeight +
+        Math.floor(((p * 50) / expectedLargeMatchCount) * scrollMetrics.virtualRange)
       await evaluate(
         app.cdp,
         `(() => {
@@ -1927,13 +1997,12 @@ async function main() {
           const rawPages = grid?.getAttribute('data-cached-pages') ?? ''
           const cachedPages = rawPages.split(',').filter(Boolean).map((n) => Number(n))
           const cards = Array.from(document.querySelectorAll('.photo-card'))
-          const topCard = cards[0]
-          const topName = topCard?.querySelector('.photo-filename')?.textContent ?? ''
-          const topBadge = topCard?.querySelector('.badge-similarity-score')?.textContent ?? ''
+          const topFeaturedTitle =
+            document.querySelector('[data-testid="photos-top-results"] .photo-featured-title')
+              ?.textContent ?? ''
           return {
             mountedCells: cards.length,
-            topName,
-            topBadge,
+            topFeaturedTitle,
             cachedPageCount: Number(grid?.getAttribute('data-cached-page-count') ?? 0),
             cachedPages,
             searchScoreCount: Number(grid?.getAttribute('data-search-score-count') ?? 0)
@@ -1943,8 +2012,9 @@ async function main() {
       await collectLargeDiagSample()
       if (
         returnedPage0State.cachedPages.includes(0) &&
-        returnedPage0State.topName.includes('sunset_beach.jpg') &&
-        returnedPage0State.topBadge.includes('% match')
+        returnedPage0State.topFeaturedTitle.includes('sunset_beach.jpg') &&
+        returnedPage0State.searchScoreCount === 2000 &&
+        returnedPage0State.mountedCells > 0
       ) {
         break
       }
@@ -1952,8 +2022,8 @@ async function main() {
     }
     if (
       !returnedPage0State ||
-      !returnedPage0State.topName.includes('sunset_beach.jpg') ||
-      !returnedPage0State.topBadge.includes('% match')
+      !returnedPage0State.topFeaturedTitle.includes('sunset_beach.jpg') ||
+      returnedPage0State.searchScoreCount !== 2000
     ) {
       throw new Error(
         `Return to evicted Page 0 after >40-page traversal failed: ${JSON.stringify(returnedPage0State)}`

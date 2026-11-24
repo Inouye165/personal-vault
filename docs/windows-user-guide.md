@@ -2,12 +2,12 @@
 
 ## Install and get started
 
-1. Use the Windows x64 installer from your Personal Vault test build. Close Personal Vault before installing an update.
+1. Use the verified Windows x64 NSIS installer (`Personal Vault Setup 0.1.0.exe`). Close Personal Vault before installing an update manually; installers preserve your `%APPDATA%\Personal Vault` profile (`vault-catalog.db`) and external vault folder. There is no active auto-update feed enabled in this build.
 2. Open Personal Vault, go to **All Items**, and select **Select Source Folders**. Start with a small folder you know well. **Start Scan** adds files to the catalog and reads their metadata and contents without changing the originals.
 3. To keep a verified copy inside the vault, open **Review**, choose a dedicated vault folder, and initialize it. Select the files you want and run **Start Verified Import**. A scanned item can appear in the catalog before it has a vault copy.
 4. To use offline semantic search or OCR, set up the corresponding models in the app. Model downloads require an internet connection. Once installed, indexing, OCR, and searches run locally.
 
-The installer is an internal test build. Public distribution and clean Windows VM verification are pending. The tested uninstall flow preserved the profile and vault. Keep a verified backup before upgrading or uninstalling, and keep the vault folder outside the application installation directory.
+Personal Vault 0.1.0 is scoped for personal Windows x64 desktop use. Public distribution, Authenticode/SmartScreen signing, and macOS/Linux installers are outside the current scope. Clean Windows x64 Sandbox verification and isolated-`appId` upgrade/migration/uninstall checks have passed; the tested uninstall flow preserves the profile and vault. Keep a verified backup before upgrading or uninstalling, and keep the vault folder outside the application installation directory.
 
 ## Privacy
 
@@ -24,6 +24,6 @@ The installer is an internal test build. Public distribution and clean Windows V
 
 Backups include the catalog, annotations, and imported vault files. Scanned files outside the vault remain in their original folders, so back those folders up separately. Thumbnails and offline AI models are excluded and can be recreated or installed again.
 
-If you have the vault folder but have lost the catalog, **Recover from an existing vault** can rebuild a catalog of imported files from its manifests. It gives you read-only access to those files. Use **Restore Files** with a backup when you need ratings, collections, review decisions, and other saved edits. Some background metadata, indexing, and OCR workflows are still pending for profiles rebuilt from vault manifests.
+If you have the vault folder but have lost the catalog, **Recover from an existing vault** can rebuild a catalog of imported files from its manifests. It gives you read-only access to those files (new vault imports into a recovered vault are refused). In a recovered profile, thumbnails, photo metadata extraction, semantic indexing, document text extraction, and offline OCR all work against the verified vault copies. Use **Restore Files** with a backup when you need ratings, collections, review decisions, and other saved edits.
 
-For an internal test issue, report the app version, the operation, and the exact error to the person who supplied your build. Use a disposable example where possible and keep recovery secrets, OAuth credentials, tokens, and private files out of reports.
+For issues, record the app version, operation, and exact error, and report them via the repository (`Inouye165/personal-vault`) or `docs/stage-8d-trial-checklist.md`. Use a disposable example where possible and keep recovery secrets, OAuth credentials, tokens, and private files out of reports.
