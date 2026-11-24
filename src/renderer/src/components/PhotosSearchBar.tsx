@@ -6,7 +6,7 @@
  */
 
 import { useState, type FormEvent, type ReactElement } from 'react'
-import { Search, X, Loader2, AlertCircle, Info, Cpu, CheckCircle2 } from 'lucide-react'
+import { Search, X, Loader2, AlertCircle, Info, Sparkles, CheckCircle2 } from 'lucide-react'
 import type {
   SemanticIndexJobStatus,
   SemanticModelProvisionState
@@ -59,6 +59,7 @@ export interface PhotosSearchBarProps {
   } | null
   readonly onEnablePhotoSearch?: () => Promise<void> | void
   readonly onCancelEnablePhotoSearch?: () => Promise<void> | void
+  readonly onRetryIndexing?: () => Promise<void> | void
   readonly onDismissSearchReady?: () => void
 }
 
@@ -80,11 +81,11 @@ export function PhotosSearchBar({
   searchReadyAnnouncement = null,
   onEnablePhotoSearch,
   onCancelEnablePhotoSearch,
+  onRetryIndexing,
   onDismissSearchReady
 }: PhotosSearchBarProps): ReactElement {
   const [inputValue, setInputValue] = useState(query)
   const [prevQuery, setPrevQuery] = useState(query)
-  const [showEnableConfirm, setShowEnableConfirm] = useState(false)
 
   if (query !== prevQuery) {
     setPrevQuery(query)
@@ -104,13 +105,15 @@ export function PhotosSearchBar({
     onClear()
   }
 
-  const isModelMissing = modelStatus === 'unprovisioned' || modelStatus === 'missing'
+  const isModelReady = modelStatus === 'ready'
   const isModelCorrupt = modelStatus === 'corrupt'
   const isModelError = modelStatus === 'error'
   const isModelDownloading = modelStatus === 'installing'
-  const needsModel = isModelMissing || isModelCorrupt || isModelError
+  const hasSetupFailure =
+    !isModelReady && !isModelDownloading && (isModelError || isModelCorrupt || Boolean(setupError))
   const isIndexingActive =
     indexingProgress?.status === 'running' || indexingProgress?.status === 'paused'
+  const isIndexingFailed = isModelReady && indexingProgress?.status === 'failed'
 
   const downloadPct =
     modelDownloadProgress && modelDownloadProgress.requiredBytes > 0
@@ -132,89 +135,34 @@ export function PhotosSearchBar({
 
   return (
     <div className="photos-search-bar-container" data-testid="photos-search-bar">
-      <form onSubmit={handleSubmit} className="photos-search-form" role="search">
-        <div className="photos-search-input-wrapper">
-          <Search size={16} className="search-icon" aria-hidden="true" />
-          <input
-            type="text"
-            className="photos-search-input"
-            placeholder="Search photos by description (e.g. sunset over ocean)..."
-            aria-label="Search photos by description"
-            value={inputValue}
-            maxLength={500}
-            disabled={disabled || isSearching}
-            onChange={(e) => setInputValue(e.target.value)}
-          />
-          {isSearching && (
-            <Loader2 size={16} className="search-loading-icon spin" aria-label="Searching..." />
-          )}
-          {(inputValue.length > 0 || query.length > 0 || searchResult) && !isSearching && (
-            <button
-              type="button"
-              className="photos-search-clear-btn"
-              onClick={handleClear}
-              aria-label="Clear search"
-              title="Clear search and restore ordinary browsing"
-            >
-              <X size={16} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <button
-          type="submit"
-          className="btn btn-primary btn-sm photos-search-submit-btn"
-          disabled={disabled || isSearching || !inputValue.trim()}
-          aria-label="Search"
-        >
-          <span>Search</span>
-        </button>
-        {needsModel && onEnablePhotoSearch && (
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm photos-enable-search-btn"
-            data-testid="enable-photo-search-btn"
-            aria-expanded={showEnableConfirm}
-            onClick={() => setShowEnableConfirm((prev) => !prev)}
-          >
-            <Cpu size={14} aria-hidden="true" />
-            <span>Enable photo search</span>
-          </button>
-        )}
-      </form>
-
-      {showEnableConfirm && needsModel && !isModelDownloading && onEnablePhotoSearch && (
+      {!isModelReady && !isModelDownloading && !hasSetupFailure && (
         <div
           className="search-onboarding-card"
           role="region"
-          aria-label="Confirm one-time photo search model download"
-          data-testid="enable-photo-search-confirm"
+          aria-label="Turn on photo search"
+          data-testid="turn-on-photo-search-panel"
         >
-          <p className="search-onboarding-copy">
-            <strong>One-time offline AI model download (~149 MiB)</strong> is required to search
-            photos by description. Your photos stay on this device, and you can continue browsing
-            while it downloads and indexes.
-          </p>
-          <div className="search-onboarding-actions">
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              data-testid="confirm-enable-photo-search-btn"
-              onClick={() => {
-                setShowEnableConfirm(false)
-                void onEnablePhotoSearch()
-              }}
-            >
-              Download &amp; enable search (~149 MiB)
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              data-testid="cancel-enable-photo-search-btn"
-              onClick={() => setShowEnableConfirm(false)}
-            >
-              Cancel
-            </button>
+          <div className="search-onboarding-header">
+            <Sparkles size={16} aria-hidden="true" />
+            <strong>Turn on photo search</strong>
           </div>
+          <p className="search-onboarding-copy">
+            Find photos by describing what&apos;s in them, such as &ldquo;sunset over ocean&rdquo;.
+            Turning this on starts a one-time ~149 MiB download so search works privately on this
+            device. Your photos stay on your device and remain browsable during setup.
+          </p>
+          {onEnablePhotoSearch && (
+            <div className="search-onboarding-actions">
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                data-testid="turn-on-photo-search-btn"
+                onClick={() => void onEnablePhotoSearch()}
+              >
+                Download &amp; turn on (~149 MiB)
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -225,16 +173,23 @@ export function PhotosSearchBar({
           data-testid="photo-search-download-progress"
         >
           <div className="search-onboarding-progress-header">
-            <span>
-              Downloading photo search model…{' '}
-              {modelDownloadProgress
-                ? `${formatMiB(modelDownloadProgress.downloadedBytes)} / ${formatMiB(modelDownloadProgress.requiredBytes)} (${downloadPct}%)`
-                : ''}
-            </span>
+            <div className="search-onboarding-status-stack">
+              <strong>Turning on photo search</strong>
+              <span>
+                Downloading search support…{' '}
+                {modelDownloadProgress && modelDownloadProgress.requiredBytes > 0
+                  ? `${formatMiB(modelDownloadProgress.downloadedBytes)} / ${formatMiB(modelDownloadProgress.requiredBytes)} (${downloadPct}%)`
+                  : 'Starting download…'}
+              </span>
+              <span className="search-onboarding-subtext">
+                Your photos remain browsable while this finishes.
+              </span>
+            </div>
             {onCancelEnablePhotoSearch && (
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
+                data-testid="cancel-enable-photo-search-btn"
                 onClick={() => void onCancelEnablePhotoSearch()}
               >
                 Cancel
@@ -245,113 +200,171 @@ export function PhotosSearchBar({
             className="search-onboarding-meter"
             max={100}
             value={downloadPct}
-            aria-label="Model download progress"
+            aria-label="Photo search download progress"
           />
         </div>
       )}
 
-      {!isModelDownloading && isIndexingActive && indexingProgress && (
+      {hasSetupFailure && (
+        <div
+          className="search-onboarding-card search-onboarding-error"
+          role="alert"
+          data-testid="photo-search-setup-error"
+        >
+          <div className="search-onboarding-header">
+            <AlertCircle size={16} className="notice-icon" aria-hidden="true" />
+            <strong>Couldn&apos;t turn on photo search</strong>
+          </div>
+          <p className="search-onboarding-copy">
+            {isModelCorrupt
+              ? "The downloaded search files appear damaged and couldn't be verified. Try downloading again — your photos remain safe and browsable."
+              : "Photo search couldn't finish setting up right now. Check your connection and try again — your photos remain safe and browsable."}
+          </p>
+          {setupError && (
+            <details className="search-error-details">
+              <summary>Details</summary>
+              <span>{setupError}</span>
+            </details>
+          )}
+          {onEnablePhotoSearch && (
+            <div className="search-onboarding-actions">
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                data-testid="retry-photo-search-btn"
+                onClick={() => void onEnablePhotoSearch()}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {isModelReady && (
+        <form onSubmit={handleSubmit} className="photos-search-form" role="search">
+          <div className="photos-search-input-wrapper">
+            <Search size={16} className="search-icon" aria-hidden="true" />
+            <input
+              type="text"
+              className="photos-search-input"
+              placeholder="Search photos by description (e.g. sunset over ocean)..."
+              aria-label="Search photos by description"
+              value={inputValue}
+              maxLength={500}
+              disabled={disabled || isSearching}
+              onChange={(e) => setInputValue(e.target.value)}
+            />
+            {isSearching && (
+              <Loader2 size={16} className="search-loading-icon spin" aria-label="Searching..." />
+            )}
+            {(inputValue.length > 0 || query.length > 0 || searchResult) && !isSearching && (
+              <button
+                type="button"
+                className="photos-search-clear-btn"
+                onClick={handleClear}
+                aria-label="Clear search"
+                title="Clear search and restore ordinary browsing"
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+          <button
+            type="submit"
+            className="btn btn-primary btn-sm photos-search-submit-btn"
+            disabled={disabled || isSearching || !inputValue.trim()}
+            aria-label="Search"
+          >
+            <span>Search</span>
+          </button>
+        </form>
+      )}
+
+      {isModelReady && isIndexingActive && indexingProgress && (
         <div
           className="search-onboarding-progress"
           role="status"
           data-testid="photo-search-indexing-progress"
         >
           <div className="search-onboarding-progress-header">
-            <span>
-              {indexingProgress.status === 'paused'
-                ? 'Photo search indexing paused'
-                : 'Indexing photos for search…'}{' '}
-              {indexingProgress.processedPhotos} / {indexingProgress.totalPhotos} ({indexingPct}%)
-            </span>
+            <div className="search-onboarding-status-stack">
+              <span>
+                {indexingProgress.status === 'paused'
+                  ? 'Photo search preparation paused'
+                  : 'Preparing your photos for search…'}{' '}
+                {indexingProgress.processedPhotos} of {indexingProgress.totalPhotos} ({indexingPct}
+                %)
+              </span>
+              <span className="search-onboarding-subtext">
+                You can keep browsing and searching while this finishes.
+              </span>
+            </div>
           </div>
           <progress
             className="search-onboarding-meter"
             max={100}
             value={indexingPct}
-            aria-label="Photo search indexing progress"
+            aria-label="Photo search preparation progress"
           />
         </div>
       )}
 
-      {!isModelDownloading &&
-        !isIndexingActive &&
-        modelStatus === 'ready' &&
-        searchReadyAnnouncement && (
-          <div
-            className="search-ready-banner"
-            role="status"
-            data-testid="photo-search-ready-notice"
-          >
-            <div className="search-ready-banner-text">
-              <CheckCircle2 size={14} aria-hidden="true" />
-              <span>
-                Photo search is ready ({searchReadyAnnouncement.indexedCount} of{' '}
-                {searchReadyAnnouncement.totalCount} photos indexed). Try searching above.
-              </span>
-            </div>
-            {onDismissSearchReady && (
+      {isIndexingFailed && (
+        <div
+          className="search-onboarding-card search-onboarding-error"
+          role="alert"
+          data-testid="photo-search-indexing-error"
+        >
+          <div className="search-onboarding-header">
+            <AlertCircle size={16} className="notice-icon" aria-hidden="true" />
+            <strong>Couldn&apos;t finish preparing all photos for search</strong>
+          </div>
+          {setupError && (
+            <details className="search-error-details">
+              <summary>Details</summary>
+              <span>{setupError}</span>
+            </details>
+          )}
+          {(onRetryIndexing ?? onEnablePhotoSearch) && (
+            <div className="search-onboarding-actions">
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={onDismissSearchReady}
-                aria-label="Dismiss search ready notice"
+                data-testid="retry-photo-indexing-btn"
+                onClick={() => void (onRetryIndexing ?? onEnablePhotoSearch)?.()}
               >
-                Dismiss
+                Try again
               </button>
-            )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {isModelReady && !isIndexingActive && !isIndexingFailed && searchReadyAnnouncement && (
+        <div className="search-ready-banner" role="status" data-testid="photo-search-ready-notice">
+          <div className="search-ready-banner-text">
+            <CheckCircle2 size={14} aria-hidden="true" />
+            <span>
+              {searchReadyAnnouncement.totalCount > 0
+                ? `Photo search is ready (${searchReadyAnnouncement.indexedCount} of ${searchReadyAnnouncement.totalCount} photos ready to search).`
+                : 'Photo search is ready. Add photos to search them.'}
+            </span>
           </div>
-        )}
-
-      {setupError && (
-        <div className="search-model-notice search-warning-banner" role="alert">
-          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
-          <span>{setupError}</span>
+          {onDismissSearchReady && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={onDismissSearchReady}
+              aria-label="Dismiss search ready notice"
+            >
+              Dismiss
+            </button>
+          )}
         </div>
       )}
 
-      {isModelMissing && !showEnableConfirm && !isModelDownloading && (
-        <div
-          className="search-model-notice search-warning-banner"
-          role="status"
-          data-testid="search-model-missing-notice"
-        >
-          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
-          <span>
-            Offline search model is not installed. Download or import model in the Semantic Index
-            tab to enable natural-language search.
-          </span>
-        </div>
-      )}
-
-      {isModelCorrupt && (
-        <div
-          className="search-model-notice search-warning-banner"
-          role="alert"
-          data-testid="search-model-corrupt-notice"
-        >
-          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
-          <span>
-            Offline search model is invalid or damaged. Re-download or re-import the verified model
-            in the Semantic Index panel to restore natural-language search.
-          </span>
-        </div>
-      )}
-
-      {isModelError && (
-        <div
-          className="search-model-notice search-warning-banner"
-          role="alert"
-          data-testid="search-model-error-notice"
-        >
-          <AlertCircle size={14} className="notice-icon" aria-hidden="true" />
-          <span>
-            Offline search model download or setup failed. Open the Semantic Index tab to retry
-            downloading or import a verified model.
-          </span>
-        </div>
-      )}
-
-      {searchResult && !isModelMissing && !isModelCorrupt && !isModelError && (
+      {isModelReady && searchResult && (
         <div className="photos-search-feedback">
           <div className="search-meta-row">
             <span className="search-match-badge" data-testid="search-match-badge">

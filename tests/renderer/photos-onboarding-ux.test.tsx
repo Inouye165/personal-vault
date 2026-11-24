@@ -348,7 +348,7 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
     })
   })
 
-  it('shows Enable photo search next to search box, requires explicit download confirmation, tracks download & indexing progress, announces ready, and keeps browsing usable throughout', async () => {
+  it('replaces inactive search box with one Turn on photo search panel, explains one-time download, tracks progress while photos remain browsable, and reveals search when usable', async () => {
     const harness = setupMockAppApi({
       initialSourceCount: 1,
       initialPhotos: [makePhoto(1, 'beach_day.jpg'), makePhoto(2, 'forest_trail.jpg')],
@@ -361,34 +361,43 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
 
     await waitFor(() => expect(screen.getByText('beach_day.jpg')).toBeInTheDocument())
 
-    const enableBtn = screen.getByTestId('enable-photo-search-btn')
-    expect(enableBtn).toHaveTextContent(/enable photo search/i)
+    // Inactive search box and technical banner must not be shown on first run
+    expect(screen.queryByRole('search')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/search photos by description/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('search-model-missing-notice')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('enable-photo-search-btn')).not.toBeInTheDocument()
 
-    // Clicking Enable photo search must show explicit confirmation before downloading
-    fireEvent.click(enableBtn)
+    // One Turn on photo search panel explains the one-time download before it starts
+    const panel = screen.getByTestId('turn-on-photo-search-panel')
+    expect(panel).toHaveTextContent(/turn on photo search/i)
+    expect(panel).toHaveTextContent(/one-time ~149 mib download/i)
     expect(harness.api.downloadSemanticModel).not.toHaveBeenCalled()
-    expect(screen.getByTestId('enable-photo-search-confirm')).toBeInTheDocument()
-    expect(screen.getByText(/one-time offline ai model download/i)).toBeInTheDocument()
 
-    // Browsing photos stays usable while setup banner is visible
+    // Browsing photos stays usable while setup panel is visible
     fireEvent.click(screen.getByText('beach_day.jpg'))
     expect(screen.getByText('Photograph Details')).toBeInTheDocument()
 
-    // Confirm explicit one-time download
-    fireEvent.click(screen.getByTestId('confirm-enable-photo-search-btn'))
+    // Start one-time download from the panel
+    fireEvent.click(screen.getByTestId('turn-on-photo-search-btn'))
     await waitFor(() => expect(harness.api.downloadSemanticModel).toHaveBeenCalledTimes(1))
 
-    // Download progress shown while photos remain browsable
+    // Plain-language download progress shown while photos remain browsable and search box stays hidden
     expect(screen.getByTestId('photo-search-download-progress')).toBeInTheDocument()
+    expect(screen.getByText(/downloading search support/i)).toBeInTheDocument()
+    expect(screen.getByText(/your photos remain browsable/i)).toBeInTheDocument()
+    expect(screen.queryByRole('search')).not.toBeInTheDocument()
     expect(screen.getByText('forest_trail.jpg')).toBeInTheDocument()
 
-    // Model finishes installing -> auto-starts indexing
+    // Model finishes installing -> search field is revealed and indexing starts
     act(() => {
       harness.emitModelStatus(makeModelStatus('ready', 155851918))
     })
 
     await waitFor(() => expect(harness.api.startSemanticIndexing).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('search')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/search photos by description/i)).toBeInTheDocument()
     expect(screen.getByTestId('photo-search-indexing-progress')).toBeInTheDocument()
+    expect(screen.getByText(/preparing your photos for search/i)).toBeInTheDocument()
 
     // Indexing completes -> tells user search is ready
     act(() => {
@@ -401,7 +410,46 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
     })
   })
 
-  it('supports narrow viewports and keyboard navigation for Add photos and Enable photo search', async () => {
+  it('shows Try again when photo search setup fails and reveals search after retry succeeds', async () => {
+    const harness = setupMockAppApi({
+      initialSourceCount: 1,
+      initialPhotos: [makePhoto(1, 'lake_view.jpg')],
+      modelState: 'missing'
+    })
+
+    vi.mocked(harness.api.downloadSemanticModel).mockRejectedValueOnce(
+      new Error('Network unavailable')
+    )
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /^photos$/i })).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: /^photos$/i }))
+    await waitFor(() => expect(screen.getByText('lake_view.jpg')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('turn-on-photo-search-btn'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('photo-search-setup-error')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('retry-photo-search-btn')).toHaveTextContent(/try again/i)
+    expect(screen.queryByRole('search')).not.toBeInTheDocument()
+    expect(screen.getByText('lake_view.jpg')).toBeInTheDocument()
+
+    // Retry succeeds
+    fireEvent.click(screen.getByTestId('retry-photo-search-btn'))
+    await waitFor(() => expect(harness.api.downloadSemanticModel).toHaveBeenCalledTimes(2))
+
+    act(() => {
+      harness.emitModelStatus(makeModelStatus('ready', 155851918))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('search')).toBeInTheDocument()
+      expect(screen.getByPlaceholderText(/search photos by description/i)).toBeInTheDocument()
+    })
+  })
+
+  it('supports narrow viewports and keyboard navigation for Add photos and Turn on photo search', async () => {
     window.innerWidth = 420
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
       matches: query.includes('767px'),
@@ -438,10 +486,8 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
     addPhotosBtn.focus()
     expect(document.activeElement).toBe(addPhotosBtn)
 
-    const enableSearchBtn = screen.getByTestId('enable-photo-search-btn')
-    enableSearchBtn.focus()
-    expect(document.activeElement).toBe(enableSearchBtn)
-    fireEvent.click(enableSearchBtn)
-    expect(screen.getByTestId('enable-photo-search-confirm')).toBeInTheDocument()
+    const turnOnBtn = screen.getByTestId('turn-on-photo-search-btn')
+    turnOnBtn.focus()
+    expect(document.activeElement).toBe(turnOnBtn)
   })
 })

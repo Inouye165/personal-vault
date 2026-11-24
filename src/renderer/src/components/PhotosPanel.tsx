@@ -1031,39 +1031,48 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
             </div>
           </div>
 
-          {viewMode === 'grid' && (
-            <div className="photos-search-row">
-              <PhotosSearchBar
-                query={searchQuery}
-                isSearching={isSearching}
-                modelStatus={
-                  semanticIndex.modelStatus.state === 'installing' ? 'installing' : modelStatus
-                }
-                searchResult={searchResultMeta}
-                onSearch={setSearchQuery}
-                onClear={clearSearch}
-                modelDownloadProgress={
-                  modelStatus === 'installing'
-                    ? {
-                        downloadedBytes: semanticIndex.modelStatus.downloadedBytes,
-                        requiredBytes: semanticIndex.modelStatus.requiredBytes,
-                        currentArtifact: semanticIndex.modelStatus.currentArtifact
-                      }
-                    : null
-                }
-                indexingProgress={semanticIndex.indexProgress}
-                setupError={
-                  semanticIndex.actionError ??
-                  semanticIndex.modelStatus.error ??
-                  semanticIndex.indexProgress.lastError
-                }
-                searchReadyAnnouncement={searchReadyAnnouncement}
-                onEnablePhotoSearch={handleEnablePhotoSearch}
-                onCancelEnablePhotoSearch={handleCancelEnablePhotoSearch}
-                onDismissSearchReady={() => setDismissedReadyKey(readyAnnouncementKey)}
-              />
-            </div>
-          )}
+          {viewMode === 'grid' &&
+            (() => {
+              const effectiveModelStatus =
+                modelStatus === 'corrupt' || modelStatus === 'unprovisioned'
+                  ? modelStatus
+                  : semanticIndex.modelStatus.state !== 'missing'
+                    ? semanticIndex.modelStatus.state
+                    : modelStatus
+
+              return (
+                <div className="photos-search-row">
+                  <PhotosSearchBar
+                    query={searchQuery}
+                    isSearching={isSearching}
+                    modelStatus={effectiveModelStatus}
+                    searchResult={searchResultMeta}
+                    onSearch={setSearchQuery}
+                    onClear={clearSearch}
+                    modelDownloadProgress={
+                      effectiveModelStatus === 'installing'
+                        ? {
+                            downloadedBytes: semanticIndex.modelStatus.downloadedBytes,
+                            requiredBytes: semanticIndex.modelStatus.requiredBytes,
+                            currentArtifact: semanticIndex.modelStatus.currentArtifact
+                          }
+                        : null
+                    }
+                    indexingProgress={semanticIndex.indexProgress}
+                    setupError={
+                      semanticIndex.actionError ??
+                      semanticIndex.modelStatus.error ??
+                      semanticIndex.indexProgress.lastError
+                    }
+                    searchReadyAnnouncement={searchReadyAnnouncement}
+                    onEnablePhotoSearch={handleEnablePhotoSearch}
+                    onCancelEnablePhotoSearch={handleCancelEnablePhotoSearch}
+                    onRetryIndexing={startIndexing}
+                    onDismissSearchReady={() => setDismissedReadyKey(readyAnnouncementKey)}
+                  />
+                </div>
+              )
+            })()}
 
           <div className="photos-controls-row">
             <div className="photos-mode-toggle" role="group" aria-label="Photo view mode">

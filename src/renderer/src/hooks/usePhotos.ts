@@ -164,7 +164,7 @@ export function usePhotos(): UsePhotosResult {
   const [isSearching, setIsSearching] = useState<boolean>(false)
   const [searchResultMeta, setSearchResultMeta] = useState<PhotosSearchBarResultMeta | null>(null)
   const [searchScores, setSearchScores] = useState<Map<number, number>>(new Map())
-  const [modelStatus, setModelStatus] = useState<PhotosSearchModelStatus>('ready')
+  const [modelStatus, setModelStatus] = useState<PhotosSearchModelStatus>('missing')
 
   const ratingFilterRef = useRef(ratingFilter)
   const flagFilterRef = useRef(flagFilter)
