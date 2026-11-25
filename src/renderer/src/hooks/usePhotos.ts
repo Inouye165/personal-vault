@@ -9,10 +9,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  CameraLabel,
+  InterpretedSearchFilters,
+  MetadataAwarePhotoSearchResponse,
   PhotoFileTypeBasis,
   PhotoFlagFilter,
   PhotoItem,
   PhotoRatingFilter,
+  PhotoUserPlace,
+  SavedEvent,
+  SavedPlace,
+  SearchClarificationOption,
+  SearchClarificationPrompt,
   ThumbnailResult
 } from '../../../shared/validation/ipc-schemas'
 import type {
@@ -115,11 +123,60 @@ export interface UsePhotosResult {
   readonly filterGeneration: number
   readonly searchQuery: string
   readonly isSearching: boolean
+  readonly searchMode: 'metadata_only' | 'hybrid' | 'visual_only' | 'needs_clarification' | null
+  readonly interpretedFilters: InterpretedSearchFilters | null
+  readonly clarification: SearchClarificationPrompt | null
+  readonly visualModelRequired: boolean
+  readonly filteredCandidateCount: number
   readonly searchResultMeta: PhotosSearchBarResultMeta | null
   readonly searchScores: ReadonlyMap<number, number>
   readonly modelStatus: PhotosSearchModelStatus
+  readonly savedEvents: readonly SavedEvent[]
+  readonly savedPlaces: readonly SavedPlace[]
+  readonly cameraLabels: readonly CameraLabel[]
   readonly setSearchQuery: (query: string) => void
   readonly clearSearch: () => void
+  readonly updateInterpretedFilters: (next: InterpretedSearchFilters) => void
+  readonly clearInterpretedFilter: (field: 'place' | 'date' | 'camera' | 'visualTerms') => void
+  readonly showMetadataMatchesWithoutVisualModel: () => void
+  readonly saveEventAndRetrySearch: (input: {
+    name: string
+    dateFrom: string
+    dateTo: string
+  }) => Promise<void>
+  readonly selectDisambiguatedPlace: (option: SearchClarificationOption) => void
+  readonly saveCustomPlaceAndRetrySearch: (input: {
+    name: string
+    minLat: number
+    maxLat: number
+    minLon: number
+    maxLon: number
+  }) => Promise<void>
+  readonly upsertSavedEvent: (input: {
+    name: string
+    dateFrom: string
+    dateTo: string
+  }) => Promise<SavedEvent | null>
+  readonly deleteSavedEvent: (id: number) => Promise<void>
+  readonly upsertSavedPlace: (input: {
+    name: string
+    minLat: number
+    maxLat: number
+    minLon: number
+    maxLon: number
+  }) => Promise<SavedPlace | null>
+  readonly deleteSavedPlace: (id: number) => Promise<void>
+  readonly setPhotoUserPlace: (input: {
+    fileLocationId: number
+    placeId?: number | null
+    placeLabel: string
+  }) => Promise<PhotoUserPlace | null>
+  readonly clearPhotoUserPlace: (fileLocationId: number) => Promise<void>
+  readonly upsertCameraLabel: (input: {
+    cameraNormalized: string
+    label: string
+  }) => Promise<CameraLabel | null>
+  readonly deleteCameraLabel: (id: number) => Promise<void>
   readonly selectPhoto: (id: number | null) => void
   readonly setRatingFilter: (filter: PhotoRatingFilter) => void
   readonly setFlagFilter: (filter: PhotoFlagFilter) => void
@@ -158,13 +215,28 @@ export function usePhotos(): UsePhotosResult {
   )
   const [filterGeneration, setFilterGeneration] = useState<number>(0)
 
-  // Stage 6D: Semantic Search state
+  // Stage 6D + metadata-aware search state
   const [searchQuery, setSearchQueryState] = useState<string>('')
   const searchQueryRef = useRef<string>('')
+  const filterOverridesRef = useRef<InterpretedSearchFilters | null>(null)
+  const bypassVisualModelRef = useRef<boolean>(false)
   const [isSearching, setIsSearching] = useState<boolean>(false)
+  const [searchMode, setSearchMode] = useState<
+    'metadata_only' | 'hybrid' | 'visual_only' | 'needs_clarification' | null
+  >(null)
+  const [interpretedFilters, setInterpretedFilters] = useState<InterpretedSearchFilters | null>(
+    null
+  )
+  const interpretedFiltersRef = useRef<InterpretedSearchFilters | null>(null)
+  const [clarification, setClarification] = useState<SearchClarificationPrompt | null>(null)
+  const [visualModelRequired, setVisualModelRequired] = useState<boolean>(false)
+  const [filteredCandidateCount, setFilteredCandidateCount] = useState<number>(0)
   const [searchResultMeta, setSearchResultMeta] = useState<PhotosSearchBarResultMeta | null>(null)
   const [searchScores, setSearchScores] = useState<Map<number, number>>(new Map())
   const [modelStatus, setModelStatus] = useState<PhotosSearchModelStatus>('missing')
+  const [savedEvents, setSavedEvents] = useState<SavedEvent[]>([])
+  const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([])
+  const [cameraLabels, setCameraLabels] = useState<CameraLabel[]>([])
 
   const ratingFilterRef = useRef(ratingFilter)
   const flagFilterRef = useRef(flagFilter)
@@ -178,6 +250,21 @@ export function usePhotos(): UsePhotosResult {
     metadataFiltersRef.current = metadataFilters
   }, [ratingFilter, flagFilter, collectionId, metadataFilters])
 
+  const refreshUserPhotoMetadata = useCallback(async () => {
+    try {
+      const [evRes, plRes, clRes] = await Promise.all([
+        window.api?.listSavedEvents?.(),
+        window.api?.listSavedPlaces?.(),
+        window.api?.listCameraLabels?.()
+      ])
+      if (evRes?.items) setSavedEvents(evRes.items)
+      if (plRes?.items) setSavedPlaces(plRes.items)
+      if (clRes?.items) setCameraLabels(clRes.items)
+    } catch {
+      // Non-fatal in minimal test environments
+    }
+  }, [])
+
   useEffect(() => {
     let unmounted = false
     void window.api?.getSemanticModelStatus?.().then((status) => {
@@ -185,6 +272,20 @@ export function usePhotos(): UsePhotosResult {
         setModelStatus(status.state)
       }
     })
+    void Promise.all([
+      window.api?.listSavedEvents?.(),
+      window.api?.listSavedPlaces?.(),
+      window.api?.listCameraLabels?.()
+    ])
+      .then(([evRes, plRes, clRes]) => {
+        if (unmounted) return
+        if (evRes?.items) setSavedEvents(evRes.items)
+        if (plRes?.items) setSavedPlaces(plRes.items)
+        if (clRes?.items) setCameraLabels(clRes.items)
+      })
+      .catch(() => {
+        // Non-fatal in minimal test environments
+      })
     const unsub = window.api?.onSemanticModelStatus?.((status) => {
       if (!unmounted && status) {
         setModelStatus(status.state)
@@ -241,8 +342,119 @@ export function usePhotos(): UsePhotosResult {
           ? activeFilters.searchQuery
           : searchQueryRef.current
 
+      const hasFilterOverrides = filterOverridesRef.current !== null
+
       try {
-        if (query) {
+        if (query || hasFilterOverrides) {
+          if (window.api?.searchPhotosMetadataAware) {
+            const res: MetadataAwarePhotoSearchResponse =
+              await window.api.searchPhotosMetadataAware({
+                queryText: query,
+                ...(filterOverridesRef.current
+                  ? { filterOverrides: filterOverridesRef.current }
+                  : {}),
+                bypassVisualModel: bypassVisualModelRef.current,
+                offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
+                limit: PHOTO_BOUNDS.PAGE_SIZE,
+                ratingFilter: filters.rating,
+                flagFilter: filters.flag,
+                collectionId: filters.collection,
+                captureDateFrom: filters.metadata.captureDateFrom,
+                captureDateTo: filters.metadata.captureDateTo,
+                includeUnknownCaptureDate: filters.metadata.includeUnknownCaptureDate,
+                cameraNormalized: filters.metadata.cameraNormalized,
+                onlyUnknownCamera: filters.metadata.onlyUnknownCamera,
+                lensNormalized: filters.metadata.lensNormalized,
+                onlyUnknownLens: filters.metadata.onlyUnknownLens,
+                minWidthPx: filters.metadata.minWidthPx,
+                minHeightPx: filters.metadata.minHeightPx,
+                includeUnknownDimensions: filters.metadata.includeUnknownDimensions,
+                fileTypeBasis: filters.metadata.fileTypeBasis,
+                fileTypeValue: filters.metadata.fileTypeValue,
+                onlyUnknownDetectedFormat: filters.metadata.onlyUnknownDetectedFormat,
+                ...(searchOwnerGenRef.current !== null
+                  ? { ownerGen: searchOwnerGenRef.current }
+                  : {})
+              })
+
+            if (generationRef.current !== currentGeneration) {
+              return
+            }
+
+            inFlightPagesRef.current.delete(pageIndex)
+            setTotalCount(res.totalMatched)
+            setModelStatus(res.modelStatus)
+            setSearchMode(res.mode)
+            interpretedFiltersRef.current = res.interpretedFilters
+            setInterpretedFilters(res.interpretedFilters)
+            setClarification(res.clarification ?? null)
+            setVisualModelRequired(res.visualModelRequired ?? false)
+            setFilteredCandidateCount(res.filteredCandidateCount ?? 0)
+            setSearchResultMeta(
+              res.mode === 'needs_clarification' || res.visualModelRequired
+                ? null
+                : {
+                    totalMatched: res.totalMatched,
+                    eligibleCount: res.eligibleCount,
+                    unindexedCount: res.unindexedCount,
+                    staleCount: res.staleCount,
+                    corruptCount: res.corruptCount ?? 0,
+                    truncated: false,
+                    tokenCount: 0,
+                    queryLatencyMs: res.queryLatencyMs
+                  }
+            )
+
+            const pageItems = res.items.map((i) => i.photo)
+            pagePhotoIdsRef.current.set(
+              pageIndex,
+              pageItems.map((p) => p.id)
+            )
+
+            const lru = pageLruRef.current.filter((p) => p !== pageIndex)
+            lru.push(pageIndex)
+            const evictedPages: number[] = []
+            const evictedPhotoIds: number[] = []
+
+            while (lru.length > PHOTO_BOUNDS.MAX_PAGES) {
+              const evictedPage = lru.shift()
+              if (evictedPage !== undefined) {
+                evictedPages.push(evictedPage)
+                const idsToEvict = pagePhotoIdsRef.current.get(evictedPage)
+                if (idsToEvict) {
+                  for (const id of idsToEvict) {
+                    evictedPhotoIds.push(id)
+                  }
+                  pagePhotoIdsRef.current.delete(evictedPage)
+                }
+              }
+            }
+            pageLruRef.current = lru
+
+            setPages((prev) => {
+              const next = new Map(prev)
+              next.set(pageIndex, pageItems)
+              for (const evictedPage of evictedPages) {
+                next.delete(evictedPage)
+              }
+              return next
+            })
+
+            setSearchScores((prev) => {
+              const next = new Map(prev)
+              for (const item of res.items) {
+                if (typeof item.score === 'number') {
+                  next.set(item.photo.id, item.score)
+                }
+              }
+              for (const id of evictedPhotoIds) {
+                next.delete(id)
+              }
+              return next
+            })
+            return
+          }
+
           if (!window.api?.searchPhotosSemantic) {
             throw new Error('Semantic search API unavailable')
           }
@@ -277,6 +489,7 @@ export function usePhotos(): UsePhotosResult {
           inFlightPagesRef.current.delete(pageIndex)
           setTotalCount(res.totalMatched)
           setModelStatus(res.modelStatus)
+          setSearchMode('visual_only')
           setSearchResultMeta({
             totalMatched: res.totalMatched,
             eligibleCount: res.eligibleCount,
@@ -339,6 +552,12 @@ export function usePhotos(): UsePhotosResult {
           }
           if (pageIndex === 0) {
             setSearchResultMeta(null)
+            setSearchMode(null)
+            interpretedFiltersRef.current = null
+            setInterpretedFilters(null)
+            setClarification(null)
+            setVisualModelRequired(false)
+            setFilteredCandidateCount(0)
             setSearchScores(new Map())
           }
 
@@ -455,7 +674,12 @@ export function usePhotos(): UsePhotosResult {
     (newQuery: string) => {
       const trimmed = newQuery.trim()
       searchQueryRef.current = trimmed
+      filterOverridesRef.current = null
+      bypassVisualModelRef.current = false
       setSearchQueryState(trimmed)
+      setClarification(null)
+      setVisualModelRequired(false)
+      setFilteredCandidateCount(0)
       if (trimmed) {
         searchOwnerGenRef.current = allocateSearchOwnerGen()
       } else if (searchOwnerGenRef.current !== null) {
@@ -487,7 +711,15 @@ export function usePhotos(): UsePhotosResult {
 
   const clearSearch = useCallback(() => {
     searchQueryRef.current = ''
+    filterOverridesRef.current = null
+    bypassVisualModelRef.current = false
     setSearchQueryState('')
+    setSearchMode(null)
+    interpretedFiltersRef.current = null
+    setInterpretedFilters(null)
+    setClarification(null)
+    setVisualModelRequired(false)
+    setFilteredCandidateCount(0)
     setSearchResultMeta(null)
     setSearchScores(new Map())
     const cancelOwnerGen = searchOwnerGenRef.current
@@ -514,6 +746,245 @@ export function usePhotos(): UsePhotosResult {
       searchQuery: ''
     })
   }, [loadPage])
+
+  const updateInterpretedFilters = useCallback(
+    (next: InterpretedSearchFilters) => {
+      filterOverridesRef.current = next
+      bypassVisualModelRef.current = false
+      interpretedFiltersRef.current = next
+      setInterpretedFilters(next)
+      setClarification(null)
+      setVisualModelRequired(false)
+      searchOwnerGenRef.current = allocateSearchOwnerGen()
+      const nextGen = ++generationRef.current
+      pageLruRef.current = []
+      pagePhotoIdsRef.current.clear()
+      inFlightPagesRef.current.clear()
+      inFlightThumbsRef.current.clear()
+      setPages(new Map())
+      setSearchScores(new Map())
+      setThumbnails(new Map())
+      setIsLoading(true)
+      setIsSearching(true)
+      setError(null)
+      setFilterGeneration((prev) => prev + 1)
+      void loadPage(0, nextGen, {
+        rating: ratingFilterRef.current,
+        flag: flagFilterRef.current,
+        collection: collectionIdRef.current,
+        metadata: metadataFiltersRef.current,
+        searchQuery: searchQueryRef.current
+      })
+    },
+    [loadPage]
+  )
+
+  const clearInterpretedFilter = useCallback(
+    (field: 'place' | 'date' | 'camera' | 'visualTerms') => {
+      const curr = interpretedFiltersRef.current
+      if (!curr) {
+        clearSearch()
+        return
+      }
+      const next: InterpretedSearchFilters = {
+        ...curr,
+        [field]: null
+      }
+      if (!next.place && !next.date && !next.camera && !next.visualTerms) {
+        clearSearch()
+        return
+      }
+      updateInterpretedFilters(next)
+    },
+    [clearSearch, updateInterpretedFilters]
+  )
+
+  const showMetadataMatchesWithoutVisualModel = useCallback(() => {
+    bypassVisualModelRef.current = true
+    filterOverridesRef.current = interpretedFiltersRef.current
+    const nextGen = ++generationRef.current
+    pageLruRef.current = []
+    pagePhotoIdsRef.current.clear()
+    inFlightPagesRef.current.clear()
+    inFlightThumbsRef.current.clear()
+    setPages(new Map())
+    setSearchScores(new Map())
+    setThumbnails(new Map())
+    setIsLoading(true)
+    setIsSearching(true)
+    setError(null)
+    void loadPage(0, nextGen, {
+      rating: ratingFilterRef.current,
+      flag: flagFilterRef.current,
+      collection: collectionIdRef.current,
+      metadata: metadataFiltersRef.current,
+      searchQuery: searchQueryRef.current
+    })
+  }, [loadPage])
+
+  const upsertSavedEvent = useCallback(
+    async (input: {
+      name: string
+      dateFrom: string
+      dateTo: string
+    }): Promise<SavedEvent | null> => {
+      if (!window.api?.upsertSavedEvent) return null
+      const saved = await window.api.upsertSavedEvent(input)
+      await refreshUserPhotoMetadata()
+      return saved
+    },
+    [refreshUserPhotoMetadata]
+  )
+
+  const deleteSavedEvent = useCallback(
+    async (id: number): Promise<void> => {
+      if (!window.api?.deleteSavedEvent) return
+      await window.api.deleteSavedEvent(id)
+      await refreshUserPhotoMetadata()
+    },
+    [refreshUserPhotoMetadata]
+  )
+
+  const upsertSavedPlace = useCallback(
+    async (input: {
+      name: string
+      minLat: number
+      maxLat: number
+      minLon: number
+      maxLon: number
+    }): Promise<SavedPlace | null> => {
+      if (!window.api?.upsertSavedPlace) return null
+      const saved = await window.api.upsertSavedPlace(input)
+      await refreshUserPhotoMetadata()
+      return saved
+    },
+    [refreshUserPhotoMetadata]
+  )
+
+  const deleteSavedPlace = useCallback(
+    async (id: number): Promise<void> => {
+      if (!window.api?.deleteSavedPlace) return
+      await window.api.deleteSavedPlace(id)
+      await refreshUserPhotoMetadata()
+    },
+    [refreshUserPhotoMetadata]
+  )
+
+  const setPhotoUserPlace = useCallback(
+    async (input: {
+      fileLocationId: number
+      placeId?: number | null
+      placeLabel: string
+    }): Promise<PhotoUserPlace | null> => {
+      if (!window.api?.setPhotoUserPlace) return null
+      return await window.api.setPhotoUserPlace(input)
+    },
+    []
+  )
+
+  const clearPhotoUserPlace = useCallback(async (fileLocationId: number): Promise<void> => {
+    if (!window.api?.clearPhotoUserPlace) return
+    await window.api.clearPhotoUserPlace({ fileLocationId })
+  }, [])
+
+  const upsertCameraLabel = useCallback(
+    async (input: { cameraNormalized: string; label: string }): Promise<CameraLabel | null> => {
+      if (!window.api?.upsertCameraLabel) return null
+      const saved = await window.api.upsertCameraLabel(input)
+      await refreshUserPhotoMetadata()
+      return saved
+    },
+    [refreshUserPhotoMetadata]
+  )
+
+  const deleteCameraLabel = useCallback(
+    async (id: number): Promise<void> => {
+      if (!window.api?.deleteCameraLabel) return
+      await window.api.deleteCameraLabel(id)
+      await refreshUserPhotoMetadata()
+    },
+    [refreshUserPhotoMetadata]
+  )
+
+  const saveEventAndRetrySearch = useCallback(
+    async (input: { name: string; dateFrom: string; dateTo: string }): Promise<void> => {
+      await upsertSavedEvent(input)
+      filterOverridesRef.current = null
+      bypassVisualModelRef.current = false
+      setClarification(null)
+      const nextGen = ++generationRef.current
+      pageLruRef.current = []
+      pagePhotoIdsRef.current.clear()
+      inFlightPagesRef.current.clear()
+      inFlightThumbsRef.current.clear()
+      setPages(new Map())
+      setSearchScores(new Map())
+      setIsLoading(true)
+      setIsSearching(true)
+      await loadPage(0, nextGen, {
+        rating: ratingFilterRef.current,
+        flag: flagFilterRef.current,
+        collection: collectionIdRef.current,
+        metadata: metadataFiltersRef.current,
+        searchQuery: searchQueryRef.current
+      })
+    },
+    [loadPage, upsertSavedEvent]
+  )
+
+  const selectDisambiguatedPlace = useCallback(
+    (option: SearchClarificationOption) => {
+      const curr = interpretedFiltersRef.current ?? {
+        place: null,
+        date: null,
+        camera: null,
+        visualTerms: null
+      }
+      updateInterpretedFilters({
+        ...curr,
+        place: {
+          label: option.label,
+          normalizedLabel: option.label.trim().toLowerCase(),
+          source: option.savedPlaceId ? 'saved_place' : 'offline_gazetteer',
+          savedPlaceId: option.savedPlaceId ?? null,
+          gpsBounds: option.gpsBounds
+        }
+      })
+    },
+    [updateInterpretedFilters]
+  )
+
+  const saveCustomPlaceAndRetrySearch = useCallback(
+    async (input: {
+      name: string
+      minLat: number
+      maxLat: number
+      minLon: number
+      maxLon: number
+    }): Promise<void> => {
+      await upsertSavedPlace(input)
+      filterOverridesRef.current = null
+      bypassVisualModelRef.current = false
+      setClarification(null)
+      const nextGen = ++generationRef.current
+      pageLruRef.current = []
+      pagePhotoIdsRef.current.clear()
+      inFlightPagesRef.current.clear()
+      inFlightThumbsRef.current.clear()
+      setPages(new Map())
+      setSearchScores(new Map())
+      setIsLoading(true)
+      setIsSearching(true)
+      await loadPage(0, nextGen, {
+        rating: ratingFilterRef.current,
+        flag: flagFilterRef.current,
+        collection: collectionIdRef.current,
+        metadata: metadataFiltersRef.current,
+        searchQuery: searchQueryRef.current
+      })
+    },
+    [loadPage, upsertSavedPlace]
+  )
 
   const setRatingFilter = useCallback(
     (newRating: PhotoRatingFilter) => {
@@ -581,7 +1052,15 @@ export function usePhotos(): UsePhotosResult {
     collectionIdRef.current = null
     metadataFiltersRef.current = DEFAULT_PHOTO_METADATA_FILTERS
     searchQueryRef.current = ''
+    filterOverridesRef.current = null
+    bypassVisualModelRef.current = false
     setSearchQueryState('')
+    setSearchMode(null)
+    interpretedFiltersRef.current = null
+    setInterpretedFilters(null)
+    setClarification(null)
+    setVisualModelRequired(false)
+    setFilteredCandidateCount(0)
     setSearchResultMeta(null)
     setSearchScores(new Map())
     const cancelOwnerGen = searchOwnerGenRef.current
@@ -829,11 +1308,33 @@ export function usePhotos(): UsePhotosResult {
     filterGeneration,
     searchQuery,
     isSearching,
+    searchMode,
+    interpretedFilters,
+    clarification,
+    visualModelRequired,
+    filteredCandidateCount,
     searchResultMeta,
     searchScores,
     modelStatus,
+    savedEvents,
+    savedPlaces,
+    cameraLabels,
     setSearchQuery,
     clearSearch,
+    updateInterpretedFilters,
+    clearInterpretedFilter,
+    showMetadataMatchesWithoutVisualModel,
+    saveEventAndRetrySearch,
+    selectDisambiguatedPlace,
+    saveCustomPlaceAndRetrySearch,
+    upsertSavedEvent,
+    deleteSavedEvent,
+    upsertSavedPlace,
+    deleteSavedPlace,
+    setPhotoUserPlace,
+    clearPhotoUserPlace,
+    upsertCameraLabel,
+    deleteCameraLabel,
     selectPhoto,
     setRatingFilter,
     setFlagFilter,

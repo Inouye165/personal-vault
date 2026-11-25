@@ -75,7 +75,7 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(onClear).toHaveBeenCalledTimes(1)
   })
 
-  it('replaces the inactive search box and technical banner with one Turn on photo search panel when missing', () => {
+  it('keeps the metadata search bar usable alongside the Turn on photo search onboarding panel when missing', () => {
     const onEnable = vi.fn()
     render(
       <PhotosSearchBar
@@ -91,8 +91,10 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(screen.getByTestId('turn-on-photo-search-panel')).toBeInTheDocument()
     expect(screen.getByText(/turn on photo search/i)).toBeInTheDocument()
     expect(screen.getByText(/one-time ~149 mib download/i)).toBeInTheDocument()
-    expect(screen.queryByRole('search')).not.toBeInTheDocument()
-    expect(screen.queryByPlaceholderText(/search photos by description/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
+    expect(
+      screen.getByPlaceholderText(/search photos by description, place, date/i)
+    ).toBeInTheDocument()
     expect(screen.queryByTestId('search-model-missing-notice')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('turn-on-photo-search-btn'))
@@ -127,7 +129,7 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(screen.getByText(/query truncated to 77 tokens/i)).toBeInTheDocument()
   })
 
-  it('distinguishes a damaged download from a setup failure and offers Try again without showing the inactive search box', () => {
+  it('distinguishes a damaged download from a setup failure and offers Try again while keeping offline metadata search active', () => {
     const onRetry = vi.fn()
     const { rerender } = render(
       <PhotosSearchBar
@@ -142,7 +144,7 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
 
     expect(screen.getByTestId('photo-search-setup-error')).toBeInTheDocument()
     expect(screen.getByText(/appear damaged/i)).toBeInTheDocument()
-    expect(screen.queryByRole('search')).not.toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
     expect(screen.queryByTestId('search-model-corrupt-notice')).not.toBeInTheDocument()
 
     rerender(
@@ -160,7 +162,7 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(screen.getByTestId('photo-search-setup-error')).toBeInTheDocument()
     expect(screen.getByText(/couldn't finish setting up/i)).toBeInTheDocument()
     expect(screen.queryByText(/appear damaged/i)).not.toBeInTheDocument()
-    expect(screen.queryByRole('search')).not.toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('retry-photo-search-btn'))
     expect(onRetry).toHaveBeenCalledTimes(1)

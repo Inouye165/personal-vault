@@ -348,7 +348,7 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
     })
   })
 
-  it('replaces inactive search box with one Turn on photo search panel, explains one-time download, tracks progress while photos remain browsable, and reveals search when usable', async () => {
+  it('keeps offline metadata search usable alongside one Turn on photo search panel, explains one-time download, and tracks visual search setup while photos remain browsable', async () => {
     const harness = setupMockAppApi({
       initialSourceCount: 1,
       initialPhotos: [makePhoto(1, 'beach_day.jpg'), makePhoto(2, 'forest_trail.jpg')],
@@ -361,9 +361,11 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
 
     await waitFor(() => expect(screen.getByText('beach_day.jpg')).toBeInTheDocument())
 
-    // Inactive search box and technical banner must not be shown on first run
-    expect(screen.queryByRole('search')).not.toBeInTheDocument()
-    expect(screen.queryByPlaceholderText(/search photos by description/i)).not.toBeInTheDocument()
+    // Metadata search bar is usable immediately while technical missing-model banner is absent
+    expect(screen.getByRole('search')).toBeInTheDocument()
+    expect(
+      screen.getByPlaceholderText(/search photos by description, place, date/i)
+    ).toBeInTheDocument()
     expect(screen.queryByTestId('search-model-missing-notice')).not.toBeInTheDocument()
     expect(screen.queryByTestId('enable-photo-search-btn')).not.toBeInTheDocument()
 
@@ -381,11 +383,10 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
     fireEvent.click(screen.getByTestId('turn-on-photo-search-btn'))
     await waitFor(() => expect(harness.api.downloadSemanticModel).toHaveBeenCalledTimes(1))
 
-    // Plain-language download progress shown while photos remain browsable and search box stays hidden
+    // Plain-language download progress shown while photos remain browsable
     expect(screen.getByTestId('photo-search-download-progress')).toBeInTheDocument()
     expect(screen.getByText(/downloading search support/i)).toBeInTheDocument()
     expect(screen.getByText(/your photos remain browsable/i)).toBeInTheDocument()
-    expect(screen.queryByRole('search')).not.toBeInTheDocument()
     expect(screen.getByText('forest_trail.jpg')).toBeInTheDocument()
 
     // Model finishes installing -> search field is revealed and indexing starts
@@ -432,7 +433,7 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
       expect(screen.getByTestId('photo-search-setup-error')).toBeInTheDocument()
     })
     expect(screen.getByTestId('retry-photo-search-btn')).toHaveTextContent(/try again/i)
-    expect(screen.queryByRole('search')).not.toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
     expect(screen.getByText('lake_view.jpg')).toBeInTheDocument()
 
     // Retry succeeds
