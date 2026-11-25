@@ -50,7 +50,10 @@ import { ScanJobsPanel, type ScanJobsPanelProps } from './ScanJobsPanel'
 import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import { PhotosSearchBar } from './PhotosSearchBar'
 import { PhotoSelectedOcrSection } from './PhotoSelectedOcrSection'
-import { matchGpsToOfflinePlaces } from '../../../shared/search/offline-gazetteer'
+import {
+  matchGpsToOfflinePlaces,
+  resolveOfflinePlace
+} from '../../../shared/search/offline-gazetteer'
 import type {
   OriginalPhotoResult,
   PhotoItem,
@@ -1073,11 +1076,13 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
           {viewMode === 'grid' &&
             (() => {
               const effectiveModelStatus =
-                modelStatus === 'corrupt' || modelStatus === 'unprovisioned'
-                  ? modelStatus
-                  : semanticIndex.modelStatus.state !== 'missing'
-                    ? semanticIndex.modelStatus.state
-                    : modelStatus
+                semanticIndex.modelStatus.state === 'installing'
+                  ? 'installing'
+                  : modelStatus === 'corrupt' || modelStatus === 'unprovisioned'
+                    ? modelStatus
+                    : semanticIndex.modelStatus.state !== 'missing'
+                      ? semanticIndex.modelStatus.state
+                      : modelStatus
 
               return (
                 <div className="photos-search-row">
@@ -1312,13 +1317,15 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
               </div>
             )}
 
-            {!isLoading && !error && totalCount === 0 && (
+            {!isLoading && !error && totalCount === 0 && !clarification && !visualModelRequired && (
               <div className="notice" role="status">
                 <ImageIcon size={24} />
                 <div className="notice-content">
                   <strong>
                     {searchQuery
-                      ? `No semantic matches found for "${searchQuery}"`
+                      ? searchMode === 'metadata_only'
+                        ? `No matching photos found for "${searchQuery}"`
+                        : `No semantic matches found for "${searchQuery}"`
                       : hasAnyActiveFilter
                         ? 'No photographs match the current filter criteria'
                         : 'No photographs discovered yet'}
@@ -2247,14 +2254,20 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                         className="btn btn-secondary btn-xs"
                         disabled={!userPlaceDraft.trim()}
                         onClick={() => {
-                          const targetPlace = savedPlaces.find(
-                            (p) =>
-                              p.name.trim().toLowerCase() === userPlaceDraft.trim().toLowerCase()
-                          )
+                          const rawLabel = userPlaceDraft.trim()
+                          const resolvedOffline = resolveOfflinePlace(rawLabel, savedPlaces)
+                          const canonicalLabel =
+                            resolvedOffline.status === 'resolved'
+                              ? resolvedOffline.match.label
+                              : rawLabel
+                          const canonicalPlaceId =
+                            resolvedOffline.status === 'resolved'
+                              ? resolvedOffline.match.savedPlaceId
+                              : null
                           void setPhotoUserPlace({
                             fileLocationId: selectedPhoto.id,
-                            placeId: targetPlace?.id ?? null,
-                            placeLabel: userPlaceDraft.trim()
+                            placeId: canonicalPlaceId,
+                            placeLabel: canonicalLabel
                           }).then(() => refreshMetadata())
                         }}
                       >

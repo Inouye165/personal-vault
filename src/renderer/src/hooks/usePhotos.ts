@@ -383,7 +383,9 @@ export function usePhotos(): UsePhotosResult {
 
             inFlightPagesRef.current.delete(pageIndex)
             setTotalCount(res.totalMatched)
-            setModelStatus(res.modelStatus)
+            setModelStatus((prev) =>
+              prev === 'installing' && res.modelStatus === 'unprovisioned' ? prev : res.modelStatus
+            )
             setSearchMode(res.mode)
             interpretedFiltersRef.current = res.interpretedFilters
             setInterpretedFilters(res.interpretedFilters)

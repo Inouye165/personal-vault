@@ -162,6 +162,27 @@ describe('Offline gazetteer & photo query parser', () => {
     expect(unknownPlace.clarification?.kind).toBe('define_place')
     expect(unknownPlace.clarification?.term).toBe('Atlantis')
 
+    const aLaCarte = interpretPhotoQuery({
+      queryText: 'dinner a la carte',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(aLaCarte.clarification).toBeNull()
+    expect(aLaCarte.interpretedFilters.place).toBeNull()
+    expect(aLaCarte.interpretedFilters.visualTerms).toBe('dinner a la carte')
+
+    const inLa = interpretPhotoQuery({
+      queryText: 'tacos in LA',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(inLa.interpretedFilters.place?.label).toBe('Los Angeles')
+    expect(inLa.interpretedFilters.visualTerms).toBe('tacos')
+
     const visualContext = interpretPhotoQuery({
       queryText: 'dog in snow',
       savedEvents: NO_EVENTS,

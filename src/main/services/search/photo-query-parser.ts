@@ -453,7 +453,11 @@ function extractPlaceFilter(
   const sortedTerms = Array.from(candidateTerms).sort((a, b) => b.length - a.length)
 
   for (const term of sortedTerms) {
-    const re = new RegExp(`(?:^|\\b)${escapeRegex(term)}(?:\\b|$)`, 'i')
+    // Require a location preposition for 2-letter codes like "sf" or "la" so phrases like "a la carte" stay visual
+    const re =
+      term.length < 3
+        ? new RegExp(`\\b(?:in|at|near|around|from)\\s+${escapeRegex(term)}(?:\\b|$)`, 'i')
+        : new RegExp(`(?:^|\\b)${escapeRegex(term)}(?:\\b|$)`, 'i')
     if (re.test(text)) {
       const resolved = resolveOfflinePlace(term, savedPlaces)
       const prepRe = new RegExp(`(?:\\b(?:in|at|near|around|from)\\s+)?${escapeRegex(term)}`, 'i')

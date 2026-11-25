@@ -525,15 +525,51 @@ describe('Renderer Metadata-Aware Search, Clarifications & Provenance Separation
     })
 
     fireEvent.change(screen.getByLabelText('User-assigned place'), {
-      target: { value: 'Favorite Diner' }
+      target: { value: 'Yellowstone' }
     })
     fireEvent.click(screen.getByRole('button', { name: 'Save Place' }))
     await waitFor(() =>
       expect(setPhotoUserPlaceMock).toHaveBeenCalledWith({
         fileLocationId: 1,
         placeId: null,
-        placeLabel: 'Favorite Diner'
+        placeLabel: 'Yellowstone National Park'
       })
     )
+  })
+
+  it('preserves active download progress during metadata search and hides misleading semantic-empty banners on clarifications', async () => {
+    vi.mocked(window.api.getSemanticModelStatus).mockResolvedValue({
+      state: 'installing',
+      modelId: 'Xenova/clip-vit-base-patch32@6b7c5237',
+      modelCommit: '6b7c5237',
+      modelManifestSha256: 'a'.repeat(64),
+      preprocessingVersion: 'clip_vit_b32_224_bicubic_center_rgb_v1',
+      dimensions: 512,
+      requiredBytes: 155851918,
+      downloadedBytes: 50000000,
+      currentArtifact: 'onnx/model.onnx',
+      verifiedAtMs: null,
+      error: null,
+      lastReplacementError: null
+    })
+
+    render(<PhotosPanel />)
+    await waitFor(() =>
+      expect(screen.getByTestId('photo-search-download-progress')).toBeInTheDocument()
+    )
+
+    const input = await screen.findByPlaceholderText(/search photos by description, place, date/i)
+    fireEvent.change(input, { target: { value: 'Yellowstone in 2025' } })
+    fireEvent.submit(input.closest('form')!)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('search-match-badge')).toHaveTextContent('2 metadata matches')
+    )
+    expect(screen.getByTestId('photo-search-download-progress')).toBeInTheDocument()
+
+    fireEvent.change(input, { target: { value: 'My wedding week' } })
+    fireEvent.submit(input.closest('form')!)
+    await waitFor(() => expect(screen.getByTestId('search-clarification-card')).toBeInTheDocument())
+    expect(screen.queryByText(/no semantic matches found/i)).not.toBeInTheDocument()
   })
 })
