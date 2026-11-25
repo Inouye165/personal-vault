@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 19
+export const CURRENT_SCHEMA_VERSION = 20
 
 export interface Migration {
   readonly version: number
@@ -1582,6 +1582,270 @@ export const MIGRATIONS: readonly Migration[] = [
           updated_at_ms INTEGER NOT NULL,
           PRIMARY KEY (destination_id, resource_key)
         );
+      `)
+    }
+  },
+  {
+    version: 20,
+    name: 'photo_metadata_v2_gps_and_user_search_entities',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE photo_technical_metadata_v2 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          parser_recipe_version TEXT NOT NULL,
+          extraction_status TEXT NOT NULL CHECK (
+            extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed', 'unavailable', 'stale')
+          ),
+          content_sha256 TEXT CHECK (content_sha256 IS NULL OR length(content_sha256) = 64),
+          content_revision TEXT NOT NULL,
+          observed_byte_size INTEGER CHECK (observed_byte_size IS NULL OR observed_byte_size >= 0),
+          observed_mtime_ms REAL,
+          recorded_extension TEXT NOT NULL,
+          detected_format TEXT,
+          extension_format_mismatch INTEGER NOT NULL DEFAULT 0 CHECK (extension_format_mismatch IN (0, 1)),
+
+          encoded_width_px INTEGER CHECK (encoded_width_px IS NULL OR encoded_width_px > 0),
+          encoded_height_px INTEGER CHECK (encoded_height_px IS NULL OR encoded_height_px > 0),
+          exif_orientation INTEGER CHECK (
+            exif_orientation IS NULL OR (exif_orientation >= 1 AND exif_orientation <= 8)
+          ),
+          display_width_px INTEGER CHECK (display_width_px IS NULL OR display_width_px > 0),
+          display_height_px INTEGER CHECK (display_height_px IS NULL OR display_height_px > 0),
+
+          capture_date_source_tag TEXT CHECK (
+            capture_date_source_tag IS NULL OR capture_date_source_tag IN ('DateTimeOriginal', 'DateTimeDigitized')
+          ),
+          raw_capture_date_text TEXT,
+          capture_subseconds TEXT,
+          capture_offset_minutes INTEGER CHECK (
+            capture_offset_minutes IS NULL OR (capture_offset_minutes >= -840 AND capture_offset_minutes <= 840)
+          ),
+          capture_offset_text TEXT,
+          capture_timezone_status TEXT NOT NULL DEFAULT 'unknown' CHECK (
+            capture_timezone_status IN ('offset_present', 'local_wall_clock_unknown_tz', 'invalid_offset', 'unknown')
+          ),
+          capture_calendar_date TEXT,
+          capture_year INTEGER,
+          capture_month INTEGER CHECK (capture_month IS NULL OR (capture_month >= 1 AND capture_month <= 12)),
+          capture_day INTEGER CHECK (capture_day IS NULL OR (capture_day >= 1 AND capture_day <= 31)),
+          capture_local_iso TEXT,
+          capture_utc_epoch_ms INTEGER,
+          capture_date_parse_error TEXT,
+          capture_date_conflict TEXT,
+
+          gps_status TEXT NOT NULL DEFAULT 'absent' CHECK (
+            gps_status IN ('present', 'absent', 'invalid')
+          ),
+          gps_latitude REAL CHECK (gps_latitude IS NULL OR (gps_latitude >= -90 AND gps_latitude <= 90)),
+          gps_longitude REAL CHECK (gps_longitude IS NULL OR (gps_longitude >= -180 AND gps_longitude <= 180)),
+          gps_altitude_m REAL,
+          gps_parse_error TEXT,
+
+          camera_make_raw TEXT,
+          camera_model_raw TEXT,
+          camera_display TEXT,
+          camera_normalized TEXT,
+          lens_make_raw TEXT,
+          lens_model_raw TEXT,
+          lens_display TEXT,
+          lens_normalized TEXT,
+
+          unknown_tag_count INTEGER NOT NULL DEFAULT 0 CHECK (unknown_tag_count >= 0),
+          parser_limits_note TEXT,
+          raw_metadata_json TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          created_at_ms INTEGER NOT NULL,
+          is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1))
+        );
+
+        INSERT INTO photo_technical_metadata_v2 (
+          id, file_location_id, discovery_observation_id, parser_recipe_version, extraction_status,
+          content_sha256, content_revision, observed_byte_size, observed_mtime_ms,
+          recorded_extension, detected_format, extension_format_mismatch,
+          encoded_width_px, encoded_height_px, exif_orientation, display_width_px, display_height_px,
+          capture_date_source_tag, raw_capture_date_text, capture_subseconds,
+          capture_offset_minutes, capture_offset_text, capture_timezone_status,
+          capture_calendar_date, capture_year, capture_month, capture_day,
+          capture_local_iso, capture_utc_epoch_ms, capture_date_parse_error, capture_date_conflict,
+          gps_status, gps_latitude, gps_longitude, gps_altitude_m, gps_parse_error,
+          camera_make_raw, camera_model_raw, camera_display, camera_normalized,
+          lens_make_raw, lens_model_raw, lens_display, lens_normalized,
+          unknown_tag_count, parser_limits_note, raw_metadata_json, error_code, error_message, created_at_ms, is_current
+        )
+        SELECT
+          id, file_location_id, discovery_observation_id, parser_recipe_version, extraction_status,
+          content_sha256, content_revision, observed_byte_size, observed_mtime_ms,
+          recorded_extension, detected_format, extension_format_mismatch,
+          encoded_width_px, encoded_height_px, exif_orientation, display_width_px, display_height_px,
+          capture_date_source_tag, raw_capture_date_text, capture_subseconds,
+          capture_offset_minutes, capture_offset_text, capture_timezone_status,
+          capture_calendar_date,
+          CASE WHEN capture_calendar_date IS NOT NULL AND length(capture_calendar_date) = 10 THEN CAST(substr(capture_calendar_date, 1, 4) AS INTEGER) ELSE NULL END,
+          CASE WHEN capture_calendar_date IS NOT NULL AND length(capture_calendar_date) = 10 THEN CAST(substr(capture_calendar_date, 6, 2) AS INTEGER) ELSE NULL END,
+          CASE WHEN capture_calendar_date IS NOT NULL AND length(capture_calendar_date) = 10 THEN CAST(substr(capture_calendar_date, 9, 2) AS INTEGER) ELSE NULL END,
+          capture_local_iso, capture_utc_epoch_ms, capture_date_parse_error, capture_date_conflict,
+          'absent', NULL, NULL, NULL, NULL,
+          camera_make_raw, camera_model_raw, camera_display, camera_normalized,
+          lens_make_raw, lens_model_raw, lens_display, lens_normalized,
+          0, NULL, raw_metadata_json, error_code, error_message, created_at_ms, is_current
+        FROM photo_technical_metadata;
+
+        DROP TABLE photo_technical_metadata;
+        ALTER TABLE photo_technical_metadata_v2 RENAME TO photo_technical_metadata;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_tech_meta_unique_current
+          ON photo_technical_metadata(file_location_id, parser_recipe_version)
+          WHERE is_current = 1;
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_location_history
+          ON photo_technical_metadata(file_location_id, is_current, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_capture_date
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, capture_calendar_date);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_year
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, capture_year);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_month_day
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, capture_month, capture_day);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_gps
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, gps_status, gps_latitude, gps_longitude);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_camera
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, camera_normalized, camera_display);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_lens
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, lens_normalized, lens_display);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_dimensions
+          ON photo_technical_metadata(parser_recipe_version, is_current, extraction_status, display_width_px, display_height_px);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_format
+          ON photo_technical_metadata(parser_recipe_version, is_current, detected_format);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_sha_reuse
+          ON photo_technical_metadata(content_sha256, observed_byte_size, parser_recipe_version, extraction_status, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_photo_tech_meta_size_reuse
+          ON photo_technical_metadata(observed_byte_size, parser_recipe_version, extraction_status);
+
+        CREATE TABLE photo_metadata_jobs_v2 (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (
+            status IN ('idle', 'running', 'paused', 'completed', 'cancelled', 'interrupted', 'failed')
+          ),
+          parser_recipe_version TEXT NOT NULL,
+          total_photos INTEGER NOT NULL DEFAULT 0 CHECK (total_photos >= 0),
+          processed_photos INTEGER NOT NULL DEFAULT 0 CHECK (processed_photos >= 0),
+          extracted_photos INTEGER NOT NULL DEFAULT 0 CHECK (extracted_photos >= 0),
+          absent_metadata_photos INTEGER NOT NULL DEFAULT 0 CHECK (absent_metadata_photos >= 0),
+          reused_photos INTEGER NOT NULL DEFAULT 0 CHECK (reused_photos >= 0),
+          unsupported_photos INTEGER NOT NULL DEFAULT 0 CHECK (unsupported_photos >= 0),
+          failed_photos INTEGER NOT NULL DEFAULT 0 CHECK (failed_photos >= 0),
+          unavailable_photos INTEGER NOT NULL DEFAULT 0 CHECK (unavailable_photos >= 0),
+          pending_photos INTEGER NOT NULL DEFAULT 0 CHECK (pending_photos >= 0),
+          started_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER,
+          last_error TEXT
+        );
+
+        INSERT INTO photo_metadata_jobs_v2 (
+          id, status, parser_recipe_version, total_photos, processed_photos, extracted_photos,
+          absent_metadata_photos, reused_photos, unsupported_photos, failed_photos, unavailable_photos,
+          pending_photos, started_at_ms, updated_at_ms, completed_at_ms, last_error
+        )
+        SELECT
+          id, status, parser_recipe_version, total_photos, processed_photos, extracted_photos,
+          absent_metadata_photos, reused_photos, unsupported_photos, failed_photos, 0,
+          pending_photos, started_at_ms, updated_at_ms, completed_at_ms, last_error
+        FROM photo_metadata_jobs;
+
+        DROP TABLE photo_metadata_jobs;
+        ALTER TABLE photo_metadata_jobs_v2 RENAME TO photo_metadata_jobs;
+
+        CREATE TABLE photo_metadata_job_items_v2 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL REFERENCES photo_metadata_jobs(id) ON DELETE CASCADE,
+          file_location_id INTEGER NOT NULL REFERENCES file_locations(id) ON DELETE CASCADE,
+          original_path TEXT NOT NULL,
+          recorded_extension TEXT NOT NULL,
+          discovery_observation_id INTEGER NOT NULL,
+          expected_byte_size INTEGER NOT NULL,
+          expected_mtime_ms REAL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'extracted', 'no_metadata', 'reused', 'unsupported', 'failed', 'unavailable', 'skipped')
+          ),
+          error_code TEXT,
+          error_message TEXT,
+          updated_at_ms INTEGER
+        );
+
+        INSERT INTO photo_metadata_job_items_v2 (
+          id, job_id, file_location_id, original_path, recorded_extension,
+          discovery_observation_id, expected_byte_size, expected_mtime_ms,
+          status, error_code, error_message, updated_at_ms
+        )
+        SELECT
+          id, job_id, file_location_id, original_path, recorded_extension,
+          discovery_observation_id, expected_byte_size, expected_mtime_ms,
+          status, error_code, error_message, updated_at_ms
+        FROM photo_metadata_job_items;
+
+        DROP TABLE photo_metadata_job_items;
+        ALTER TABLE photo_metadata_job_items_v2 RENAME TO photo_metadata_job_items;
+
+        CREATE INDEX IF NOT EXISTS idx_photo_meta_job_items_job_status
+          ON photo_metadata_job_items(job_id, status, id);
+
+        CREATE TABLE IF NOT EXISTS saved_places (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL UNIQUE,
+          min_lat REAL NOT NULL CHECK (min_lat >= -90 AND min_lat <= 90),
+          max_lat REAL NOT NULL CHECK (max_lat >= -90 AND max_lat <= 90),
+          min_lon REAL NOT NULL CHECK (min_lon >= -180 AND min_lon <= 180),
+          max_lon REAL NOT NULL CHECK (max_lon >= -180 AND max_lon <= 180),
+          center_lat REAL NOT NULL CHECK (center_lat >= -90 AND center_lat <= 90),
+          center_lon REAL NOT NULL CHECK (center_lon >= -180 AND center_lon <= 180),
+          radius_km REAL CHECK (radius_km IS NULL OR radius_km > 0),
+          notes TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          CHECK (min_lat <= max_lat)
+        );
+
+        CREATE TABLE IF NOT EXISTS photo_user_places (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_location_id INTEGER NOT NULL UNIQUE REFERENCES file_locations(id) ON DELETE CASCADE,
+          place_id INTEGER REFERENCES saved_places(id) ON DELETE SET NULL,
+          place_label TEXT NOT NULL,
+          normalized_label TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_user_places_place
+          ON photo_user_places(place_id, file_location_id);
+        CREATE INDEX IF NOT EXISTS idx_photo_user_places_label
+          ON photo_user_places(normalized_label, file_location_id);
+
+        CREATE TABLE IF NOT EXISTS saved_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL UNIQUE,
+          date_from TEXT NOT NULL,
+          date_to TEXT NOT NULL,
+          notes TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          CHECK (date_from <= date_to)
+        );
+
+        CREATE TABLE IF NOT EXISTS camera_labels (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          camera_normalized TEXT NOT NULL UNIQUE,
+          label TEXT NOT NULL,
+          normalized_label TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_camera_labels_label
+          ON camera_labels(normalized_label);
       `)
     }
   }

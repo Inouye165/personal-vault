@@ -148,6 +148,10 @@ function renderInferredCaptureDateValue(
     return 'Unknown (extraction failed)'
   }
 
+  if (effStatus === 'unavailable') {
+    return 'Unknown (file unavailable)'
+  }
+
   return 'Unknown'
 }
 
@@ -164,6 +168,8 @@ function formatEffectiveExtractionStatus(detail: PhotoTechnicalMetadataDetail | 
       return `Unsupported format${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
     case 'failed':
       return `Extraction failed${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
+    case 'unavailable':
+      return `Unavailable${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
     case 'stale':
       return 'Stale (source or parser recipe changed; re-run extraction)'
   }

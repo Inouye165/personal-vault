@@ -44,6 +44,7 @@ export type ResolvedFileReadFailure = {
   readonly locationId: number
   readonly errorCode:
     | 'NOT_FOUND'
+    | 'FILE_UNAVAILABLE'
     | 'VAULT_UNAVAILABLE'
     | 'VAULT_CONTAINMENT_ERROR'
     | 'VAULT_COPY_MISSING'
@@ -105,46 +106,31 @@ export interface ResolveReadableFileOptions {
    * Containment, existence, regular-file checks, and byte-size checks always run.
    */
   readonly verifyPayloadHash?: boolean
+  /**
+   * When `true` and `source_kind === 'user'` has an unavailable original path,
+   * checks whether an active vault holds a verified copy for the cataloged
+   * SHA-256 + byte size and resolves to that copy (or returns FILE_UNAVAILABLE).
+   */
+  readonly allowVaultCopyFallbackForUnavailableSource?: boolean
 }
 
-export function resolveReadableFileLocation(
+function resolveVerifiedVaultCopyForLocation(
   catalog: CatalogDatabase,
   locationId: number,
+  ctx: {
+    readonly originalPath: string
+    readonly byteSize: number
+    readonly activeHash: string | null
+  },
   options?: ResolveReadableFileOptions
 ): ResolvedFileReadResult {
-  const ctx = catalog.getLocationReadResolutionContext(locationId)
-  if (!ctx) {
-    return {
-      ok: false,
-      locationId,
-      errorCode: 'NOT_FOUND',
-      errorMessage: `File location ID ${locationId} not found in catalog`
-    }
-  }
-
-  if (ctx.sourceKind === 'user') {
-    const approvedRoots = catalog.getAllSourceRoots()
-    return {
-      ok: true,
-      mode: 'source',
-      locationId,
-      filePath: ctx.originalPath,
-      originalPath: ctx.originalPath,
-      expectedByteSize: ctx.byteSize,
-      expectedMtimeMs: ctx.filesystemMtimeMs,
-      expectedSha256: ctx.activeHash,
-      approvedRoots: approvedRoots.length > 0 ? approvedRoots : [ctx.sourceRootPath]
-    }
-  }
-
-  // Recovered records MUST read from the verified vault copy even if originalPath exists on disk.
   const activeVault = catalog.getActiveVault()
   if (!activeVault) {
     return {
       ok: false,
       locationId,
       errorCode: 'VAULT_UNAVAILABLE',
-      errorMessage: 'No active vault is registered for recovered file access'
+      errorMessage: 'No active vault is registered for vault copy access'
     }
   }
 
@@ -153,7 +139,7 @@ export function resolveReadableFileLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_COPY_MISSING',
-      errorMessage: `Recovered location ${locationId} lacks a valid active SHA-256 hash`
+      errorMessage: `Location ${locationId} lacks a valid active SHA-256 hash`
     }
   }
 
@@ -260,4 +246,51 @@ export function resolveReadableFileLocation(
       errorMessage: `Failed to verify vault copy "${vaultCopyPath}": ${(err as Error).message}`
     }
   }
+}
+
+export function resolveReadableFileLocation(
+  catalog: CatalogDatabase,
+  locationId: number,
+  options?: ResolveReadableFileOptions
+): ResolvedFileReadResult {
+  const ctx = catalog.getLocationReadResolutionContext(locationId)
+  if (!ctx) {
+    return {
+      ok: false,
+      locationId,
+      errorCode: 'NOT_FOUND',
+      errorMessage: `File location ID ${locationId} not found in catalog`
+    }
+  }
+
+  if (ctx.sourceKind === 'user') {
+    if (options?.allowVaultCopyFallbackForUnavailableSource && !existsSync(ctx.originalPath)) {
+      const vaultFallback = resolveVerifiedVaultCopyForLocation(catalog, locationId, ctx, options)
+      if (vaultFallback.ok || vaultFallback.errorCode === 'VAULT_COPY_CORRUPT') {
+        return vaultFallback
+      }
+      return {
+        ok: false,
+        locationId,
+        errorCode: 'FILE_UNAVAILABLE',
+        errorMessage: `Original file is unavailable at "${ctx.originalPath}" and no verified vault copy was found`
+      }
+    }
+
+    const approvedRoots = catalog.getAllSourceRoots()
+    return {
+      ok: true,
+      mode: 'source',
+      locationId,
+      filePath: ctx.originalPath,
+      originalPath: ctx.originalPath,
+      expectedByteSize: ctx.byteSize,
+      expectedMtimeMs: ctx.filesystemMtimeMs,
+      expectedSha256: ctx.activeHash,
+      approvedRoots: approvedRoots.length > 0 ? approvedRoots : [ctx.sourceRootPath]
+    }
+  }
+
+  // Recovered records MUST read from the verified vault copy even if originalPath exists on disk.
+  return resolveVerifiedVaultCopyForLocation(catalog, locationId, ctx, options)
 }

@@ -144,15 +144,17 @@ function installMockApi(photos: PhotoItem[]): void {
       reusedPhotos: 0,
       unsupportedPhotos: 0,
       failedPhotos: 0,
+      unavailablePhotos: 0,
       pendingPhotos: 0,
       lastError: null,
       coverage: {
-        parserRecipeVersion: 'exif_tech_v1',
+        parserRecipeVersion: 'exif_tech_v2',
         totalPhotos: photos.length,
         extractedCount: photos.length,
         noMetadataCount: 0,
         unsupportedCount: 0,
         failedCount: 0,
+        unavailableCount: 0,
         staleCount: 0,
         unprocessedCount: 0
       }

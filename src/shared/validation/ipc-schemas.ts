@@ -1190,6 +1190,7 @@ export const PhotoMetadataExtractionStatusSchema = z.enum([
   'no_metadata',
   'unsupported',
   'failed',
+  'unavailable',
   'stale'
 ])
 export type PhotoMetadataExtractionStatus = z.infer<typeof PhotoMetadataExtractionStatusSchema>
@@ -1212,6 +1213,7 @@ export const PhotoMetadataCoverageSchema = z.object({
   noMetadataCount: z.number().int().nonnegative(),
   unsupportedCount: z.number().int().nonnegative(),
   failedCount: z.number().int().nonnegative(),
+  unavailableCount: z.number().int().nonnegative().default(0),
   staleCount: z.number().int().nonnegative(),
   unprocessedCount: z.number().int().nonnegative()
 })
@@ -1228,6 +1230,7 @@ export const PhotoMetadataProgressResponseSchema = z.object({
   reusedPhotos: z.number().int().nonnegative(),
   unsupportedPhotos: z.number().int().nonnegative(),
   failedPhotos: z.number().int().nonnegative(),
+  unavailablePhotos: z.number().int().nonnegative().default(0),
   pendingPhotos: z.number().int().nonnegative(),
   startedAtMs: z.number().int().nullable(),
   updatedAtMs: z.number().int().nullable(),
@@ -1251,7 +1254,14 @@ export const PhotoTechnicalMetadataSchema = z.object({
   fileLocationId: z.number().int().positive(),
   discoveryObservationId: z.number().int().positive(),
   parserRecipeVersion: z.string().min(1),
-  extractionStatus: z.enum(['extracted', 'no_metadata', 'unsupported', 'failed', 'stale']),
+  extractionStatus: z.enum([
+    'extracted',
+    'no_metadata',
+    'unsupported',
+    'failed',
+    'unavailable',
+    'stale'
+  ]),
   contentSha256: z
     .string()
     .regex(/^[0-9a-f]{64}$/i)
@@ -1281,10 +1291,19 @@ export const PhotoTechnicalMetadataSchema = z.object({
     'unknown'
   ]),
   captureCalendarDate: CalendarDateIsoSchema.nullable(),
+  captureYear: z.number().int().nullable().default(null),
+  captureMonth: z.number().int().min(1).max(12).nullable().default(null),
+  captureDay: z.number().int().min(1).max(31).nullable().default(null),
   captureLocalIso: z.string().nullable(),
   captureUtcEpochMs: z.number().int().nullable(),
   captureDateParseError: z.string().nullable(),
   captureDateConflict: z.string().nullable(),
+
+  gpsStatus: z.enum(['present', 'absent', 'invalid']).default('absent'),
+  gpsLatitude: z.number().min(-90).max(90).nullable().default(null),
+  gpsLongitude: z.number().min(-180).max(180).nullable().default(null),
+  gpsAltitudeM: z.number().nullable().default(null),
+  gpsParseError: z.string().nullable().default(null),
 
   cameraMakeRaw: z.string().nullable(),
   cameraModelRaw: z.string().nullable(),
@@ -1295,9 +1314,11 @@ export const PhotoTechnicalMetadataSchema = z.object({
   lensDisplay: z.string().nullable(),
   lensNormalized: z.string().nullable(),
 
+  unknownTagCount: z.number().int().nonnegative().default(0),
+  parserLimitsNote: z.string().nullable().default(null),
   rawMetadataJson: z
     .string()
-    .max(16 * 1024 + 512)
+    .max(32 * 1024 + 512)
     .nullable(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
@@ -1306,6 +1327,56 @@ export const PhotoTechnicalMetadataSchema = z.object({
 })
 export type PhotoTechnicalMetadata = z.infer<typeof PhotoTechnicalMetadataSchema>
 
+export const SavedEventSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().min(1),
+  normalizedName: z.string().min(1),
+  dateFrom: CalendarDateIsoSchema,
+  dateTo: CalendarDateIsoSchema,
+  notes: z.string().nullable(),
+  createdAtMs: z.number().int().nonnegative(),
+  updatedAtMs: z.number().int().nonnegative()
+})
+export type SavedEvent = z.infer<typeof SavedEventSchema>
+
+export const SavedPlaceSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().min(1),
+  normalizedName: z.string().min(1),
+  minLat: z.number().min(-90).max(90),
+  maxLat: z.number().min(-90).max(90),
+  minLon: z.number().min(-180).max(180),
+  maxLon: z.number().min(-180).max(180),
+  centerLat: z.number().min(-90).max(90),
+  centerLon: z.number().min(-180).max(180),
+  radiusKm: z.number().positive().nullable(),
+  notes: z.string().nullable(),
+  createdAtMs: z.number().int().nonnegative(),
+  updatedAtMs: z.number().int().nonnegative()
+})
+export type SavedPlace = z.infer<typeof SavedPlaceSchema>
+
+export const PhotoUserPlaceSchema = z.object({
+  id: z.number().int().positive(),
+  fileLocationId: z.number().int().positive(),
+  placeId: z.number().int().positive().nullable(),
+  placeLabel: z.string().min(1),
+  normalizedLabel: z.string().min(1),
+  createdAtMs: z.number().int().nonnegative(),
+  updatedAtMs: z.number().int().nonnegative()
+})
+export type PhotoUserPlace = z.infer<typeof PhotoUserPlaceSchema>
+
+export const CameraLabelSchema = z.object({
+  id: z.number().int().positive(),
+  cameraNormalized: z.string().min(1),
+  label: z.string().min(1),
+  normalizedLabel: z.string().min(1),
+  createdAtMs: z.number().int().nonnegative(),
+  updatedAtMs: z.number().int().nonnegative()
+})
+export type CameraLabel = z.infer<typeof CameraLabelSchema>
+
 export const PhotoTechnicalMetadataDetailSchema = z.object({
   fileLocationId: z.number().int().positive(),
   currentRevision: z.string().min(1),
@@ -1313,7 +1384,9 @@ export const PhotoTechnicalMetadataDetailSchema = z.object({
   parserRecipeVersion: z.string().min(1),
   recordedExtension: z.string(),
   historicalMetadataCount: z.number().int().nonnegative(),
-  currentMetadata: PhotoTechnicalMetadataSchema.nullable()
+  currentMetadata: PhotoTechnicalMetadataSchema.nullable(),
+  userPlace: PhotoUserPlaceSchema.nullable().optional(),
+  cameraLabel: CameraLabelSchema.nullable().optional()
 })
 export type PhotoTechnicalMetadataDetail = z.infer<typeof PhotoTechnicalMetadataDetailSchema>
 

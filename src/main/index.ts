@@ -302,6 +302,33 @@ if (!app.requestSingleInstanceLock()) {
       photoMetadataCoordinator.initialize()
       logStartup('photoMetadataCoordinator initialized')
 
+      const scanJobLastStatus = new Map<number, string>()
+      coordinator.onProgress((scanProgress) => {
+        const prev = scanJobLastStatus.get(scanProgress.jobId)
+        scanJobLastStatus.set(scanProgress.jobId, scanProgress.status)
+        if (
+          process.env.PV_DISABLE_AUTO_METADATA !== '1' &&
+          prev !== 'completed' &&
+          scanProgress.status === 'completed' &&
+          photoMetadataCoordinator &&
+          catalog &&
+          !catalog.isClosed()
+        ) {
+          const metaProgress = photoMetadataCoordinator.getProgress()
+          const needed = metaProgress.coverage.unprocessedCount + metaProgress.coverage.staleCount
+          if (metaProgress.status !== 'running' && needed > 0) {
+            logStartup(
+              `Auto-starting metadata extraction after scan job #${scanProgress.jobId} (${needed} photos pending)`
+            )
+            void photoMetadataCoordinator.startExtraction().catch((err) => {
+              logStartup(
+                `Auto metadata extraction failed to start: ${err instanceof Error ? err.message : String(err)}`
+              )
+            })
+          }
+        }
+      })
+
       semanticSearchCoordinator = new SemanticSearchCoordinator({
         catalog,
         modelManager: semanticModelManager,

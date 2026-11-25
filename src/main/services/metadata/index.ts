@@ -1,5 +1,6 @@
 export * from './types'
 export * from './date-policy'
+export * from './gps-policy'
 export * from './normalize'
 export * from './extractor'
 export * from './coordinator'

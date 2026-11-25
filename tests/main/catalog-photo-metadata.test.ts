@@ -40,6 +40,7 @@ describe('Stage 6C — SQLite Photo Technical Metadata, Coverage, Facets & SQL F
       noMetadataCount: 0,
       unsupportedCount: 0,
       failedCount: 0,
+      unavailableCount: 0,
       staleCount: 0,
       unprocessedCount: 0
     })
@@ -315,6 +316,7 @@ describe('Stage 6C — SQLite Photo Technical Metadata, Coverage, Facets & SQL F
       noMetadataCount: 1,
       unsupportedCount: 1,
       failedCount: 1,
+      unavailableCount: 0,
       staleCount: 0,
       unprocessedCount: 1
     })
@@ -352,8 +354,8 @@ describe('Stage 6C — SQLite Photo Technical Metadata, Coverage, Facets & SQL F
     expect(reusable).not.toBeNull()
     expect(reusable?.cameraNormalized).toBe('canon eos r5')
 
-    // Recipe upgrade ('exif_tech_v2') treats v1 rows as stale without erasing them
-    const covNextRecipe = db.getPhotoMetadataCoverage('exif_tech_v2')
+    // Recipe upgrade ('exif_tech_v3') treats v2 rows as stale without erasing them
+    const covNextRecipe = db.getPhotoMetadataCoverage('exif_tech_v3')
     expect(covNextRecipe.extractedCount).toBe(0)
     expect(covNextRecipe.noMetadataCount).toBe(0)
     expect(covNextRecipe.staleCount).toBe(4) // p1, p2, p3, p4 all had v1 rows

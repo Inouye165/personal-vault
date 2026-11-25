@@ -13,6 +13,7 @@ import { extname } from 'node:path'
 import * as ExifReader from 'exifreader'
 import sharp, { type Metadata as SharpMetadata } from 'sharp'
 import { resolveCaptureDate } from './date-policy'
+import { resolveGpsCoordinates } from './gps-policy'
 import {
   cleanMetadataString,
   computeExtensionFormatMismatch,
@@ -658,6 +659,133 @@ function serializeBoundedRawEvidence(evidence: Record<string, unknown>): string 
   })
 }
 
+function parseCalendarParts(calendarDate: string | null): {
+  readonly captureYear: number | null
+  readonly captureMonth: number | null
+  readonly captureDay: number | null
+} {
+  if (!calendarDate) {
+    return { captureYear: null, captureMonth: null, captureDay: null }
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(calendarDate)
+  if (!m) {
+    return { captureYear: null, captureMonth: null, captureDay: null }
+  }
+  return {
+    captureYear: Number(m[1]),
+    captureMonth: Number(m[2]),
+    captureDay: Number(m[3])
+  }
+}
+
+const SKIP_RAW_READABLE_TAGS = new Set([
+  'Exif IFD Pointer',
+  'GPS Info IFD Pointer',
+  'Interoperability IFD Pointer',
+  'ThumbnailOffset',
+  'ThumbnailLength',
+  'JPEGInterchangeFormat',
+  'JPEGInterchangeFormatLength',
+  // Structural container header fields reported by ExifReader under png/riff (not embedded metadata)
+  'Image Width',
+  'Image Height',
+  'Bit Depth',
+  'Color Type',
+  'Compression',
+  'Filter',
+  'Interlace',
+  'Alpha'
+])
+
+function formatReadableTagValue(tagObj: unknown): string | null {
+  if (tagObj === null || tagObj === undefined) return null
+  if (typeof tagObj === 'string') {
+    return cleanMetadataString(tagObj).cleaned
+  }
+  if (typeof tagObj === 'number' && Number.isFinite(tagObj)) {
+    return String(tagObj)
+  }
+  if (typeof tagObj === 'boolean') {
+    return String(tagObj)
+  }
+  if (typeof tagObj !== 'object') return null
+
+  const rec = tagObj as { description?: unknown; value?: unknown }
+  if (typeof rec.description === 'string' && rec.description.trim().length > 0) {
+    // ExifReader sets "[unparsed]" or raw hex dumps on binary MakerNote/unknown tags
+    if (/^\[unparsed/i.test(rec.description.trim())) return null
+    return cleanMetadataString(rec.description).cleaned
+  }
+  if (typeof rec.value === 'string') {
+    return cleanMetadataString(rec.value).cleaned
+  }
+  if (typeof rec.value === 'number' && Number.isFinite(rec.value)) {
+    return String(rec.value)
+  }
+  if (Array.isArray(rec.value)) {
+    // Skip large raw byte arrays (e.g. MakerNote, UserComment binary blocks)
+    if (rec.value.length > 16) return null
+    if (rec.value.every((v) => typeof v === 'string')) {
+      return cleanMetadataString(rec.value.join(', ')).cleaned
+    }
+    if (rec.value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+      return rec.value.join(', ')
+    }
+  }
+  return null
+}
+
+function collectReadableAndUnknownTags(expanded: Record<string, unknown>): {
+  readonly readableTags: Record<string, string>
+  readonly unknownTagCount: number
+  readonly hasReadableEmbeddedTag: boolean
+} {
+  const readableTags: Record<string, string> = {}
+  let unknownTagCount = 0
+  let collectedCount = 0
+  const MAX_READABLE_TAGS = 120
+
+  const inspectGroup = (groupName: string, prefix: string, countsAsMetadata: boolean): void => {
+    const group = expanded[groupName]
+    if (!group || typeof group !== 'object') return
+    for (const [key, val] of Object.entries(group as Record<string, unknown>)) {
+      if (SKIP_RAW_READABLE_TAGS.has(key)) continue
+      const isUnknownKey =
+        key === 'MakerNote' ||
+        /^unknown\s+tag/i.test(key) ||
+        /^0x[0-9a-f]+$/i.test(key) ||
+        /^\d{3,5}$/.test(key)
+      if (isUnknownKey) {
+        if (countsAsMetadata) {
+          unknownTagCount++
+        }
+        continue
+      }
+      if (collectedCount >= MAX_READABLE_TAGS) continue
+      const formatted = formatReadableTagValue(val)
+      if (formatted !== null) {
+        const qualifiedKey = prefix ? `${prefix}.${key}` : key
+        readableTags[qualifiedKey] = formatted
+        if (countsAsMetadata) {
+          collectedCount++
+        }
+      }
+    }
+  }
+
+  inspectGroup('exif', '', true)
+  inspectGroup('xmp', 'XMP', true)
+  inspectGroup('iptc', 'IPTC', true)
+  inspectGroup('png', 'PNG', false)
+  inspectGroup('riff', 'RIFF', false)
+
+  return {
+    readableTags,
+    unknownTagCount,
+    hasReadableEmbeddedTag: collectedCount > 0 || unknownTagCount > 0
+  }
+}
+
 function buildEmptyFailureResult(params: {
   extractionStatus: 'unsupported' | 'failed'
   recordedExtension: string
@@ -692,10 +820,18 @@ function buildEmptyFailureResult(params: {
     captureOffsetText: null,
     captureTimezoneStatus: 'unknown',
     captureCalendarDate: null,
+    captureYear: null,
+    captureMonth: null,
+    captureDay: null,
     captureLocalIso: null,
     captureUtcEpochMs: null,
     captureDateParseError: null,
     captureDateConflict: null,
+    gpsStatus: 'absent',
+    gpsLatitude: null,
+    gpsLongitude: null,
+    gpsAltitudeM: null,
+    gpsParseError: null,
     cameraMakeRaw: null,
     cameraModelRaw: null,
     cameraDisplay: null,
@@ -704,6 +840,8 @@ function buildEmptyFailureResult(params: {
     lensModelRaw: null,
     lensDisplay: null,
     lensNormalized: null,
+    unknownTagCount: 0,
+    parserLimitsNote: null,
     rawMetadataJson: null,
     errorCode: params.errorCode,
     errorMessage: params.errorMessage
@@ -797,43 +935,24 @@ export async function extractPhotoMetadataFromBuffer(params: {
     })
   }
 
+  let expandedTags: Record<string, unknown> = {}
   let exifTags: Record<string, unknown> = {}
+  let gpsGroupTags: Record<string, unknown> = {}
   if (detectedSig !== 'gif') {
     try {
       const expanded = ExifReader.load(params.fileBuffer, {
         expanded: true,
-        includeUnknown: false,
+        includeUnknown: true,
         decompress: {
           maxDecompressedSize: METADATA_LIMITS.MAX_METADATA_PARSE_BYTES
-        },
-        includeTags: {
-          file: true,
-          png: true,
-          riff: true,
-          exif: [
-            'Make',
-            'Model',
-            'LensMake',
-            'LensModel',
-            'Orientation',
-            'DateTimeOriginal',
-            'DateTimeDigitized',
-            'DateTime',
-            'OffsetTimeOriginal',
-            'OffsetTimeDigitized',
-            'OffsetTime',
-            'SubSecTimeOriginal',
-            'SubSecTimeDigitized',
-            'SubSecTime',
-            'PixelXDimension',
-            'PixelYDimension',
-            'ImageWidth',
-            'ImageLength'
-          ]
         }
       })
+      expandedTags = expanded as unknown as Record<string, unknown>
       if (expanded.exif && typeof expanded.exif === 'object') {
         exifTags = expanded.exif as Record<string, unknown>
+      }
+      if (expanded.gps && typeof expanded.gps === 'object') {
+        gpsGroupTags = expanded.gps as Record<string, unknown>
       }
     } catch (err: unknown) {
       const isMissingMeta =
@@ -880,6 +999,12 @@ export async function extractPhotoMetadataFromBuffer(params: {
     offsetTimeDigitizedRaw: rawOffsetTimeDigitized,
     subSecTimeDigitizedRaw: rawSubSecTimeDigitized
   })
+  const calParts = parseCalendarParts(dateRes.captureCalendarDate)
+
+  const gpsRes = resolveGpsCoordinates({
+    gpsGroup: gpsGroupTags,
+    exifGroup: exifTags
+  })
 
   const camLensRes = normalizeCameraAndLens({
     cameraMake: rawMake,
@@ -902,17 +1027,26 @@ export async function extractPhotoMetadataFromBuffer(params: {
     exifOrientation: rawOrientation
   })
 
+  const tagCollection = collectReadableAndUnknownTags(expandedTags)
+
   const hasAnyEmbeddedExifTag =
     rawDateTimeOriginal !== null ||
     rawDateTimeDigitized !== null ||
     rawModifyDateTime !== null ||
+    gpsRes.gpsStatus !== 'absent' ||
     camLensRes.cameraMakeRaw !== null ||
     camLensRes.cameraModelRaw !== null ||
     camLensRes.lensMakeRaw !== null ||
     camLensRes.lensModelRaw !== null ||
     rawOrientation !== null ||
+    tagCollection.hasReadableEmbeddedTag ||
     segCheck.hasEmbeddedExifMarker ||
     Boolean(sharpMeta.exif && sharpMeta.exif.length > 0)
+
+  const parserLimitsNote =
+    tagCollection.unknownTagCount > 0
+      ? `Original file bytes preserve all embedded metadata intact. ${tagCollection.unknownTagCount} unknown or proprietary tag(s) (such as vendor MakerNote or custom IDs) could not be decoded by the offline EXIF parser.`
+      : 'Original file bytes preserve all embedded metadata intact. Offline parser reads standard EXIF, GPS, XMP, and IPTC tags up to 4 MiB per file and 32 KiB stored tag evidence.'
 
   const rawMetadataJson = serializeBoundedRawEvidence({
     DateTimeOriginal:
@@ -932,10 +1066,16 @@ export async function extractPhotoMetadataFromBuffer(params: {
     LensMake: camLensRes.lensMakeRaw,
     LensModel: camLensRes.lensModelRaw,
     Orientation: rawOrientation,
+    gps: gpsRes.rawGpsEvidence,
+    gpsParseError: gpsRes.gpsParseError,
     dimensionWarning: dimRes.dimensionWarning,
     captureDateParseError: dateRes.captureDateParseError,
     captureDateConflict: dateRes.captureDateConflict,
-    stringsTruncated: camLensRes.wasTruncated || undefined
+    stringsTruncated: camLensRes.wasTruncated || undefined,
+    unknownTagCount: tagCollection.unknownTagCount > 0 ? tagCollection.unknownTagCount : undefined,
+    parserLimitsNote: hasAnyEmbeddedExifTag ? parserLimitsNote : undefined,
+    readableTags:
+      Object.keys(tagCollection.readableTags).length > 0 ? tagCollection.readableTags : undefined
   })
 
   return {
@@ -961,10 +1101,19 @@ export async function extractPhotoMetadataFromBuffer(params: {
     captureOffsetText: dateRes.captureOffsetText,
     captureTimezoneStatus: dateRes.captureTimezoneStatus,
     captureCalendarDate: dateRes.captureCalendarDate,
+    captureYear: calParts.captureYear,
+    captureMonth: calParts.captureMonth,
+    captureDay: calParts.captureDay,
     captureLocalIso: dateRes.captureLocalIso,
     captureUtcEpochMs: dateRes.captureUtcEpochMs,
     captureDateParseError: dateRes.captureDateParseError,
     captureDateConflict: dateRes.captureDateConflict,
+
+    gpsStatus: gpsRes.gpsStatus,
+    gpsLatitude: gpsRes.gpsLatitude,
+    gpsLongitude: gpsRes.gpsLongitude,
+    gpsAltitudeM: gpsRes.gpsAltitudeM,
+    gpsParseError: gpsRes.gpsParseError,
 
     cameraMakeRaw: camLensRes.cameraMakeRaw,
     cameraModelRaw: camLensRes.cameraModelRaw,
@@ -975,6 +1124,8 @@ export async function extractPhotoMetadataFromBuffer(params: {
     lensDisplay: camLensRes.lensDisplay,
     lensNormalized: camLensRes.lensNormalized,
 
+    unknownTagCount: tagCollection.unknownTagCount,
+    parserLimitsNote: hasAnyEmbeddedExifTag ? parserLimitsNote : null,
     rawMetadataJson,
     errorCode: null,
     errorMessage: null
