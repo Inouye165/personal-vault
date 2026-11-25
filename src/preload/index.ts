@@ -159,6 +159,21 @@ import {
   SemanticSearchResponseSchema,
   SemanticSearchCancelRequestSchema,
   SemanticSearchCancelResponseSchema,
+  MetadataAwarePhotoSearchRequestSchema,
+  MetadataAwarePhotoSearchResponseSchema,
+  SavedEventsListResponseSchema,
+  UpsertSavedEventRequestSchema,
+  SavedEventSchema,
+  DeleteSavedRecordRequestSchema,
+  SavedPlacesListResponseSchema,
+  UpsertSavedPlaceRequestSchema,
+  SavedPlaceSchema,
+  SetPhotoUserPlaceRequestSchema,
+  ClearPhotoUserPlaceRequestSchema,
+  PhotoUserPlaceSchema,
+  CameraLabelsListResponseSchema,
+  UpsertCameraLabelRequestSchema,
+  CameraLabelSchema,
   GetDocumentsPageRequestSchema,
   GetDocumentsPageResponseSchema,
   GetDocumentDetailRequestSchema,
@@ -281,6 +296,20 @@ import {
   type SemanticSearchResponse,
   type SemanticSearchCancelRequest,
   type SemanticSearchCancelResponse,
+  type MetadataAwarePhotoSearchRequest,
+  type MetadataAwarePhotoSearchResponse,
+  type SavedEventsListResponse,
+  type UpsertSavedEventRequest,
+  type SavedEvent,
+  type SavedPlacesListResponse,
+  type UpsertSavedPlaceRequest,
+  type SavedPlace,
+  type SetPhotoUserPlaceRequest,
+  type ClearPhotoUserPlaceRequest,
+  type PhotoUserPlace,
+  type CameraLabelsListResponse,
+  type UpsertCameraLabelRequest,
+  type CameraLabel,
   type GetDocumentsPageRequest,
   type GetDocumentsPageResponse,
   type GetDocumentDetailRequest,
@@ -1163,6 +1192,132 @@ const api: VaultApi = {
       throw new Error(`Invalid cancelPhotosSemanticSearch response from main: ${result.error}`)
     }
     return result.data
+  },
+
+  async searchPhotosMetadataAware(
+    request: MetadataAwarePhotoSearchRequest
+  ): Promise<MetadataAwarePhotoSearchResponse> {
+    const parsed = validatePayload(MetadataAwarePhotoSearchRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid searchPhotosMetadataAware request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTOS_SEARCH_METADATA_AWARE, parsed.data)
+    const result = validatePayload(MetadataAwarePhotoSearchResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid searchPhotosMetadataAware response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async listSavedEvents(): Promise<SavedEventsListResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SAVED_EVENTS_LIST)
+    const result = validatePayload(SavedEventsListResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listSavedEvents response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async upsertSavedEvent(request: UpsertSavedEventRequest): Promise<SavedEvent> {
+    const parsed = validatePayload(UpsertSavedEventRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid upsertSavedEvent request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SAVED_EVENTS_UPSERT, parsed.data)
+    const result = validatePayload(SavedEventSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid upsertSavedEvent response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async deleteSavedEvent(id: number): Promise<boolean> {
+    const parsed = validatePayload(DeleteSavedRecordRequestSchema, { id })
+    if (!parsed.success) {
+      throw new Error(`Invalid deleteSavedEvent request: ${parsed.error}`)
+    }
+    return Boolean(await ipcRenderer.invoke(IPC_CHANNELS.SAVED_EVENTS_DELETE, parsed.data))
+  },
+
+  async listSavedPlaces(): Promise<SavedPlacesListResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SAVED_PLACES_LIST)
+    const result = validatePayload(SavedPlacesListResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listSavedPlaces response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async upsertSavedPlace(request: UpsertSavedPlaceRequest): Promise<SavedPlace> {
+    const parsed = validatePayload(UpsertSavedPlaceRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid upsertSavedPlace request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.SAVED_PLACES_UPSERT, parsed.data)
+    const result = validatePayload(SavedPlaceSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid upsertSavedPlace response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async deleteSavedPlace(id: number): Promise<boolean> {
+    const parsed = validatePayload(DeleteSavedRecordRequestSchema, { id })
+    if (!parsed.success) {
+      throw new Error(`Invalid deleteSavedPlace request: ${parsed.error}`)
+    }
+    return Boolean(await ipcRenderer.invoke(IPC_CHANNELS.SAVED_PLACES_DELETE, parsed.data))
+  },
+
+  async setPhotoUserPlace(request: SetPhotoUserPlaceRequest): Promise<PhotoUserPlace> {
+    const parsed = validatePayload(SetPhotoUserPlaceRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid setPhotoUserPlace request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.PHOTO_USER_PLACE_SET, parsed.data)
+    const result = validatePayload(PhotoUserPlaceSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid setPhotoUserPlace response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async clearPhotoUserPlace(request: ClearPhotoUserPlaceRequest): Promise<boolean> {
+    const parsed = validatePayload(ClearPhotoUserPlaceRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid clearPhotoUserPlace request: ${parsed.error}`)
+    }
+    return Boolean(await ipcRenderer.invoke(IPC_CHANNELS.PHOTO_USER_PLACE_CLEAR, parsed.data))
+  },
+
+  async listCameraLabels(): Promise<CameraLabelsListResponse> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.CAMERA_LABELS_LIST)
+    const result = validatePayload(CameraLabelsListResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid listCameraLabels response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async upsertCameraLabel(request: UpsertCameraLabelRequest): Promise<CameraLabel> {
+    const parsed = validatePayload(UpsertCameraLabelRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid upsertCameraLabel request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.CAMERA_LABELS_UPSERT, parsed.data)
+    const result = validatePayload(CameraLabelSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid upsertCameraLabel response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async deleteCameraLabel(id: number): Promise<boolean> {
+    const parsed = validatePayload(DeleteSavedRecordRequestSchema, { id })
+    if (!parsed.success) {
+      throw new Error(`Invalid deleteCameraLabel request: ${parsed.error}`)
+    }
+    return Boolean(await ipcRenderer.invoke(IPC_CHANNELS.CAMERA_LABELS_DELETE, parsed.data))
   },
 
   async getDocumentsPage(request: GetDocumentsPageRequest): Promise<GetDocumentsPageResponse> {

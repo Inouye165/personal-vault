@@ -32,6 +32,7 @@ import {
   DocumentSemanticCoordinator
 } from './services/documents/semantic'
 import { UnifiedSearchCoordinator } from './services/unified-search'
+import { PhotoSearchCoordinator } from './services/search'
 import { ExportCoordinator } from './services/export'
 import { BackupCoordinator } from './services/backup/coordinator'
 import { GoogleDriveAuthService } from './services/backup/google-drive-auth'
@@ -85,6 +86,7 @@ let docSemanticModelManager: DocSemanticModelManager | null = null
 let docSemanticCoordinator: DocumentSemanticCoordinator | null = null
 let docSearchCoordinator: DocumentSearchCoordinator | null = null
 let unifiedSearchCoordinator: UnifiedSearchCoordinator | null = null
+let photoSearchCoordinator: PhotoSearchCoordinator | null = null
 let documentClassificationCoordinator: DocumentClassificationCoordinator | null = null
 let exportCoordinator: ExportCoordinator | null = null
 let backupCoordinator: BackupCoordinator | null = null
@@ -425,6 +427,14 @@ if (!app.requestSingleInstanceLock()) {
       })
       logStartup('unifiedSearchCoordinator initialized')
 
+      photoSearchCoordinator = new PhotoSearchCoordinator({
+        catalog,
+        unifiedSearchCoordinator,
+        semanticModelManager,
+        photoMetadataCoordinator
+      })
+      logStartup('photoSearchCoordinator initialized')
+
       documentClassificationCoordinator = new DocumentClassificationCoordinator({
         catalog,
         maxAppLiveWorkers: 3,
@@ -486,6 +496,7 @@ if (!app.requestSingleInstanceLock()) {
         docSemanticCoordinator,
         docSearchCoordinator,
         unifiedSearchCoordinator,
+        photoSearchCoordinator,
         documentClassificationCoordinator,
         exportCoordinator,
         backupCoordinator,

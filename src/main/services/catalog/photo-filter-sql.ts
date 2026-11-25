@@ -85,9 +85,17 @@ export function buildPhotoFilterClauses(options: QueryFileLocationsOptions): Pho
     params.push(options.collectionId)
   }
 
-  // Stage 6C: SQL-backed technical metadata & file-type filters (combined with AND before pagination)
+  // Stage 6C + metadata-aware search: SQL-backed technical metadata, recurring dates, GPS/places & file-type filters (combined with AND before pagination)
   const hasDateRange = Boolean(options.captureDateFrom || options.captureDateTo)
-  const hasDateFilter = Boolean(hasDateRange || options.includeUnknownCaptureDate)
+  const hasRecurringDate =
+    typeof options.captureMonth === 'number' || typeof options.captureDay === 'number'
+  const hasDateFilter = Boolean(
+    hasDateRange || hasRecurringDate || options.includeUnknownCaptureDate
+  )
+  const hasGpsBounds = Boolean(options.gpsBounds)
+  const hasUserPlaceFilter =
+    typeof options.userPlaceId === 'number' ||
+    Boolean(options.userPlaceLabel && options.userPlaceLabel.trim().length > 0)
   const hasCameraFilter = Boolean(options.cameraNormalized || options.onlyUnknownCamera)
   const hasLensFilter = Boolean(options.lensNormalized || options.onlyUnknownLens)
   const hasMinDimensions =
@@ -102,6 +110,7 @@ export function buildPhotoFilterClauses(options: QueryFileLocationsOptions): Pho
 
   const needsTechMetaJoin =
     hasDateFilter ||
+    hasGpsBounds ||
     hasCameraFilter ||
     hasLensFilter ||
     hasDimensionFilter ||
@@ -122,37 +131,74 @@ export function buildPhotoFilterClauses(options: QueryFileLocationsOptions): Pho
   }
 
   if (hasDateFilter) {
-    if (hasDateRange && options.includeUnknownCaptureDate) {
-      const rangeSub: string[] = [
-        "tm.extraction_status IN ('extracted', 'no_metadata')",
-        'tm.capture_calendar_date IS NOT NULL'
-      ]
+    const knownDateParts: string[] = ["tm.extraction_status IN ('extracted', 'no_metadata')"]
+    const knownDateParams: SQLInputValue[] = []
+
+    if (hasDateRange) {
+      knownDateParts.push('tm.capture_calendar_date IS NOT NULL')
       if (options.captureDateFrom) {
-        rangeSub.push('tm.capture_calendar_date >= ?')
-        params.push(options.captureDateFrom)
+        knownDateParts.push('tm.capture_calendar_date >= ?')
+        knownDateParams.push(options.captureDateFrom)
       }
       if (options.captureDateTo) {
-        rangeSub.push('tm.capture_calendar_date <= ?')
-        params.push(options.captureDateTo)
+        knownDateParts.push('tm.capture_calendar_date <= ?')
+        knownDateParams.push(options.captureDateTo)
       }
+    }
+
+    if (hasRecurringDate) {
+      if (typeof options.captureMonth === 'number') {
+        knownDateParts.push('tm.capture_month = ?')
+        knownDateParams.push(options.captureMonth)
+      }
+      if (typeof options.captureDay === 'number') {
+        knownDateParts.push('tm.capture_day = ?')
+        knownDateParams.push(options.captureDay)
+      }
+    }
+
+    if ((hasDateRange || hasRecurringDate) && options.includeUnknownCaptureDate) {
       conditions.push(
-        `((${rangeSub.join(' AND ')}) OR (tm.extraction_status IN ('extracted', 'no_metadata') AND tm.capture_calendar_date IS NULL))`
+        `((${knownDateParts.join(' AND ')}) OR (tm.extraction_status IN ('extracted', 'no_metadata') AND tm.capture_calendar_date IS NULL))`
       )
-    } else if (hasDateRange) {
-      conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
-      conditions.push('tm.capture_calendar_date IS NOT NULL')
-      if (options.captureDateFrom) {
-        conditions.push('tm.capture_calendar_date >= ?')
-        params.push(options.captureDateFrom)
-      }
-      if (options.captureDateTo) {
-        conditions.push('tm.capture_calendar_date <= ?')
-        params.push(options.captureDateTo)
-      }
+      params.push(...knownDateParams)
+    } else if (hasDateRange || hasRecurringDate) {
+      conditions.push(...knownDateParts)
+      params.push(...knownDateParams)
     } else if (options.includeUnknownCaptureDate) {
       conditions.push("tm.extraction_status IN ('extracted', 'no_metadata')")
       conditions.push('tm.capture_calendar_date IS NULL')
     }
+  }
+
+  if (hasGpsBounds || hasUserPlaceFilter) {
+    const placeBranches: string[] = []
+    if (options.gpsBounds) {
+      const { minLat, maxLat, minLon, maxLon } = options.gpsBounds
+      const lonClause =
+        minLon <= maxLon
+          ? 'tm.gps_longitude >= ? AND tm.gps_longitude <= ?'
+          : '(tm.gps_longitude >= ? OR tm.gps_longitude <= ?)'
+      placeBranches.push(
+        `(tm.extraction_status IN ('extracted', 'no_metadata') AND tm.gps_status = 'present' AND tm.gps_latitude IS NOT NULL AND tm.gps_longitude IS NOT NULL AND tm.gps_latitude >= ? AND tm.gps_latitude <= ? AND ${lonClause})`
+      )
+      params.push(minLat, maxLat, minLon, maxLon)
+    }
+    if (hasUserPlaceFilter) {
+      const userPlaceConds: string[] = []
+      if (typeof options.userPlaceId === 'number') {
+        userPlaceConds.push('pup.place_id = ?')
+        params.push(options.userPlaceId)
+      }
+      if (options.userPlaceLabel && options.userPlaceLabel.trim().length > 0) {
+        userPlaceConds.push('pup.normalized_label = ?')
+        params.push(options.userPlaceLabel.trim().toLowerCase())
+      }
+      placeBranches.push(
+        `EXISTS (SELECT 1 FROM photo_user_places pup WHERE pup.file_location_id = f.id AND (${userPlaceConds.join(' OR ')}))`
+      )
+    }
+    conditions.push(`(${placeBranches.join(' OR ')})`)
   }
 
   if (hasCameraFilter) {

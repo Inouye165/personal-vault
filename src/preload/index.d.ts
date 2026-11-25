@@ -142,6 +142,20 @@ import type {
   DocSemanticSearchRequest,
   DocSemanticSearchResponseDto,
   DocSemanticSearchCancelRequest,
+  MetadataAwarePhotoSearchRequest,
+  MetadataAwarePhotoSearchResponse,
+  SavedEventsListResponse,
+  UpsertSavedEventRequest,
+  SavedEvent,
+  SavedPlacesListResponse,
+  UpsertSavedPlaceRequest,
+  SavedPlace,
+  SetPhotoUserPlaceRequest,
+  ClearPhotoUserPlaceRequest,
+  PhotoUserPlace,
+  CameraLabelsListResponse,
+  UpsertCameraLabelRequest,
+  CameraLabel,
   UnifiedSearchPhotosRequest,
   UnifiedSearchPhotosResponse,
   UnifiedSearchDocumentsRequest,
@@ -249,6 +263,20 @@ export interface VaultApi {
   cancelPhotosSemanticSearch: (
     request?: SemanticSearchCancelRequest
   ) => Promise<SemanticSearchCancelResponse>
+  searchPhotosMetadataAware: (
+    request: MetadataAwarePhotoSearchRequest
+  ) => Promise<MetadataAwarePhotoSearchResponse>
+  listSavedEvents: () => Promise<SavedEventsListResponse>
+  upsertSavedEvent: (request: UpsertSavedEventRequest) => Promise<SavedEvent>
+  deleteSavedEvent: (id: number) => Promise<boolean>
+  listSavedPlaces: () => Promise<SavedPlacesListResponse>
+  upsertSavedPlace: (request: UpsertSavedPlaceRequest) => Promise<SavedPlace>
+  deleteSavedPlace: (id: number) => Promise<boolean>
+  setPhotoUserPlace: (request: SetPhotoUserPlaceRequest) => Promise<PhotoUserPlace>
+  clearPhotoUserPlace: (request: ClearPhotoUserPlaceRequest) => Promise<boolean>
+  listCameraLabels: () => Promise<CameraLabelsListResponse>
+  upsertCameraLabel: (request: UpsertCameraLabelRequest) => Promise<CameraLabel>
+  deleteCameraLabel: (id: number) => Promise<boolean>
   getDocumentsPage: (request: GetDocumentsPageRequest) => Promise<GetDocumentsPageResponse>
   getDocumentDetail: (request: GetDocumentDetailRequest) => Promise<GetDocumentDetailResponse>
   getDocumentExtensionFacets: (
