@@ -27,6 +27,7 @@ import type { BackupCaptureGuard } from '../backup/capture-guard'
 export interface VaultImportCoordinatorOptions {
   readonly catalog: CatalogDatabase
   readonly captureGuard?: BackupCaptureGuard
+  readonly copyAndVerifyFn?: typeof copyAndVerifyFileToVault
 }
 
 export interface StartImportOptions {
@@ -37,6 +38,7 @@ export interface StartImportOptions {
 export class VaultImportCoordinator {
   private readonly catalog: CatalogDatabase
   private captureGuard?: BackupCaptureGuard
+  private readonly copyAndVerifyFn: typeof copyAndVerifyFileToVault
   private readonly events = new EventEmitter()
   private activeJob: CatalogVaultImportJobRecord | null = null
   private abortController: AbortController | null = null
@@ -48,6 +50,7 @@ export class VaultImportCoordinator {
   constructor(options: VaultImportCoordinatorOptions) {
     this.catalog = options.catalog
     this.captureGuard = options.captureGuard
+    this.copyAndVerifyFn = options.copyAndVerifyFn ?? copyAndVerifyFileToVault
   }
 
   public setCaptureGuard(guard: BackupCaptureGuard | undefined): void {
@@ -255,7 +258,7 @@ export class VaultImportCoordinator {
         })
 
         const runImportStep = async () =>
-          copyAndVerifyFileToVault({
+          this.copyAndVerifyFn({
             vaultPath,
             vaultId: job.vaultId,
             importJobId: job.id,

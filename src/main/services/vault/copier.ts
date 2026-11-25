@@ -6,6 +6,7 @@ import {
   constants,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -101,6 +102,100 @@ export function cleanupOwnedStagingFiles(vaultPath: string, vaultId?: string): n
     // Ignore readdir failure
   }
   return cleaned
+}
+
+function safeUnlink(targetPath: string | null): void {
+  if (!targetPath) return
+  try {
+    if (existsSync(targetPath)) {
+      unlinkSync(targetPath)
+    }
+  } catch {
+    // Ignore cleanup errors
+  }
+}
+
+async function verifyFileIntegrityAtPath(params: {
+  readonly vaultPath: string
+  readonly filePath: string
+  readonly expectedByteSize: number
+  readonly expectedSha256: string
+  readonly signal?: AbortSignal
+  readonly label: string
+  readonly sizeMismatchCode: 'destination_collision' | 'destination_hash_mismatch'
+}): Promise<
+  | { readonly status: 'ok' }
+  | { readonly status: 'cancelled' }
+  | { readonly status: 'error'; readonly code: string; readonly message: string }
+> {
+  const { vaultPath, filePath, expectedByteSize, expectedSha256, signal, label, sizeMismatchCode } =
+    params
+
+  assertPathContainedInVault(vaultPath, filePath, label)
+
+  const linkStat = lstatSync(filePath)
+  if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
+    return {
+      status: 'error',
+      code: 'destination_collision',
+      message: `${label} at "${filePath}" is not a regular file`
+    }
+  }
+
+  if (linkStat.size !== expectedByteSize) {
+    return {
+      status: 'error',
+      code: sizeMismatchCode,
+      message: `${label} size (${linkStat.size}) does not match expected (${expectedByteSize})`
+    }
+  }
+
+  const handle = await open(filePath, 'r')
+  const hasher = createHash('sha256')
+  try {
+    const preStat = await handle.stat()
+    if (!preStat.isFile() || preStat.size !== expectedByteSize) {
+      return {
+        status: 'error',
+        code: sizeMismatchCode,
+        message: `${label} descriptor size (${preStat.size}) does not match expected (${expectedByteSize})`
+      }
+    }
+
+    const buf = Buffer.alloc(CHUNK_SIZE)
+    let bytesRead = 0
+    while ((bytesRead = (await handle.read(buf, 0, CHUNK_SIZE)).bytesRead) > 0) {
+      if (signal?.aborted) {
+        return { status: 'cancelled' }
+      }
+      hasher.update(buf.subarray(0, bytesRead))
+    }
+
+    const postStat = await handle.stat()
+    if (
+      postStat.size !== preStat.size ||
+      !isTimestampConsistentWithExpectation(postStat.mtimeMs, preStat.mtimeMs)
+    ) {
+      return {
+        status: 'error',
+        code: 'destination_hash_mismatch',
+        message: `${label} changed on disk during SHA-256 verification`
+      }
+    }
+  } finally {
+    await handle.close()
+  }
+
+  const actualSha = hasher.digest('hex').toLowerCase()
+  if (actualSha !== expectedSha256.toLowerCase()) {
+    return {
+      status: 'error',
+      code: 'destination_hash_mismatch',
+      message: `${label} SHA-256 mismatch: expected ${expectedSha256}, found ${actualSha}`
+    }
+  }
+
+  return { status: 'ok' }
 }
 
 export async function copyAndVerifyFileToVault(
@@ -667,27 +762,20 @@ export async function copyAndVerifyFileToVault(
     })
 
     const currentStaging = stagingFilePath
+    const renameFn = params.publishOps?.renameSync ?? renameSync
+    const copyFileFn = params.publishOps?.copyFileSync ?? copyFileSync
+    let usedFallbackCopy = false
+
     try {
-      renameSync(currentStaging, destFilePath)
-      stagingFilePath = null
+      renameFn(currentStaging, destFilePath)
     } catch {
       try {
-        copyFileSync(currentStaging, destFilePath, constants.COPYFILE_EXCL)
-        unlinkSync(currentStaging)
-        stagingFilePath = null
+        copyFileFn(currentStaging, destFilePath, constants.COPYFILE_EXCL)
+        usedFallbackCopy = true
       } catch (publishErr) {
-        try {
-          unlinkSync(markerPath)
-        } catch {
-          // Ignore
-        }
-        if (stagingFilePath && existsSync(stagingFilePath)) {
-          try {
-            unlinkSync(stagingFilePath)
-          } catch {
-            // Ignore
-          }
-        }
+        safeUnlink(markerPath)
+        safeUnlink(stagingFilePath)
+        stagingFilePath = null
         return {
           status: 'error',
           code: 'destination_collision',
@@ -695,6 +783,37 @@ export async function copyAndVerifyFileToVault(
         }
       }
     }
+
+    // Verify the final published destination file at rest before recording manifest or success
+    const finalVerification = await verifyFileIntegrityAtPath({
+      vaultPath,
+      filePath: destFilePath,
+      expectedByteSize: source.expectedByteSize,
+      expectedSha256: source.expectedSha256,
+      signal,
+      label: 'Published destination file',
+      sizeMismatchCode: 'destination_hash_mismatch'
+    })
+
+    if (finalVerification.status !== 'ok') {
+      safeUnlink(destFilePath)
+      safeUnlink(markerPath)
+      safeUnlink(stagingFilePath)
+      stagingFilePath = null
+      if (finalVerification.status === 'cancelled') {
+        return { status: 'cancelled' }
+      }
+      return {
+        status: 'error',
+        code: finalVerification.code,
+        message: finalVerification.message
+      }
+    }
+
+    if (usedFallbackCopy) {
+      safeUnlink(currentStaging)
+    }
+    stagingFilePath = null
 
     // 9. Write portable metadata manifest
     const sourceEntry: VaultManifestSourceEntry = {

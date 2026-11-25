@@ -13,8 +13,9 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
+import { copyFileSync } from 'node:fs'
 import {
   initializeVault,
   loadVaultIdentity,
@@ -23,6 +24,8 @@ import {
   readVaultManifest,
   cleanupOwnedStagingFiles
 } from '../../src/main/services/vault'
+import { createJpegFixture, EXIF_TAG_IDS } from '../helpers/exif-fixture-builder'
+import { extractPhotoMetadataFromFile } from '../../src/main/services/metadata'
 
 describe('Vault Services — Identity, Overlap, Copier, and Manifests', () => {
   let tempDir: string
@@ -596,5 +599,216 @@ describe('Vault Services — Identity, Overlap, Copier, and Manifests', () => {
     expect(result.status).toBe('success')
     expect(existsSync(join(destDir, 'manifest.json'))).toBe(true)
     expect(existsSync(markerPath)).toBe(false)
+  })
+
+  it('rejects publication and cleans up when renameSync falls back to copyFileSync and final destination is corrupted', async () => {
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Fallback Guard Vault' })
+    const content = Buffer.from('pristine-source-photo-bytes-abcdef0123456789')
+    const sha = createHash('sha256').update(content).digest('hex')
+    const prefix = sha.slice(0, 2)
+    const destDir = join(vaultDir, 'files', prefix, sha)
+    const destFilePath = join(destDir, 'fallback.jpg')
+    const markerPath = join(
+      destDir,
+      `.pv_in_progress_${identity.vaultId}_job-fallback-corrupt.json`
+    )
+
+    const sourceFile = join(sourceDir, 'fallback.jpg')
+    writeFileSync(sourceFile, content)
+    const st = statSync(sourceFile)
+
+    const result = await copyAndVerifyFileToVault({
+      vaultPath: vaultDir,
+      vaultId: identity.vaultId,
+      importJobId: 'job-fallback-corrupt',
+      source: {
+        fileLocationId: 77,
+        discoveryObservationId: 87,
+        originalPath: sourceFile,
+        fileName: 'fallback.jpg',
+        extension: '.jpg',
+        category: 'photo',
+        recordedFacts: {
+          byteSize: content.length,
+          filesystemBirthtimeMs: st.birthtimeMs,
+          filesystemMtimeMs: st.mtimeMs,
+          firstDiscoveredAtMs: 1700000000000,
+          lastSeenAtMs: 1700000000000,
+          hashObservationId: 97,
+          hashVerifiedAtMs: 1700000000000
+        },
+        inferredMetadata: { inferredCaptureTimeMs: null },
+        reviewDecisions: { isPreferred: false, duplicateReviewStatus: null },
+        expectedSha256: sha,
+        expectedByteSize: content.length
+      },
+      publishOps: {
+        renameSync: () => {
+          const err = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+          err.code = 'EXDEV'
+          throw err
+        },
+        copyFileSync: (src, dest) => {
+          const stagedBytes = readFileSync(src)
+          const corrupted = Buffer.from(stagedBytes)
+          corrupted[0] = corrupted[0]! ^ 0xff
+          writeFileSync(dest, corrupted)
+        }
+      }
+    })
+
+    expect(result.status).toBe('error')
+    if (result.status === 'error') {
+      expect(result.code).toBe('destination_hash_mismatch')
+    }
+
+    expect(existsSync(destFilePath)).toBe(false)
+    expect(existsSync(join(destDir, 'manifest.json'))).toBe(false)
+    expect(existsSync(markerPath)).toBe(false)
+    expect(readFileSync(sourceFile).equals(content)).toBe(true)
+  })
+
+  it('succeeds when renameSync falls back to copyFileSync and final destination SHA-256 matches', async () => {
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Fallback Valid Vault' })
+    const content = Buffer.from('faithful-fallback-photo-bytes-9876543210')
+    const sha = createHash('sha256').update(content).digest('hex')
+    const prefix = sha.slice(0, 2)
+    const destDir = join(vaultDir, 'files', prefix, sha)
+
+    const sourceFile = join(sourceDir, 'fallback-ok.jpg')
+    writeFileSync(sourceFile, content)
+    const st = statSync(sourceFile)
+
+    const result = await copyAndVerifyFileToVault({
+      vaultPath: vaultDir,
+      vaultId: identity.vaultId,
+      importJobId: 'job-fallback-ok',
+      source: {
+        fileLocationId: 78,
+        discoveryObservationId: 88,
+        originalPath: sourceFile,
+        fileName: 'fallback-ok.jpg',
+        extension: '.jpg',
+        category: 'photo',
+        recordedFacts: {
+          byteSize: content.length,
+          filesystemBirthtimeMs: st.birthtimeMs,
+          filesystemMtimeMs: st.mtimeMs,
+          firstDiscoveredAtMs: 1700000000000,
+          lastSeenAtMs: 1700000000000,
+          hashObservationId: 98,
+          hashVerifiedAtMs: 1700000000000
+        },
+        inferredMetadata: { inferredCaptureTimeMs: null },
+        reviewDecisions: { isPreferred: false, duplicateReviewStatus: null },
+        expectedSha256: sha,
+        expectedByteSize: content.length
+      },
+      publishOps: {
+        renameSync: () => {
+          const err = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+          err.code = 'EXDEV'
+          throw err
+        },
+        copyFileSync: (src, dest, mode) => copyFileSync(src, dest, mode)
+      }
+    })
+
+    expect(result.status).toBe('success')
+    expect(existsSync(join(destDir, 'manifest.json'))).toBe(true)
+    expect(readFileSync(join(destDir, 'fallback-ok.jpg')).equals(content)).toBe(true)
+  })
+
+  it('preserves full bytes and embedded EXIF metadata on successful JPEG and HEIC vault copies', async () => {
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Metadata Vault' })
+
+    const jpegBytes = await createJpegFixture({
+      width: 320,
+      height: 240,
+      ifd0Tags: [
+        { tagId: EXIF_TAG_IDS.Make, type: 'ascii', value: 'Nikon' },
+        { tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Nikon Z8' },
+        { tagId: EXIF_TAG_IDS.Orientation, type: 'short', value: 1 }
+      ],
+      exifTags: [
+        { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:07:14 10:15:30' },
+        { tagId: EXIF_TAG_IDS.OffsetTimeOriginal, type: 'ascii', value: '-06:00' },
+        { tagId: EXIF_TAG_IDS.LensModel, type: 'ascii', value: 'NIKKOR Z 24-70mm f/2.8 S' }
+      ]
+    })
+    const jpegSource = join(sourceDir, 'yellowstone.jpg')
+    writeFileSync(jpegSource, jpegBytes)
+
+    const heicFixturePath = resolve(__dirname, '..', 'fixtures', 'heic', 'portrait_exif6.heic')
+    const heicSource = join(sourceDir, 'portrait_exif6.heic')
+    copyFileSync(heicFixturePath, heicSource)
+    const heicBytes = readFileSync(heicSource)
+
+    const fixtures = [
+      { path: jpegSource, name: 'yellowstone.jpg', ext: '.jpg', bytes: jpegBytes, id: 501 },
+      { path: heicSource, name: 'portrait_exif6.heic', ext: '.heic', bytes: heicBytes, id: 502 }
+    ]
+
+    for (const item of fixtures) {
+      const st = statSync(item.path)
+      const sha = createHash('sha256').update(item.bytes).digest('hex')
+      const sourceMeta = await extractPhotoMetadataFromFile({
+        sourcePath: item.path,
+        recordedExtension: item.ext,
+        approvedRoots: [sourceDir]
+      })
+
+      const copyRes = await copyAndVerifyFileToVault({
+        vaultPath: vaultDir,
+        vaultId: identity.vaultId,
+        importJobId: `job-meta-${item.id}`,
+        source: {
+          fileLocationId: item.id,
+          discoveryObservationId: item.id + 1000,
+          originalPath: item.path,
+          fileName: item.name,
+          extension: item.ext,
+          category: 'photo',
+          recordedFacts: {
+            byteSize: item.bytes.length,
+            filesystemBirthtimeMs: st.birthtimeMs,
+            filesystemMtimeMs: st.mtimeMs,
+            firstDiscoveredAtMs: 1700000000000,
+            lastSeenAtMs: 1700000000000,
+            hashObservationId: item.id + 2000,
+            hashVerifiedAtMs: 1700000000000
+          },
+          inferredMetadata: { inferredCaptureTimeMs: null },
+          reviewDecisions: { isPreferred: false, duplicateReviewStatus: null },
+          expectedSha256: sha,
+          expectedByteSize: item.bytes.length
+        }
+      })
+
+      expect(copyRes.status).toBe('success')
+      if (copyRes.status !== 'success') continue
+
+      const copiedAbs = join(vaultDir, copyRes.relativePath)
+      const copiedBytes = readFileSync(copiedAbs)
+      expect(copiedBytes.equals(item.bytes)).toBe(true)
+      expect(createHash('sha256').update(copiedBytes).digest('hex')).toBe(sha)
+
+      // Source remains completely untouched
+      const postSt = statSync(item.path)
+      expect(postSt.size).toBe(st.size)
+      expect(postSt.mtimeMs).toBe(st.mtimeMs)
+      expect(readFileSync(item.path).equals(item.bytes)).toBe(true)
+
+      const copyMeta = await extractPhotoMetadataFromFile({
+        sourcePath: copiedAbs,
+        recordedExtension: item.ext,
+        approvedRoots: [vaultDir]
+      })
+      expect(copyMeta.extractionStatus).toBe('extracted')
+      expect(copyMeta.captureLocalIso).toBe(sourceMeta.captureLocalIso)
+      expect(copyMeta.captureOffsetText).toBe(sourceMeta.captureOffsetText)
+      expect(copyMeta.cameraDisplay).toBe(sourceMeta.cameraDisplay)
+      expect(copyMeta.lensDisplay).toBe(sourceMeta.lensDisplay)
+    }
   })
 })
