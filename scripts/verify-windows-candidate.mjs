@@ -906,7 +906,7 @@ async function main() {
           await new Promise((r) => setTimeout(r, 150));
         }
 
-        // Photos UI Top results + Details score UX check
+        // Photos UI normal grid + Details score UX check
         const input = document.querySelector('.photos-search-input');
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         setter.call(input, 'sunset sky mountains');
@@ -914,19 +914,22 @@ async function main() {
         await new Promise((r) => setTimeout(r, 50));
         document.querySelector('.photos-search-submit-btn')?.click();
 
-        let topVisible = false;
+        let gridReady = false;
         for (let i = 0; i < 60; i++) {
-          if (document.querySelector('[data-testid="photos-top-results"] .photo-featured-card')) {
-            topVisible = true;
+          if (document.querySelector('.photos-grid-container .photo-card.photo-cell')) {
+            gridReady = true;
             break;
           }
           await new Promise((r) => setTimeout(r, 100));
         }
-        if (!topVisible) throw new Error('Photos Top results did not appear');
+        if (!gridReady) throw new Error('Photos search results did not appear in grid');
+        if (document.querySelector('[data-testid="photos-top-results"]')) {
+          throw new Error('Unexpected photos-top-results showcase rendered');
+        }
         if (document.querySelectorAll('.badge-similarity-score').length !== 0) {
           throw new Error('Unexpected raw % match overlay on thumbnails');
         }
-        document.querySelector('[data-testid="photos-top-results"] .photo-featured-card')?.click();
+        document.querySelector('.photos-grid-container .photo-card.photo-cell')?.click();
         let detailScore = '';
         for (let i = 0; i < 40; i++) {
           detailScore = document.querySelector('[data-testid="photo-search-similarity-detail"]')?.textContent || '';
