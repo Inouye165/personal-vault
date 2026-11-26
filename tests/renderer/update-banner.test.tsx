@@ -49,12 +49,51 @@ describe('UpdateBanner', () => {
       />
     )
 
-    expect(screen.getByText(/Personal Vault 0.1.1 is available/i)).toBeInTheDocument()
-    expect(screen.getByText(/will close and reopen automatically/i)).toBeInTheDocument()
+    const banner = screen.getByTestId('update-banner')
+    expect(banner).toHaveAttribute('role', 'status')
+    expect(screen.getByText(/Update available — Personal Vault 0\.1\.1/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /will close and reopen automatically after any active vault writes and backups finish/i
+      )
+    ).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('update-now-btn'))
     expect(onInstallNow).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByTestId('update-later-btn'))
     expect(onDefer).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows download percentage, progress bar, and close-and-reopen guidance while downloading', () => {
+    render(
+      <UpdateBanner
+        state={makeState({
+          phase: 'downloading',
+          availableVersion: '0.1.1',
+          downloadProgress: {
+            percent: 42.4,
+            transferredBytes: 424,
+            totalBytes: 1000,
+            bytesPerSecond: 100
+          }
+        })}
+        onInstallNow={vi.fn()}
+        onDefer={vi.fn()}
+        onCheckForUpdates={vi.fn()}
+        onDismissError={vi.fn()}
+      />
+    )
+
+    const banner = screen.getByTestId('update-banner')
+    expect(banner).toHaveAttribute('role', 'status')
+    expect(screen.getByText(/Downloading Personal Vault 0\.1\.1… 42%/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole('progressbar', { name: /Update download progress/i })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /Personal Vault will close and reopen automatically after the download and any active vault writes or backups finish/i
+      )
+    ).toBeInTheDocument()
   })
 
   it('shows active vault write and backup job notice while draining before restart', () => {
@@ -72,9 +111,9 @@ describe('UpdateBanner', () => {
       />
     )
 
-    expect(screen.getByTestId('update-banner')).toHaveTextContent(
-      /active vault write and backup job/i
-    )
+    const banner = screen.getByTestId('update-banner')
+    expect(banner).toHaveAttribute('role', 'status')
+    expect(banner).toHaveTextContent(/active vault write and backup job/i)
   })
 
   it('shows failed download recovery actions while keeping current version usable', () => {
@@ -95,6 +134,8 @@ describe('UpdateBanner', () => {
       />
     )
 
+    const banner = screen.getByTestId('update-banner')
+    expect(banner).toHaveAttribute('role', 'alert')
     expect(screen.getByText(/Update download failed/i)).toBeInTheDocument()
     expect(
       screen.getByText(/current version \(0\.1\.0\) is still ready to use/i)

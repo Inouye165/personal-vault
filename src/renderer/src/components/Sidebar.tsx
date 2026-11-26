@@ -117,7 +117,7 @@ export function Sidebar({
                 onClick={onCheckForUpdates}
               >
                 {updateState.phase === 'deferred' && updateState.availableVersion
-                  ? `Update v${updateState.availableVersion} available`
+                  ? `Update available (${updateState.availableVersion})`
                   : updateState.phase === 'checking'
                     ? 'Checking for updates…'
                     : updateState.phase === 'up_to_date'

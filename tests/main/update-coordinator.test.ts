@@ -373,4 +373,40 @@ describe('UpdateCoordinator & feed resolution', () => {
     expect(cleaned).not.toContain('ghp_abc123456789xyz')
     expect(cleaned).toContain('[REDACTED]')
   })
+
+  it('keeps the adapter error listener attached across quitAndInstall handoff', async () => {
+    const adapter = new FakeUpdaterAdapter()
+    adapter.onCheck = async () => {
+      adapter.emit('update-available', { version: '0.1.1' })
+      return null
+    }
+    adapter.onDownload = async () => {
+      adapter.emit('update-downloaded', { version: '0.1.1' })
+      return ['C:/temp/Personal-Vault-Setup-0.1.1.exe']
+    }
+
+    const coordinator = new UpdateCoordinator({
+      adapter,
+      currentVersion: '0.1.0',
+      isPackaged: true,
+      env: { PV_UPDATE_FEED_URL: 'https://updates.private.example/pv' },
+      prepareForUpdateQuit: async () => {
+        // In production main/index.ts, prepareForUpdateQuit skips coordinator.shutdown()
+      }
+    })
+
+    adapter.onQuitAndInstall = () => {
+      // Simulate electron-updater emitting an async error during quitAndInstall after prepareForUpdateQuit
+      adapter.emit('error', new Error('Spawn elevate failed'))
+    }
+
+    await coordinator.checkForUpdates()
+    coordinator.installUpdateNow()
+    await coordinator.waitForPendingWork()
+
+    expect(coordinator.getState().phase).toBe('error')
+    expect(coordinator.getState().failedStage).toBe('install')
+    expect(coordinator.getState().errorMessage).toContain('Spawn elevate failed')
+    coordinator.shutdown()
+  })
 })

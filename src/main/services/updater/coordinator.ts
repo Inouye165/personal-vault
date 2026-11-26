@@ -800,6 +800,11 @@ export class UpdateCoordinator {
         return
       }
 
+      if (this.startupTimer) {
+        clearTimeout(this.startupTimer)
+        this.startupTimer = null
+      }
+
       this.setState({
         phase: 'installing',
         downloadProgress: null,

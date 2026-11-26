@@ -177,14 +177,16 @@ if (!app.requestSingleInstanceLock()) {
   let isQuitting = false
   let shutdownPromise: Promise<void> | null = null
 
-  const shutdownServicesForQuit = async (): Promise<void> => {
+  const shutdownServicesForQuit = async (options?: {
+    skipUpdaterShutdown?: boolean
+  }): Promise<void> => {
     if (shutdownPromise) {
       await shutdownPromise
       return
     }
     shutdownPromise = (async () => {
       try {
-        if (updateCoordinator) {
+        if (updateCoordinator && !options?.skipUpdaterShutdown) {
           logStartup('shutting down update coordinator')
           updateCoordinator.shutdown()
           logStartup('update coordinator shutdown done')
@@ -584,7 +586,7 @@ if (!app.requestSingleInstanceLock()) {
         backupDrain: activeBackupCoordinator,
         prepareForUpdateQuit: async () => {
           isQuitting = true
-          await shutdownServicesForQuit()
+          await shutdownServicesForQuit({ skipUpdaterShutdown: true })
         },
         log: logStartup
       })

@@ -44,13 +44,15 @@ export function UpdateBanner({
       <section
         className="update-banner update-banner-available"
         data-testid="update-banner"
+        role="status"
         aria-label="Application update"
       >
         <div className="update-banner-body">
-          <strong>Personal Vault {state.availableVersion} is available</strong>
+          <strong>Update available — Personal Vault {state.availableVersion}</strong>
           <p className="update-banner-detail">
             Choose Update now to download and install. Personal Vault will close and reopen
-            automatically after your vault writes and backups finish. Choose Later to keep working.
+            automatically after any active vault writes and backups finish. Choose Later to keep
+            working.
           </p>
         </div>
         <div className="update-banner-actions">
@@ -81,6 +83,7 @@ export function UpdateBanner({
       <section
         className="update-banner update-banner-progress"
         data-testid="update-banner"
+        role="status"
         aria-label="Application update"
       >
         <div className="update-banner-body">
@@ -93,6 +96,10 @@ export function UpdateBanner({
             max={100}
             value={state.downloadProgress?.percent ?? 0}
           />
+          <p className="update-banner-detail">
+            Personal Vault will close and reopen automatically after the download and any active
+            vault writes or backups finish.
+          </p>
         </div>
       </section>
     )
@@ -104,6 +111,7 @@ export function UpdateBanner({
       <section
         className="update-banner update-banner-waiting"
         data-testid="update-banner"
+        role="status"
         aria-label="Application update"
       >
         <div className="update-banner-body">
@@ -122,6 +130,7 @@ export function UpdateBanner({
       <section
         className="update-banner update-banner-installing"
         data-testid="update-banner"
+        role="status"
         aria-label="Application update"
       >
         <div className="update-banner-body">
@@ -142,6 +151,7 @@ export function UpdateBanner({
     <section
       className="update-banner update-banner-error"
       data-testid="update-banner"
+      role="alert"
       aria-label="Application update"
     >
       <div className="update-banner-body">
