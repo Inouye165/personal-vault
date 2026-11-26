@@ -1,4 +1,8 @@
 import type {
+  UpdateActionResponseDto,
+  UpdateStateDto
+} from '../shared/validation/update-ipc-schemas.js'
+import type {
   BackupConfigureDestinationRequest,
   BackupDestinationRecordDto,
   BackupGoogleDriveAuthStatusDto,
@@ -404,6 +408,12 @@ export interface VaultApi {
     request: BackupGoogleDriveCreateFolderRequest
   ) => Promise<BackupGoogleDriveFolderDto>
   onBackupProgress: (listener: (event: BackupProgressEvent) => void) => () => void
+  getUpdateState: () => Promise<UpdateStateDto>
+  checkForUpdates: () => Promise<UpdateActionResponseDto>
+  installUpdateNow: () => Promise<UpdateActionResponseDto>
+  deferUpdate: () => Promise<UpdateActionResponseDto>
+  dismissUpdateError: () => Promise<UpdateActionResponseDto>
+  onUpdateState: (listener: (state: UpdateStateDto) => void) => () => void
 }
 
 declare global {

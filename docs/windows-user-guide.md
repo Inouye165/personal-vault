@@ -2,7 +2,7 @@
 
 ## Install and get started
 
-1. Use the verified Windows x64 NSIS installer (`Personal Vault Setup 0.1.0.exe`). Close Personal Vault before installing an update manually; installers preserve your `%APPDATA%\Personal Vault` profile (`vault-catalog.db`) and external vault folder. There is no active auto-update feed enabled in this build.
+1. Use the verified Windows x64 NSIS installer (`Personal Vault Setup 0.1.0.exe`). Close Personal Vault before installing an update manually; installers preserve your `%APPDATA%\Personal Vault` profile (`vault-catalog.db`) and external vault folder. For updater-enabled builds, see [Windows app updates](windows-release-pipeline.md).
 2. Open Personal Vault, go to **All Items**, and select **Select Source Folders**. Start with a small folder you know well. **Start Scan** adds files to the catalog and reads their metadata and contents without changing the originals.
 3. To keep a verified copy inside the vault, open **Review**, choose a dedicated vault folder, and initialize it. Select the files you want and run **Start Verified Import**. A scanned item can appear in the catalog before it has a vault copy.
 4. To use offline semantic search or OCR, set up the corresponding models in the app. Model downloads require an internet connection. Once installed, indexing, OCR, and searches run locally.

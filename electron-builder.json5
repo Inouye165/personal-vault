@@ -46,5 +46,11 @@
     createStartMenuShortcut: true,
     shortcutName: 'Personal Vault',
     include: 'build/installer.nsh'
-  }
+  },
+  publish: [
+    {
+      provider: 'generic',
+      url: 'https://updates.invalid/personal-vault/win-x64'
+    }
+  ]
 }

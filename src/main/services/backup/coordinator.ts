@@ -163,8 +163,10 @@ export class BackupCoordinator {
   private abortController: AbortController | null = null
   private abortIntent: AbortIntent = null
   private completionPromise: Promise<BackupJobRecord | null> | null = null
+  private activeCompletionPromise: Promise<BackupJobRecord | null> | null = null
   private isStarting = false
   private isShutdown = false
+  private updateInstallPending = false
 
   public constructor(options: BackupCoordinatorOptions) {
     this.catalog = options.catalog
@@ -239,8 +241,30 @@ export class BackupCoordinator {
     return { interruptedCount, cleanedStagingDirs }
   }
 
+  public setUpdateInstallPending(pending: boolean): void {
+    this.updateInstallPending = pending
+  }
+
   public hasActiveJob(): boolean {
     return this.isStarting || this.activeJobId !== null
+  }
+
+  public isRunningJob(): boolean {
+    return this.isStarting || this.activeJobId !== null || this.activeCompletionPromise !== null
+  }
+
+  public async waitForActiveJobToFinish(): Promise<void> {
+    while (this.isRunningJob()) {
+      if (this.activeCompletionPromise) {
+        try {
+          await this.activeCompletionPromise
+        } catch {
+          // Job state is persisted in SQLite.
+        }
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
   }
 
   public getActiveBackupJob(): BackupJobRecord | null {
@@ -432,6 +456,9 @@ export class BackupCoordinator {
   ): Promise<BackupJobRecord> {
     if (this.isShutdown) {
       throw new Error('BackupCoordinator has been shut down')
+    }
+    if (this.updateInstallPending) {
+      throw new Error('Cannot start backup while an application update is installing')
     }
     if (this.hasActiveJob()) {
       throw new Error('A backup job is already active or starting')
@@ -665,6 +692,9 @@ export class BackupCoordinator {
     if (this.isShutdown) {
       throw new Error('BackupCoordinator has been shut down')
     }
+    if (this.updateInstallPending) {
+      throw new Error('Cannot resume backup while an application update is installing')
+    }
     if (this.hasActiveJob()) {
       throw new Error('A backup job is already active or starting')
     }
@@ -807,13 +837,21 @@ export class BackupCoordinator {
     this.abortIntent = null
     this.emitProgress(job)
 
-    this.completionPromise = this.executeJobPipeline(
+    const pipelinePromise = this.executeJobPipeline(
       job,
       dest,
       verifiedStaging,
       this.abortController.signal,
       options
     )
+    this.completionPromise = pipelinePromise
+    this.activeCompletionPromise = pipelinePromise
+    const clearActiveCompletion = () => {
+      if (this.activeCompletionPromise === pipelinePromise) {
+        this.activeCompletionPromise = null
+      }
+    }
+    void pipelinePromise.then(clearActiveCompletion, clearActiveCompletion)
   }
 
   private async executeJobPipeline(

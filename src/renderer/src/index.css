@@ -5616,3 +5616,77 @@ select:focus-visible {
 .metadata-readable-tag-row {
   display: contents;
 }
+
+/* Application update banner and sidebar update trigger */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 24px;
+  background-color: var(--bg-card);
+  border-bottom: 1px solid var(--border-strong);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.update-banner-available {
+  border-left: 3px solid var(--accent-primary);
+}
+
+.update-banner-waiting {
+  border-left: 3px solid #f59f00;
+}
+
+.update-banner-error {
+  border-left: 3px solid #c92a2a;
+}
+
+.update-banner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  flex: 1 1 300px;
+}
+
+.update-banner-detail {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.update-banner-progress-bar {
+  width: min(360px, 100%);
+  height: 8px;
+  accent-color: var(--accent-primary);
+}
+
+.sidebar-update-btn {
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-update-btn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--text-main);
+  border-color: var(--border-hover);
+}
+
+.sidebar-update-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+}

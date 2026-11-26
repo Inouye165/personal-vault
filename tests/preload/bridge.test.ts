@@ -200,7 +200,13 @@ describe('preload bridge', () => {
         'disconnectGoogleDrive',
         'listGoogleDriveFolders',
         'createGoogleDriveFolder',
-        'onBackupProgress'
+        'onBackupProgress',
+        'getUpdateState',
+        'checkForUpdates',
+        'installUpdateNow',
+        'deferUpdate',
+        'dismissUpdateError',
+        'onUpdateState'
       ].sort()
     )
   })
@@ -541,5 +547,39 @@ describe('preload bridge', () => {
     await expect(
       api.searchUnifiedPhotos!({ query: 'sunset', ownerSurface: 'unified', ownerGen: 3 })
     ).rejects.toThrow(/invalid/i)
+  })
+
+  it('validates updater state and action responses in preload', async () => {
+    const validState = {
+      phase: 'available' as const,
+      configured: true,
+      currentVersion: '0.1.0',
+      availableVersion: '0.1.1',
+      releaseDate: '2026-11-22T00:00:00.000Z',
+      downloadProgress: null,
+      activeJobs: { vaultImportActive: false, backupActive: false },
+      errorMessage: null,
+      failedStage: null,
+      lastCheckedAtMs: 123456
+    }
+
+    const api = await loadApi()
+
+    electron.invoke.mockResolvedValueOnce(validState)
+    await expect(api.getUpdateState!()).resolves.toEqual(validState)
+    expect(electron.invoke).toHaveBeenCalledWith('update:get-state')
+
+    electron.invoke.mockResolvedValueOnce({
+      accepted: true,
+      state: { ...validState, phase: 'deferred' }
+    })
+    await expect(api.deferUpdate!()).resolves.toMatchObject({
+      accepted: true,
+      state: { phase: 'deferred', availableVersion: '0.1.1' }
+    })
+    expect(electron.invoke).toHaveBeenCalledWith('update:defer')
+
+    electron.invoke.mockResolvedValueOnce({ accepted: true, state: { phase: 'bogus' } })
+    await expect(api.installUpdateNow!()).rejects.toThrow(/invalid/i)
   })
 })

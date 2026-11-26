@@ -35,7 +35,7 @@ describe('Stage 8C-1 release readiness audit', () => {
       .join('\n')
 
     expect(logLines).not.toMatch(
-      /accessToken|refreshToken|clientSecret|recoverySecret|PV_GOOGLE_CLIENT_SECRET/i
+      /accessToken|refreshToken|clientSecret|recoverySecret|PV_GOOGLE_CLIENT_SECRET|PV_UPDATE_FEED_TOKEN|GH_TOKEN/i
     )
 
     const driveAuth = readFileSync(

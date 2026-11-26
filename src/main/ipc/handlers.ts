@@ -187,11 +187,13 @@ import { PhotoSearchCoordinator } from '../services/search'
 import type { ExportCoordinator } from '../services/export/coordinator'
 import type { BackupCoordinator } from '../services/backup/coordinator'
 import type { GoogleDriveAuthService } from '../services/backup/google-drive-auth'
+import type { UpdateCoordinator } from '../services/updater'
 import { resolveReadableFileLocation } from '../services/backup/recovered-file-resolver'
 import type { IpcSenderEvent, SenderValidator } from './sender'
 import { registerDocumentIpcHandlers } from './document-handlers'
 import { registerExportIpcHandlers } from './export-handlers'
 import { registerBackupIpcHandlers } from './backup-handlers'
+import { registerUpdateIpcHandlers } from './update-handlers'
 
 export interface IpcHandlerOptions {
   readonly validateSender: SenderValidator
@@ -216,6 +218,7 @@ export interface IpcHandlerOptions {
   readonly exportCoordinator?: ExportCoordinator
   readonly backupCoordinator?: BackupCoordinator
   readonly googleDriveAuth?: GoogleDriveAuthService
+  readonly updateCoordinator?: UpdateCoordinator
   readonly userDataDir?: string
   readonly getMainWindow?: () => BrowserWindow | null
   readonly selectDocSemanticModelDirectory?: () => Promise<string | null>
@@ -256,6 +259,7 @@ export function registerIpcHandlers({
   exportCoordinator,
   backupCoordinator,
   googleDriveAuth,
+  updateCoordinator,
   userDataDir,
   getMainWindow,
   selectDirectories,
@@ -619,6 +623,9 @@ export function registerIpcHandlers({
   })
 
   handle(IPC_CHANNELS.VAULT_INITIALIZE, (raw: unknown): InitializeVaultResponse => {
+    if (updateCoordinator?.isInstallPending()) {
+      throw new Error('Cannot initialize vault while an application update is installing')
+    }
     const parsed = validatePayload(InitializeVaultRequestSchema, raw)
     if (!parsed.success) {
       throw new Error(`Invalid initializeVault request: ${parsed.error}`)
@@ -2014,5 +2021,12 @@ export function registerIpcHandlers({
     userDataDir,
     getMainWindow,
     selectBackupDirectory
+  })
+
+  registerUpdateIpcHandlers({
+    handle,
+    updateCoordinator,
+    getCurrentVersion: () => app.getVersion(),
+    getMainWindow
   })
 }

@@ -42,6 +42,7 @@ import { GoogleDriveAuthService } from './services/backup/google-drive-auth'
 import { RestoreIncompleteError } from './services/backup/errors'
 import { inspectRestoredProfileStatus } from './services/backup/restore'
 import { withProfileStartupCoordination } from './services/backup/catalog-recovery'
+import { createElectronUpdaterAdapter, UpdateCoordinator } from './services/updater'
 import { AppWorkerBudget } from './services/worker-budget'
 
 function logStartup(message: string): void {
@@ -58,7 +59,7 @@ function logStartup(message: string): void {
 }
 
 logStartup(
-  `Process start: isPackaged=${app.isPackaged}, execPath=${process.execPath}, argv=${JSON.stringify(process.argv)}`
+  `Process start: version=${app.getVersion()}, isPackaged=${app.isPackaged}, execPath=${process.execPath}, argv=${JSON.stringify(process.argv)}`
 )
 
 const documentPath = join(__dirname, '../renderer/index.html')
@@ -94,6 +95,7 @@ let photoSearchCoordinator: PhotoSearchCoordinator | null = null
 let documentClassificationCoordinator: DocumentClassificationCoordinator | null = null
 let exportCoordinator: ExportCoordinator | null = null
 let backupCoordinator: BackupCoordinator | null = null
+let updateCoordinator: UpdateCoordinator | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -172,6 +174,116 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   logStartup('Acquired single instance lock successfully')
+  let isQuitting = false
+  let shutdownPromise: Promise<void> | null = null
+
+  const shutdownServicesForQuit = async (): Promise<void> => {
+    if (shutdownPromise) {
+      await shutdownPromise
+      return
+    }
+    shutdownPromise = (async () => {
+      try {
+        if (updateCoordinator) {
+          logStartup('shutting down update coordinator')
+          updateCoordinator.shutdown()
+          logStartup('update coordinator shutdown done')
+        }
+        if (coordinator) {
+          logStartup('shutting down coordinator')
+          await coordinator.shutdown()
+          logStartup('coordinator shutdown done')
+        }
+        if (vaultCoordinator) {
+          logStartup('shutting down vault coordinator')
+          await vaultCoordinator.shutdown()
+          logStartup('vault coordinator shutdown done')
+        }
+        if (disposeAutoMetadataScheduler) {
+          disposeAutoMetadataScheduler()
+          disposeAutoMetadataScheduler = null
+        }
+        if (photoMetadataCoordinator) {
+          logStartup('shutting down photo metadata coordinator')
+          await photoMetadataCoordinator.shutdown()
+          logStartup('photo metadata coordinator shutdown done')
+        }
+        if (semanticIndexCoordinator) {
+          logStartup('shutting down semantic index coordinator')
+          await semanticIndexCoordinator.shutdown()
+          logStartup('semantic index coordinator shutdown done')
+        }
+        if (unifiedSearchCoordinator) {
+          logStartup('shutting down unified search coordinator')
+          await unifiedSearchCoordinator.shutdown()
+          logStartup('unified search coordinator shutdown done')
+        }
+        if (semanticSearchCoordinator) {
+          logStartup('shutting down semantic search coordinator')
+          await semanticSearchCoordinator.shutdown()
+          logStartup('semantic search coordinator shutdown done')
+        }
+        if (similarityCoordinator) {
+          logStartup('shutting down similarity coordinator')
+          await similarityCoordinator.shutdown()
+          logStartup('similarity coordinator shutdown done')
+        }
+        if (thumbnailCoordinator) {
+          logStartup('shutting down thumbnail coordinator')
+          await thumbnailCoordinator.shutdown()
+          logStartup('thumbnail coordinator shutdown done')
+        }
+        if (documentExtractionCoordinator) {
+          logStartup('shutting down document extraction coordinator')
+          await documentExtractionCoordinator.shutdown()
+          logStartup('document extraction coordinator shutdown done')
+        }
+        if (documentOcrCoordinator) {
+          logStartup('shutting down document OCR coordinator')
+          await documentOcrCoordinator.shutdown()
+          logStartup('document OCR coordinator shutdown done')
+        }
+        if (ocrModelManager) {
+          logStartup('shutting down OCR model manager')
+          await ocrModelManager.shutdown()
+          logStartup('OCR model manager shutdown done')
+        }
+        if (docSearchCoordinator) {
+          logStartup('shutting down doc search coordinator')
+          await docSearchCoordinator.shutdown()
+          logStartup('doc search coordinator shutdown done')
+        }
+        if (docSemanticCoordinator) {
+          logStartup('shutting down doc semantic coordinator')
+          await docSemanticCoordinator.shutdown()
+          logStartup('doc semantic coordinator shutdown done')
+        }
+        if (documentClassificationCoordinator) {
+          logStartup('shutting down document classification coordinator')
+          await documentClassificationCoordinator.shutdown()
+          logStartup('document classification coordinator shutdown done')
+        }
+        if (exportCoordinator) {
+          logStartup('shutting down export coordinator')
+          await exportCoordinator.shutdown()
+          logStartup('export coordinator shutdown done')
+        }
+        if (backupCoordinator) {
+          logStartup('shutting down backup coordinator')
+          await backupCoordinator.shutdown()
+          logStartup('backup coordinator shutdown done')
+        }
+      } finally {
+        if (catalog && !catalog.isClosed()) {
+          logStartup('closing catalog')
+          catalog.close()
+          logStartup('catalog closed')
+        }
+      }
+    })()
+    await shutdownPromise
+  }
+
   app.on('second-instance', () => {
     logStartup('second-instance event received -> focusing existing window')
     if (mainWindow) {
@@ -462,6 +574,21 @@ if (!app.requestSingleInstanceLock()) {
         `backupCoordinator initialized (interrupted=${backupInit.interruptedCount}, cleanedStaging=${backupInit.cleanedStagingDirs.length})`
       )
 
+      const activeVaultCoordinator = vaultCoordinator
+      const activeBackupCoordinator = backupCoordinator
+      updateCoordinator = new UpdateCoordinator({
+        adapter: createElectronUpdaterAdapter(),
+        currentVersion: app.getVersion(),
+        isPackaged: app.isPackaged,
+        vaultDrain: activeVaultCoordinator,
+        backupDrain: activeBackupCoordinator,
+        prepareForUpdateQuit: async () => {
+          isQuitting = true
+          await shutdownServicesForQuit()
+        },
+        log: logStartup
+      })
+
       registerIpcHandlers({
         validateSender: createSenderValidator({
           getTrustedWebContentsId: () => mainWindow?.webContents.id,
@@ -488,12 +615,14 @@ if (!app.requestSingleInstanceLock()) {
         exportCoordinator,
         backupCoordinator,
         googleDriveAuth,
+        updateCoordinator,
         userDataDir,
         getMainWindow: () => mainWindow
       })
       logStartup('registerIpcHandlers completed')
 
       createWindow()
+      updateCoordinator.scheduleStartupCheck()
 
       app.on('activate', () => {
         logStartup('app activate event')
@@ -510,109 +639,15 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-  let isQuitting = false
   app.on('before-quit', (event) => {
     logStartup(`before-quit event: isQuitting=${isQuitting}`)
     if (!isQuitting) {
       isQuitting = true
       event.preventDefault()
-      const doShutdown = async (): Promise<void> => {
-        try {
-          if (coordinator) {
-            logStartup('shutting down coordinator')
-            await coordinator.shutdown()
-            logStartup('coordinator shutdown done')
-          }
-          if (vaultCoordinator) {
-            logStartup('shutting down vault coordinator')
-            await vaultCoordinator.shutdown()
-            logStartup('vault coordinator shutdown done')
-          }
-          if (disposeAutoMetadataScheduler) {
-            disposeAutoMetadataScheduler()
-            disposeAutoMetadataScheduler = null
-          }
-          if (photoMetadataCoordinator) {
-            logStartup('shutting down photo metadata coordinator')
-            await photoMetadataCoordinator.shutdown()
-            logStartup('photo metadata coordinator shutdown done')
-          }
-          if (semanticIndexCoordinator) {
-            logStartup('shutting down semantic index coordinator')
-            await semanticIndexCoordinator.shutdown()
-            logStartup('semantic index coordinator shutdown done')
-          }
-          if (unifiedSearchCoordinator) {
-            logStartup('shutting down unified search coordinator')
-            await unifiedSearchCoordinator.shutdown()
-            logStartup('unified search coordinator shutdown done')
-          }
-          if (semanticSearchCoordinator) {
-            logStartup('shutting down semantic search coordinator')
-            await semanticSearchCoordinator.shutdown()
-            logStartup('semantic search coordinator shutdown done')
-          }
-          if (similarityCoordinator) {
-            logStartup('shutting down similarity coordinator')
-            await similarityCoordinator.shutdown()
-            logStartup('similarity coordinator shutdown done')
-          }
-          if (thumbnailCoordinator) {
-            logStartup('shutting down thumbnail coordinator')
-            await thumbnailCoordinator.shutdown()
-            logStartup('thumbnail coordinator shutdown done')
-          }
-          if (documentExtractionCoordinator) {
-            logStartup('shutting down document extraction coordinator')
-            await documentExtractionCoordinator.shutdown()
-            logStartup('document extraction coordinator shutdown done')
-          }
-          if (documentOcrCoordinator) {
-            logStartup('shutting down document OCR coordinator')
-            await documentOcrCoordinator.shutdown()
-            logStartup('document OCR coordinator shutdown done')
-          }
-          if (ocrModelManager) {
-            logStartup('shutting down OCR model manager')
-            await ocrModelManager.shutdown()
-            logStartup('OCR model manager shutdown done')
-          }
-          if (docSearchCoordinator) {
-            logStartup('shutting down doc search coordinator')
-            await docSearchCoordinator.shutdown()
-            logStartup('doc search coordinator shutdown done')
-          }
-          if (docSemanticCoordinator) {
-            logStartup('shutting down doc semantic coordinator')
-            await docSemanticCoordinator.shutdown()
-            logStartup('doc semantic coordinator shutdown done')
-          }
-          if (documentClassificationCoordinator) {
-            logStartup('shutting down document classification coordinator')
-            await documentClassificationCoordinator.shutdown()
-            logStartup('document classification coordinator shutdown done')
-          }
-          if (exportCoordinator) {
-            logStartup('shutting down export coordinator')
-            await exportCoordinator.shutdown()
-            logStartup('export coordinator shutdown done')
-          }
-          if (backupCoordinator) {
-            logStartup('shutting down backup coordinator')
-            await backupCoordinator.shutdown()
-            logStartup('backup coordinator shutdown done')
-          }
-        } finally {
-          if (catalog && !catalog.isClosed()) {
-            logStartup('closing catalog')
-            catalog.close()
-            logStartup('catalog closed')
-          }
-          logStartup('calling final app.quit()')
-          app.quit()
-        }
-      }
-      void doShutdown()
+      void shutdownServicesForQuit().finally(() => {
+        logStartup('calling final app.quit()')
+        app.quit()
+      })
     }
   })
 

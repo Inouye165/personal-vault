@@ -293,7 +293,18 @@ Bundled into main, preload, and renderer processes for runtime schema validation
 
 ---
 
-## 17. Electron Runtime (`electron`) & Chromium / Node.js
+## 17. Electron Updater (`electron-updater`)
+
+- **Version**: `6.8.11` (`^6.8.11`)
+- **License**: MIT License (`MIT`)
+- **Copyright**: Copyright (c) Vladimir Krivosheev and electron-builder contributors.
+- **Upstream Project**: `https://github.com/electron-userland/electron-builder`
+
+Bundled into the Electron main process to check, SHA-512 verify, and install signed or private NSIS application updates upon explicit user approval. Full license text is included in `node_modules/electron-updater/LICENSE`.
+
+---
+
+## 18. Electron Runtime (`electron`) & Chromium / Node.js
 
 - **Version**: `45.2.3`
 - **License**: MIT License (`MIT`) for Electron; BSD-3-Clause and third-party notices for Chromium, V8, and Node.js.
@@ -303,6 +314,6 @@ Packaged desktop distributions include `LICENSE.electron.txt` and `LICENSES.chro
 
 ---
 
-## 18. Transitive Runtime Dependencies
+## 19. Transitive Runtime Dependencies
 
-All transitive production runtime dependencies resolved in `package-lock.json` (including `onnxruntime-common`, `detect-libc`, `scheduler`, `@img/colour`, `@img/sharp-win32-x64`, `@napi-rs/canvas-win32-x64-msvc`, `@emnapi/runtime`, `@xmldom/xmldom`, `strnum`, `fast-xml-builder`, and supporting utilities) are licensed under permissive MIT, ISC, Apache-2.0, BSD-3-Clause, or CC0-1.0 licenses, except `libvips` (`@img/sharp-libvips-*` / `@img/sharp-win32-x64`, LGPL-3.0-or-later) and `libheif-js` (LGPL-3.0) noted in Sections 4 and 6 above.
+All transitive production runtime dependencies resolved in `package-lock.json` (including `onnxruntime-common`, `detect-libc`, `scheduler`, `@img/colour`, `@img/sharp-win32-x64`, `@napi-rs/canvas-win32-x64-msvc`, `@emnapi/runtime`, `@xmldom/xmldom`, `strnum`, `fast-xml-builder`, `builder-util-runtime`, `fs-extra`, `js-yaml`, `lazy-val`, `lodash.escaperegexp`, `lodash.isequal`, `semver`, `tiny-typed-emitter`, and supporting utilities) are licensed under permissive MIT, ISC, Apache-2.0, BSD-3-Clause, or CC0-1.0 licenses, except `libvips` (`@img/sharp-libvips-*` / `@img/sharp-win32-x64`, LGPL-3.0-or-later) and `libheif-js` (LGPL-3.0) noted in Sections 4 and 6 above.
