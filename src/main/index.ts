@@ -296,7 +296,8 @@ if (!app.requestSingleInstanceLock()) {
       semanticIndexCoordinator = new SemanticIndexCoordinator({
         catalog,
         modelManager: semanticModelManager,
-        thumbnailCoordinator
+        thumbnailCoordinator,
+        shouldYieldToInteractiveSearch: () => semanticSearchCoordinator?.hasActiveSearch() ?? false
       })
       semanticIndexCoordinator.initialize()
       logStartup('semanticIndexCoordinator initialized')

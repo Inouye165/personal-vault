@@ -41,6 +41,7 @@ export interface SemanticIndexCoordinatorOptions {
   readonly thumbnailCoordinator: ThumbnailCoordinator
   readonly embedSourceTask?: CustomEmbedSourceTask
   readonly batchSize?: number
+  readonly shouldYieldToInteractiveSearch?: () => boolean
 }
 
 const DEFAULT_BATCH_SIZE = 16
@@ -51,6 +52,7 @@ export class SemanticIndexCoordinator {
   private readonly thumbnailCoordinator: ThumbnailCoordinator
   private readonly embedSourceTask?: CustomEmbedSourceTask
   private readonly batchSize: number
+  private readonly shouldYieldToInteractiveSearch?: () => boolean
 
   private activeJobId: string | null = null
   private isStarting = false
@@ -67,6 +69,7 @@ export class SemanticIndexCoordinator {
     this.thumbnailCoordinator = options.thumbnailCoordinator
     this.embedSourceTask = options.embedSourceTask
     this.batchSize = Math.max(1, Math.min(32, options.batchSize ?? DEFAULT_BATCH_SIZE))
+    this.shouldYieldToInteractiveSearch = options.shouldYieldToInteractiveSearch
   }
 
   public initialize(): SemanticIndexProgress {
@@ -425,12 +428,14 @@ export class SemanticIndexCoordinator {
             }
           }
 
-          // Yield to high-priority interactive browsing thumbnail work
+          // Yield to high-priority interactive browsing thumbnail work or active interactive visual search
           while (
-            this.thumbnailCoordinator.hasInteractiveWorkPending() &&
+            (this.thumbnailCoordinator.hasInteractiveWorkPending() ||
+              Boolean(this.shouldYieldToInteractiveSearch?.())) &&
             !signal.aborted &&
             !this.pauseRequested &&
-            !this.cancelRequested
+            !this.cancelRequested &&
+            !this.isShutdown
           ) {
             await new Promise((r) => setTimeout(r, 15))
           }

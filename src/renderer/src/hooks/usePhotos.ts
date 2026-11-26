@@ -113,6 +113,7 @@ export interface UsePhotosResult {
   readonly totalCount: number
   readonly isLoading: boolean
   readonly error: string | null
+  readonly errorDetails: string | null
   readonly selectedPhoto: PhotoItem | null
   readonly selectedId: number | null
   readonly thumbnails: ReadonlyMap<number, ThumbnailResult>
@@ -197,14 +198,38 @@ export interface UsePhotosResult {
   readonly cancelThumbnail: (locationId: number) => void
 }
 
+function formatPhotoLoadError(rawMessage: string, isSearch: boolean): string {
+  if (/SearchTimeoutError|SEARCH_TIMEOUT|timed out/i.test(rawMessage)) {
+    return 'Visual search timed out while your photo library is busy. Try again or clear search to keep browsing.'
+  }
+  if (isSearch) {
+    return "Couldn't complete photo search right now. Try again or clear search to keep browsing."
+  }
+  return "Couldn't load photographs right now. Try again."
+}
+
+interface LastGoodPhotoView {
+  readonly pages: Map<number, PhotoItem[]>
+  readonly totalCount: number
+  readonly searchMode: 'metadata_only' | 'hybrid' | 'visual_only' | 'needs_clarification' | null
+  readonly searchResultMeta: PhotosSearchBarResultMeta | null
+  readonly searchScores: Map<number, number>
+}
+
 export function usePhotos(): UsePhotosResult {
   const [pages, setPages] = useState<Map<number, PhotoItem[]>>(new Map())
   const [totalCount, setTotalCount] = useState<number>(0)
   const [isLoading, setIsLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
+  const [errorDetails, setErrorDetails] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [thumbnails, setThumbnails] = useState<Map<number, ThumbnailResult>>(new Map())
   const thumbnailsRef = useRef(thumbnails)
+
+  const pagesRef = useRef(pages)
+  const totalCountRef = useRef(totalCount)
+  const errorRef = useRef(error)
+  const lastGoodViewRef = useRef<LastGoodPhotoView | null>(null)
 
   // Filters state
   const [ratingFilter, setRatingFilterState] = useState<PhotoRatingFilter>('all')
@@ -242,6 +267,9 @@ export function usePhotos(): UsePhotosResult {
   const flagFilterRef = useRef(flagFilter)
   const collectionIdRef = useRef(collectionId)
   const metadataFiltersRef = useRef(metadataFilters)
+  const searchModeRef = useRef(searchMode)
+  const searchResultMetaRef = useRef(searchResultMeta)
+  const searchScoresRef = useRef(searchScores)
 
   useEffect(() => {
     ratingFilterRef.current = ratingFilter
@@ -249,6 +277,27 @@ export function usePhotos(): UsePhotosResult {
     collectionIdRef.current = collectionId
     metadataFiltersRef.current = metadataFilters
   }, [ratingFilter, flagFilter, collectionId, metadataFilters])
+
+  useEffect(() => {
+    pagesRef.current = pages
+    totalCountRef.current = totalCount
+    errorRef.current = error
+    searchModeRef.current = searchMode
+    searchResultMetaRef.current = searchResultMeta
+    searchScoresRef.current = searchScores
+  }, [pages, totalCount, error, searchMode, searchResultMeta, searchScores])
+
+  const snapshotLastGoodView = useCallback(() => {
+    if (!errorRef.current && pagesRef.current.size > 0) {
+      lastGoodViewRef.current = {
+        pages: new Map(pagesRef.current),
+        totalCount: totalCountRef.current,
+        searchMode: searchModeRef.current,
+        searchResultMeta: searchResultMetaRef.current,
+        searchScores: new Map(searchScoresRef.current)
+      }
+    }
+  }, [])
 
   const refreshUserPhotoMetadata = useCallback(async () => {
     try {
@@ -619,14 +668,41 @@ export function usePhotos(): UsePhotosResult {
         }
       } catch (err: unknown) {
         if (generationRef.current === currentGeneration) {
-          inFlightPagesRef.current.delete(pageIndex)
-          const msg = err instanceof Error ? err.message : 'Failed to load photographs'
+          if (pageIndex === 0) {
+            inFlightPagesRef.current.clear()
+          } else {
+            inFlightPagesRef.current.delete(pageIndex)
+          }
+          const rawMsg = err instanceof Error ? err.message : 'Failed to load photographs'
           if (
-            !msg.includes('SEARCH_CANCELLED') &&
-            !msg.includes('cancelled') &&
-            !msg.includes('superseded')
+            !rawMsg.includes('SEARCH_CANCELLED') &&
+            !rawMsg.includes('cancelled') &&
+            !rawMsg.includes('superseded')
           ) {
-            setError(msg)
+            const isSearchLoad = Boolean(query || hasFilterOverrides)
+            setError(formatPhotoLoadError(rawMsg, isSearchLoad))
+            setErrorDetails(rawMsg)
+            if (pageIndex === 0) {
+              const lastGood = lastGoodViewRef.current
+              if (lastGood && lastGood.pages.size > 0) {
+                setPages(new Map(lastGood.pages))
+                setTotalCount(lastGood.totalCount)
+                setSearchMode(lastGood.searchMode)
+                setSearchResultMeta(lastGood.searchResultMeta)
+                setSearchScores(new Map(lastGood.searchScores))
+                pageLruRef.current = Array.from(lastGood.pages.keys())
+                pagePhotoIdsRef.current = new Map(
+                  Array.from(lastGood.pages.entries()).map(([p, items]) => [
+                    p,
+                    items.map((item) => item.id)
+                  ])
+                )
+              } else {
+                setPages(new Map())
+                setTotalCount(0)
+                setSearchScores(new Map())
+              }
+            }
           }
         }
       } finally {
@@ -650,16 +726,19 @@ export function usePhotos(): UsePhotosResult {
       if (searchQueryRef.current) {
         searchOwnerGenRef.current = allocateSearchOwnerGen()
       }
+      snapshotLastGoodView()
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
       inFlightThumbsRef.current.clear()
       setPages(new Map())
+      setTotalCount(0)
       setSearchScores(new Map())
       setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(Boolean(searchQueryRef.current))
       setError(null)
+      setErrorDetails(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
         rating: newRating,
@@ -669,7 +748,7 @@ export function usePhotos(): UsePhotosResult {
         searchQuery: searchQueryRef.current
       })
     },
-    [loadPage]
+    [loadPage, snapshotLastGoodView]
   )
 
   const setSearchQuery = useCallback(
@@ -688,17 +767,20 @@ export function usePhotos(): UsePhotosResult {
         void window.api?.cancelPhotosSemanticSearch?.({ ownerGen: searchOwnerGenRef.current })
         searchOwnerGenRef.current = null
       }
+      snapshotLastGoodView()
       const nextGen = ++generationRef.current
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
       inFlightThumbsRef.current.clear()
       setPages(new Map())
+      setTotalCount(0)
       setSearchScores(new Map())
       setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(Boolean(trimmed))
       setError(null)
+      setErrorDetails(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
         rating: ratingFilterRef.current,
@@ -708,7 +790,7 @@ export function usePhotos(): UsePhotosResult {
         searchQuery: trimmed
       })
     },
-    [loadPage]
+    [loadPage, snapshotLastGoodView]
   )
 
   const clearSearch = useCallback(() => {
@@ -729,16 +811,19 @@ export function usePhotos(): UsePhotosResult {
     void window.api?.cancelPhotosSemanticSearch?.(
       cancelOwnerGen !== null ? { ownerGen: cancelOwnerGen } : undefined
     )
+    lastGoodViewRef.current = null
     const nextGen = ++generationRef.current
     pageLruRef.current = []
     pagePhotoIdsRef.current.clear()
     inFlightPagesRef.current.clear()
     inFlightThumbsRef.current.clear()
     setPages(new Map())
+    setTotalCount(0)
     setThumbnails(new Map())
     setIsLoading(true)
     setIsSearching(false)
     setError(null)
+    setErrorDetails(null)
     setFilterGeneration((prev) => prev + 1)
     void loadPage(0, nextGen, {
       rating: ratingFilterRef.current,
@@ -758,17 +843,20 @@ export function usePhotos(): UsePhotosResult {
       setClarification(null)
       setVisualModelRequired(false)
       searchOwnerGenRef.current = allocateSearchOwnerGen()
+      snapshotLastGoodView()
       const nextGen = ++generationRef.current
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
       inFlightThumbsRef.current.clear()
       setPages(new Map())
+      setTotalCount(0)
       setSearchScores(new Map())
       setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(true)
       setError(null)
+      setErrorDetails(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
         rating: ratingFilterRef.current,
@@ -778,7 +866,7 @@ export function usePhotos(): UsePhotosResult {
         searchQuery: searchQueryRef.current
       })
     },
-    [loadPage]
+    [loadPage, snapshotLastGoodView]
   )
 
   const clearInterpretedFilter = useCallback(
@@ -802,6 +890,7 @@ export function usePhotos(): UsePhotosResult {
   )
 
   const showMetadataMatchesWithoutVisualModel = useCallback(() => {
+    snapshotLastGoodView()
     bypassVisualModelRef.current = true
     filterOverridesRef.current = interpretedFiltersRef.current
     const nextGen = ++generationRef.current
@@ -810,11 +899,13 @@ export function usePhotos(): UsePhotosResult {
     inFlightPagesRef.current.clear()
     inFlightThumbsRef.current.clear()
     setPages(new Map())
+    setTotalCount(0)
     setSearchScores(new Map())
     setThumbnails(new Map())
     setIsLoading(true)
     setIsSearching(true)
     setError(null)
+    setErrorDetails(null)
     void loadPage(0, nextGen, {
       rating: ratingFilterRef.current,
       flag: flagFilterRef.current,
@@ -822,7 +913,7 @@ export function usePhotos(): UsePhotosResult {
       metadata: metadataFiltersRef.current,
       searchQuery: searchQueryRef.current
     })
-  }, [loadPage])
+  }, [loadPage, snapshotLastGoodView])
 
   const upsertSavedEvent = useCallback(
     async (input: {
@@ -1079,6 +1170,9 @@ export function usePhotos(): UsePhotosResult {
 
   const ensureRangeLoaded = useCallback(
     (startIndex: number, endIndex: number) => {
+      if (inFlightPagesRef.current.has(0) && !pages.has(0)) {
+        return
+      }
       const currentGen = generationRef.current
       const startPage = Math.floor(startIndex / PHOTO_BOUNDS.PAGE_SIZE)
       const endPage = Math.floor(Math.max(startIndex, endIndex - 1) / PHOTO_BOUNDS.PAGE_SIZE)
@@ -1111,18 +1205,22 @@ export function usePhotos(): UsePhotosResult {
   )
 
   const refresh = useCallback(async () => {
+    snapshotLastGoodView()
     const nextGen = ++generationRef.current
     pageLruRef.current = []
     pagePhotoIdsRef.current.clear()
     inFlightPagesRef.current.clear()
     inFlightThumbsRef.current.clear()
     setPages(new Map())
+    setTotalCount(0)
     setSearchScores(new Map())
     setThumbnails(new Map())
     setIsLoading(true)
+    setIsSearching(Boolean(searchQueryRef.current || filterOverridesRef.current))
     setError(null)
+    setErrorDetails(null)
     await loadPage(0, nextGen)
-  }, [loadPage])
+  }, [loadPage, snapshotLastGoodView])
 
   const matchesCurrentFilters = useCallback(
     (rating: number | null, flag: 'none' | 'pick' | 'reject'): boolean => {
@@ -1300,6 +1398,7 @@ export function usePhotos(): UsePhotosResult {
     totalCount,
     isLoading,
     error,
+    errorDetails,
     selectedPhoto,
     selectedId,
     thumbnails,

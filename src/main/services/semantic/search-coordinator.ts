@@ -167,6 +167,7 @@ export class SemanticSearchCoordinator {
   private lastActiveModelDir: string | null = null
   private cachedEmbeddingResult: CachedEmbeddingResult | null = null
   private embeddingInFlightPromise: Promise<CachedEmbeddingResult> | null = null
+  private searchDbQueue: Promise<void> = Promise.resolve()
 
   constructor(options: SemanticSearchCoordinatorOptions) {
     this.catalog = options.catalog
@@ -179,6 +180,10 @@ export class SemanticSearchCoordinator {
     this.getExternalLiveWorkers = options.getExternalLiveWorkers
     this.tryReleaseExternalIdleWorker = options.tryReleaseExternalIdleWorker
     this.workerBudget = options.workerBudget ?? new AppWorkerBudget(this.maxAppLiveWorkers)
+  }
+
+  public hasActiveSearch(): boolean {
+    return this.activeSearchCalls > 0 || this.activeRequests.size > 0 || this.activeSpawn !== null
   }
 
   public getDiagnostics() {
@@ -729,7 +734,7 @@ export class SemanticSearchCoordinator {
         throw new SearchCancelledError('Search superseded by a newer query')
       }
 
-      const runSearchDatabasePass = async (): Promise<{
+      const executeSearchDbOnWorker = async (): Promise<{
         rankedItems: readonly WorkerRankedItem[]
         totalMatched: number
         eligibleCount: number
@@ -826,6 +831,31 @@ export class SemanticSearchCoordinator {
         })
 
         return await searchDbPromise
+      }
+
+      const runSearchDatabasePass = (): Promise<{
+        rankedItems: readonly WorkerRankedItem[]
+        totalMatched: number
+        eligibleCount: number
+        unindexedCount: number
+        staleCount: number
+        corruptCount: number
+        offset: number
+        limit: number
+        hasMore: boolean
+        queryLatencyMs: number
+      }> => {
+        const next = this.searchDbQueue.then(async () => {
+          if (requestGen !== this.currentQueryGeneration || this.isShuttingDown) {
+            throw new SearchCancelledError('Search superseded while queued')
+          }
+          return await executeSearchDbOnWorker()
+        })
+        this.searchDbQueue = next.then(
+          () => undefined,
+          () => undefined
+        )
+        return next
       }
 
       const hydrateAndRevalidate = (
