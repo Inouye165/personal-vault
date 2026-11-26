@@ -76,14 +76,44 @@ const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
 const NON_PLACE_VISUAL_CONTEXTS = new Set([
   'snow',
+  'ice',
+  'frost',
   'grass',
+  'leaves',
+  'foliage',
+  'bloom',
+  'blossom',
+  'blossoms',
   'water',
+  'ocean',
+  'sea',
+  'lake',
+  'pool',
+  'puddle',
+  'waves',
+  'surf',
   'rain',
   'fog',
+  'mist',
+  'hail',
+  'wind',
+  'storm',
+  'clouds',
+  'sky',
+  'light',
+  'lighting',
+  'dark',
+  'darkness',
+  'daylight',
   'sun',
   'sunlight',
+  'sunshine',
+  'moonlight',
+  'shade',
   'shadow',
   'shadows',
+  'silhouette',
+  'silhouettes',
   'winter',
   'summer',
   'spring',
@@ -91,39 +121,192 @@ const NON_PLACE_VISUAL_CONTEXTS = new Set([
   'fall',
   'night',
   'morning',
+  'afternoon',
   'evening',
   'sunset',
   'sunrise',
+  'dusk',
+  'dawn',
+  'noon',
+  'midnight',
   'flight',
   'motion',
+  'action',
   'focus',
+  'midair',
+  'air',
+  'background',
+  'foreground',
+  'distance',
+  'frame',
+  'mirror',
+  'reflection',
+  'reflections',
+  'glass',
+  'window',
   'red',
   'blue',
   'green',
+  'yellow',
+  'orange',
+  'pink',
+  'purple',
   'black',
   'white',
+  'gray',
+  'grey',
   'color',
   'black and white',
   'restaurant',
   'restaurants',
+  'cafe',
+  'store',
+  'shop',
   'mountains',
   'mountain',
+  'hills',
+  'valley',
+  'canyon',
+  'desert',
   'beach',
+  'sand',
+  'mud',
+  'dirt',
+  'dust',
+  'woods',
+  'trees',
   'forest',
   'park',
+  'playground',
+  'garden',
+  'yard',
+  'backyard',
   'city',
   'town',
+  'street',
+  'road',
+  'alley',
   'kitchen',
+  'living room',
+  'bedroom',
+  'bathroom',
+  'classroom',
+  'office',
+  'home',
+  'school',
+  'work',
   'car',
+  'truck',
+  'boat',
+  'train',
+  'plane',
   'bed',
+  'chair',
+  'couch',
+  'sofa',
   'waterfront',
   'nature',
+  'wild',
   'indoors',
-  'outdoors'
+  'outdoors',
+  'uniform',
+  'uniforms',
+  'costume',
+  'costumes',
+  'suit',
+  'suits',
+  'dress',
+  'dresses',
+  'hat',
+  'hats',
+  'glasses',
+  'sunglasses',
+  'front',
+  'back',
+  'line',
+  'row',
+  'group',
+  'crowd',
+  'pair',
+  'sleep',
+  'love',
+  'peace'
 ])
 
-const EVENT_KEYWORD_RE =
-  /\b(wedding|week|trip|vacation|honeymoon|anniversary|birthday|graduation|reunion|holiday|party|ceremony|conference|tour|retreat|cruise|festival)\b/i
+const PLACE_DETERMINER_PREFIX_RE =
+  /^(?:the|a|an|my|our|your|his|her|their|this|that|these|those|some|any|deep|fresh|heavy|thick|bright|dark|cold|warm|tall|short|wet|dry|clear|murky|crystal|green|golden|white|black|blue|red|open|broad|high|low|swimming|wading|autumn|winter|summer|spring|morning|evening)\s+/i
+
+const ARTICLE_OR_POSSESSIVE_PREFIX_RE = /^(?:the|a|an|my|our|your|his|her|their|this|that)\s+/i
+
+const CONVERSATIONAL_PREFIX_RE =
+  /^(?:(?:please|can\s+you|could\s+you|would\s+you)\s+)*(?:show\s+me|find\s+me|get\s+me|give\s+me|bring\s+up|pull\s+up|search\s+for|look\s+for|find)\b\s*/i
+
+const PHOTO_WRAPPER_PREFIX_RE =
+  /^(?:(?:all|any|only)\s+)?(?:(?:the|my|our|these|those)\s+)?(?:photos?|pictures?|pics?|images?|snapshots?|shots?)(?:\s+(?:of|from|taken(?:\s+(?:of|from))?)\b|\s+(?=(?:in|at|on|during|from|near|with)\b))\s*/i
+
+function stripConversationalLeadIn(text: string): string {
+  let current = text.replace(/\s+/g, ' ').trim()
+  let prev = ''
+  while (current !== prev) {
+    prev = current
+    if (CONVERSATIONAL_PREFIX_RE.test(current)) {
+      const next = current.replace(CONVERSATIONAL_PREFIX_RE, '').trim()
+      if (next.length > 0) {
+        current = next
+        continue
+      }
+    }
+    if (PHOTO_WRAPPER_PREFIX_RE.test(current)) {
+      const next = current.replace(PHOTO_WRAPPER_PREFIX_RE, '').trim()
+      if (next.length > 0) {
+        current = next
+      }
+    }
+  }
+  return current
+}
+
+function isTitleCaseProperName(rawCandidate: string): boolean {
+  const words = rawCandidate.trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return false
+  return words.every((w, idx) => {
+    const lower = w.toLowerCase()
+    if (idx > 0 && (lower === 'of' || lower === 'the' || lower === 'and' || lower === 'de')) {
+      return true
+    }
+    return /^[A-Z]/.test(w)
+  })
+}
+
+function isLikelyVisualContextCandidate(
+  rawCandidate: string,
+  normalizedCandidate: string
+): boolean {
+  if (NON_PLACE_VISUAL_CONTEXTS.has(normalizedCandidate)) {
+    return true
+  }
+
+  let stripped = normalizedCandidate
+  let prev = ''
+  while (stripped !== prev) {
+    prev = stripped
+    stripped = stripped.replace(PLACE_DETERMINER_PREFIX_RE, '').trim()
+  }
+
+  if (stripped && NON_PLACE_VISUAL_CONTEXTS.has(stripped)) {
+    const rawTrimmed = rawCandidate.trim()
+    const isCapitalizedProperMultiWord =
+      rawTrimmed !== rawTrimmed.toLowerCase() &&
+      stripped !== normalizedCandidate &&
+      !ARTICLE_OR_POSSESSIVE_PREFIX_RE.test(rawTrimmed) &&
+      isTitleCaseProperName(rawTrimmed)
+    if (!isCapitalizedProperMultiWord) {
+      return true
+    }
+  }
+
+  return false
+}
 
 function pad2(n: number): string {
   return String(n).padStart(2, '0')
@@ -150,7 +333,7 @@ function cleanupRemainingText(text: string): string {
     cleaned = cleaned
       .replace(/^(in|at|on|from|during|near|around|with|for|and|&|,|-)\b\s*/i, '')
       .replace(/\s*\b(in|at|on|from|during|near|around|with|for|and|&|,|-)$/i, '')
-      .replace(/^[,.\-–—:;]+|[,.\-–—:;]+$/g, '')
+      .replace(/^[,.\-–—:;?!]+|[,.\-–—:;?!]+$/g, '')
       .replace(/\s+/g, ' ')
       .trim()
   }
@@ -354,29 +537,23 @@ function extractDateFilter(
     }
   }
 
-  // 8. Undefined personal event phrase (e.g. "My wedding week", "our Hawaii trip")
+  // 8. Undefined personal event phrase (e.g. "My wedding week", "our Hawaii trip", "my graduation")
+  // Do NOT treat arbitrary possessive noun phrases like "My dog" or "My red car" as events.
   const trimmed = text.trim()
-  if (/^(?:my|our)\s+/i.test(trimmed) || EVENT_KEYWORD_RE.test(trimmed)) {
-    const looksLikePureEventQuery = /^(?:my|our)\s+[\w\s'-]{2,60}$/i.test(trimmed)
-    const containsPersonalEventPhrase =
-      /\b(?:my|our)\s+[\w'-]+(?:\s+[\w'-]+){0,3}\s+(?:wedding|week|trip|vacation|honeymoon|anniversary|birthday|graduation|reunion|holiday|party|ceremony|conference|tour|retreat|cruise|festival)\b/i.exec(
-        trimmed
-      )
-    const eventTerm = containsPersonalEventPhrase
-      ? containsPersonalEventPhrase[0].trim()
-      : looksLikePureEventQuery
-        ? trimmed
-        : null
-    if (eventTerm) {
-      return {
-        remainingText: trimmed,
-        date: null,
-        clarification: {
-          kind: 'define_event',
-          term: eventTerm,
-          message: `No saved date range exists yet for "${eventTerm}". Enter start and end dates to save this event offline.`,
-          options: []
-        }
+  const containsPersonalEventPhrase =
+    /\b(?:my|our)\s+(?:[\w'-]+\s+){0,3}(?:wedding|week|trip|vacation|honeymoon|anniversary|birthday|graduation|reunion|holiday|party|ceremony|conference|tour|retreat|cruise|festival|getaway|outing|celebration)(?:\s+(?:week|weekend|trip|day|eve|party|ceremony))?\b/i.exec(
+      trimmed
+    )
+  if (containsPersonalEventPhrase) {
+    const eventTerm = containsPersonalEventPhrase[0].trim()
+    return {
+      remainingText: trimmed,
+      date: null,
+      clarification: {
+        kind: 'define_event',
+        term: eventTerm,
+        message: `No saved date range exists yet for "${eventTerm}". Enter start and end dates to save this event offline.`,
+        options: []
       }
     }
   }
@@ -496,14 +673,14 @@ function extractPlaceFilter(
     }
   }
 
-  // 2. Explicit "in <unknown place>" phrasing when not a visual/environmental word
+  // 2. Explicit "in <unknown place>" phrasing when not a visual/environmental word or determiner+visual phrase
   const explicitPrepositionMatch = /\b(?:in|at|near)\s+([A-Za-z][A-Za-z\s,'-]{1,48})$/i.exec(
     text.trim()
   )
   if (explicitPrepositionMatch && explicitPrepositionMatch[1]) {
     const rawCandidate = explicitPrepositionMatch[1].trim()
     const normalizedCandidate = normalizePlaceTerm(rawCandidate)
-    if (normalizedCandidate && !NON_PLACE_VISUAL_CONTEXTS.has(normalizedCandidate)) {
+    if (normalizedCandidate && !isLikelyVisualContextCandidate(rawCandidate, normalizedCandidate)) {
       const resolution = resolveOfflinePlace(rawCandidate, savedPlaces)
       if (resolution.status === 'not_found') {
         const remainingText = removeMatchedSpan(text, explicitPrepositionMatch[0])
@@ -529,8 +706,8 @@ function extractPlaceFilter(
  * date/recurring/event, and explicit camera filters from remaining visual search terms.
  */
 export function interpretPhotoQuery(input: InterpretPhotoQueryInput): InterpretPhotoQueryResult {
-  const rawQuery = input.queryText.trim()
-  if (!rawQuery) {
+  const normalizedQuery = stripConversationalLeadIn(input.queryText)
+  if (!normalizedQuery) {
     return {
       interpretedFilters: {
         place: null,
@@ -542,7 +719,7 @@ export function interpretPhotoQuery(input: InterpretPhotoQueryInput): InterpretP
     }
   }
 
-  const dateResult = extractDateFilter(rawQuery, input.savedEvents)
+  const dateResult = extractDateFilter(normalizedQuery, input.savedEvents)
   if (dateResult.clarification) {
     return {
       interpretedFilters: {

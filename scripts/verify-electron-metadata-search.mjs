@@ -552,7 +552,7 @@ async function main() {
       `Auto-extracted JPEG+HEIC metadata after scan (${metaProgress.coverage.extractedCount} EXIF/GPS, ${metaProgress.coverage.noMetadataCount} no-EXIF)`
     )
 
-    // 2. Verify "Yellowstone in 2025" works WITHOUT visual model
+    // 2. Verify "Yellowstone in 2025" and "Show me Yellowstone in 2025" work identically WITHOUT visual model
     const modelBefore = await evaluate(cdp, `window.api.getSemanticModelStatus()`)
     if (modelBefore.state !== 'missing') {
       throw new Error(`Expected initial visual model missing, got ${modelBefore.state}`)
@@ -561,17 +561,46 @@ async function main() {
       cdp,
       `window.api.searchPhotosMetadataAware({ queryText: 'Yellowstone in 2025' })`
     )
+    const showMeY2025 = await evaluate(
+      cdp,
+      `window.api.searchPhotosMetadataAware({ queryText: 'Show me Yellowstone in 2025' })`
+    )
     const y2025Names = y2025.items.map((i) => i.photo.fileName).sort()
+    const showMeY2025Names = showMeY2025.items.map((i) => i.photo.fileName).sort()
     if (
       y2025.mode !== 'metadata_only' ||
+      showMeY2025.mode !== 'metadata_only' ||
+      showMeY2025.interpretedFilters?.visualTerms !== null ||
       JSON.stringify(y2025Names) !==
-        JSON.stringify(['yellowstone-mountain.heic', 'yellowstone-restaurant.jpg'])
+        JSON.stringify(['yellowstone-mountain.heic', 'yellowstone-restaurant.jpg']) ||
+      JSON.stringify(showMeY2025Names) !== JSON.stringify(y2025Names)
     ) {
-      throw new Error(`Yellowstone in 2025 mismatch: ${JSON.stringify(y2025)}`)
+      throw new Error(
+        `Yellowstone / Show me Yellowstone in 2025 mismatch: ${JSON.stringify({ y2025, showMeY2025 })}`
+      )
     }
     pass(
-      '"Yellowstone in 2025" matched HEIC mountain + JPEG restaurant interior without visual model'
+      '"Yellowstone in 2025" and "Show me Yellowstone in 2025" matched identical HEIC mountain + JPEG restaurant interior without visual model'
     )
+
+    // 2b. Verify "My dog" and "Dog in the snow" remain visual searches without false clarification prompts
+    for (const phrase of ['My dog', 'Dog in the snow']) {
+      const visualCheck = await evaluate(
+        cdp,
+        `window.api.searchPhotosMetadataAware({ queryText: ${JSON.stringify(phrase)} })`
+      )
+      if (
+        visualCheck.mode !== 'visual_only' ||
+        visualCheck.visualModelRequired !== true ||
+        visualCheck.clarification !== null ||
+        visualCheck.interpretedFilters?.visualTerms !== phrase
+      ) {
+        throw new Error(
+          `Expected "${phrase}" to stay a visual search without clarification, got: ${JSON.stringify(visualCheck)}`
+        )
+      }
+    }
+    pass('"My dog" and "Dog in the snow" stayed visual searches without false event/place prompts')
 
     // 3. "June 6 of any year"
     const june6 = await evaluate(

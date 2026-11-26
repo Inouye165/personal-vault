@@ -17,7 +17,10 @@ import {
   SemanticSearchCoordinator,
   APPROVED_DOWNLOAD_HOSTS
 } from './services/semantic'
-import { PhotoMetadataCoordinator } from './services/metadata'
+import {
+  attachAutoMetadataExtractionScheduler,
+  PhotoMetadataCoordinator
+} from './services/metadata'
 import { DocumentExtractionCoordinator } from './services/documents'
 import { DocumentClassificationCoordinator } from './services/documents/classification/coordinator'
 import {
@@ -79,6 +82,7 @@ let semanticModelManager: SemanticModelManager | null = null
 let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
 let semanticSearchCoordinator: SemanticSearchCoordinator | null = null
 let photoMetadataCoordinator: PhotoMetadataCoordinator | null = null
+let disposeAutoMetadataScheduler: (() => void) | null = null
 let documentExtractionCoordinator: DocumentExtractionCoordinator | null = null
 let ocrModelManager: OcrModelManager | null = null
 let documentOcrCoordinator: DocumentOcrCoordinator | null = null
@@ -304,32 +308,14 @@ if (!app.requestSingleInstanceLock()) {
       photoMetadataCoordinator.initialize()
       logStartup('photoMetadataCoordinator initialized')
 
-      const scanJobLastStatus = new Map<number, string>()
-      coordinator.onProgress((scanProgress) => {
-        const prev = scanJobLastStatus.get(scanProgress.jobId)
-        scanJobLastStatus.set(scanProgress.jobId, scanProgress.status)
-        if (
-          process.env.PV_DISABLE_AUTO_METADATA !== '1' &&
-          prev !== 'completed' &&
-          scanProgress.status === 'completed' &&
-          photoMetadataCoordinator &&
-          catalog &&
-          !catalog.isClosed()
-        ) {
-          const metaProgress = photoMetadataCoordinator.getProgress()
-          const needed = metaProgress.coverage.unprocessedCount + metaProgress.coverage.staleCount
-          if (metaProgress.status !== 'running' && needed > 0) {
-            logStartup(
-              `Auto-starting metadata extraction after scan job #${scanProgress.jobId} (${needed} photos pending)`
-            )
-            void photoMetadataCoordinator.startExtraction().catch((err) => {
-              logStartup(
-                `Auto metadata extraction failed to start: ${err instanceof Error ? err.message : String(err)}`
-              )
-            })
-          }
-        }
+      const attachedMetaScheduler = attachAutoMetadataExtractionScheduler({
+        scanCoordinator: coordinator,
+        photoMetadataCoordinator,
+        isCatalogClosed: () => !catalog || catalog.isClosed(),
+        isDisabled: () => process.env.PV_DISABLE_AUTO_METADATA === '1',
+        log: logStartup
       })
+      disposeAutoMetadataScheduler = attachedMetaScheduler.dispose
 
       semanticSearchCoordinator = new SemanticSearchCoordinator({
         catalog,
@@ -540,6 +526,10 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down vault coordinator')
             await vaultCoordinator.shutdown()
             logStartup('vault coordinator shutdown done')
+          }
+          if (disposeAutoMetadataScheduler) {
+            disposeAutoMetadataScheduler()
+            disposeAutoMetadataScheduler = null
           }
           if (photoMetadataCoordinator) {
             logStartup('shutting down photo metadata coordinator')

@@ -315,7 +315,7 @@ describe('Metadata-aware offline photo search & filter-before-ranking integratio
       photoMetadataCoordinator: metaCoordinator
     })
 
-    // Case 1: "Yellowstone in 2025" works WITHOUT visual model and includes restaurant interior
+    // Case 1: "Yellowstone in 2025" and "Show me Yellowstone in 2025" work WITHOUT visual model and include restaurant interior
     const yellowstone2025 = await searchCoordinator.search({ queryText: 'Yellowstone in 2025' })
     expect(yellowstone2025.mode).toBe('metadata_only')
     expect(yellowstone2025.visualModelRequired).toBe(false)
@@ -324,6 +324,29 @@ describe('Metadata-aware offline photo search & filter-before-ranking integratio
       'yellowstone-mountain.heic',
       'yellowstone-restaurant.jpg'
     ])
+
+    const showMeYellowstone2025 = await searchCoordinator.search({
+      queryText: 'Show me Yellowstone in 2025'
+    })
+    expect(showMeYellowstone2025.mode).toBe('metadata_only')
+    expect(showMeYellowstone2025.visualModelRequired).toBe(false)
+    expect(showMeYellowstone2025.interpretedFilters).toEqual(yellowstone2025.interpretedFilters)
+    expect(showMeYellowstone2025.items.map((i) => i.photo.fileName).sort()).toEqual([
+      'yellowstone-mountain.heic',
+      'yellowstone-restaurant.jpg'
+    ])
+    expect(semanticCalls.length).toBe(0)
+
+    // Case 1b: "My dog" and "Dog in the snow" remain pure visual searches (no define_event / define_place prompts)
+    for (const pureVisualQuery of ['My dog', 'Dog in the snow']) {
+      const visualRes = await searchCoordinator.search({ queryText: pureVisualQuery })
+      expect(visualRes.mode).toBe('visual_only')
+      expect(visualRes.visualModelRequired).toBe(true)
+      expect(visualRes.clarification).toBeNull()
+      expect(visualRes.interpretedFilters.place).toBeNull()
+      expect(visualRes.interpretedFilters.date).toBeNull()
+      expect(visualRes.interpretedFilters.visualTerms).toBe(pureVisualQuery)
+    }
 
     // Case 2: Camera filter combines with location & date without inferring ownership
     const yellowstoneCanon = await searchCoordinator.search({

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CatalogDatabase } from '../../src/main/services/catalog/database'
 import { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
 import {
+  attachAutoMetadataExtractionScheduler,
   METADATA_PARSER_RECIPE_VERSION,
   PhotoMetadataCoordinator
 } from '../../src/main/services/metadata'
@@ -731,6 +732,228 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
       expect(detailAfterUpgrade.currentMetadata?.captureDay).toBe(6)
     } finally {
       upgradedCatalog.close()
+    }
+  })
+
+  it('queues and automatically runs a follow-up extraction pass when a second scan completes while an extraction job is in progress', async () => {
+    mkdirSync(rootDir, { recursive: true })
+    const firstPath = join(rootDir, 'scan1-photo.jpg')
+    const secondPath = join(rootDir, 'scan2-photo.jpg')
+    writeFileSync(
+      firstPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Canon EOS R5' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 10:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+    writeFileSync(
+      secondPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Sony ILCE-7M4' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:07:04 12:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+
+    const origRequest = thumbCoordinator.requestMetadataExtraction.bind(thumbCoordinator)
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve
+    })
+    let releaseFirst!: () => void
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let blockedFirstCall = false
+
+    thumbCoordinator.requestMetadataExtraction = async (params) => {
+      if (!blockedFirstCall && params.sourcePath === firstPath) {
+        blockedFirstCall = true
+        markFirstStarted()
+        await firstRelease
+      }
+      return origRequest(params)
+    }
+
+    const scanListeners = new Set<(p: { jobId: number; status: string }) => void>()
+    const scanSource = {
+      onProgress(listener: (p: { jobId: number; status: string }) => void) {
+        scanListeners.add(listener)
+        return () => scanListeners.delete(listener)
+      }
+    }
+    const emitScan = (jobId: number, status: string): void => {
+      for (const listener of scanListeners) {
+        listener({ jobId, status })
+      }
+    }
+
+    metaCoordinator = new PhotoMetadataCoordinator({
+      catalog,
+      thumbnailCoordinator: thumbCoordinator
+    })
+    metaCoordinator.initialize()
+
+    const { scheduler, dispose } = attachAutoMetadataExtractionScheduler({
+      scanCoordinator: scanSource,
+      photoMetadataCoordinator: metaCoordinator,
+      isCatalogClosed: () => catalog.isClosed()
+    })
+
+    try {
+      // Scan #1 discovers firstPath and completes -> starts extraction job #1 over fixed snapshot [firstId]
+      const firstId = scanFixtureIntoCatalog(catalog, rootDir, firstPath)
+      emitScan(1, 'running')
+      emitScan(1, 'completed')
+
+      // Wait deterministically until job #1 is held mid-extraction
+      await firstStarted
+      const duringFirst = metaCoordinator.getProgress()
+      expect(duringFirst.status).toBe('running')
+      expect(duringFirst.totalPhotos).toBe(1)
+
+      // While job #1 is still in progress, scan #2 catalogs secondPath and completes
+      const secondId = scanFixtureIntoCatalog(catalog, rootDir, secondPath)
+      emitScan(2, 'running')
+      emitScan(2, 'completed')
+
+      expect(scheduler.hasQueuedFollowUp()).toBe(true)
+
+      // Release job #1 and verify secondPath is picked up automatically without a 3rd scan or manual start
+      releaseFirst()
+
+      const deadline = Date.now() + 8_000
+      while (Date.now() < deadline) {
+        const cov = catalog.getPhotoMetadataCoverage(METADATA_PARSER_RECIPE_VERSION)
+        const prog = metaCoordinator.getProgress()
+        if (cov.extractedCount === 2 && cov.unprocessedCount === 0 && prog.status === 'completed') {
+          break
+        }
+        await new Promise((r) => setTimeout(r, 20))
+      }
+
+      const finalCoverage = catalog.getPhotoMetadataCoverage(METADATA_PARSER_RECIPE_VERSION)
+      expect(finalCoverage.extractedCount).toBe(2)
+      expect(finalCoverage.unprocessedCount).toBe(0)
+      expect(catalog.getPhotoTechnicalMetadataDetail(firstId)?.effectiveStatus).toBe('extracted')
+      expect(catalog.getPhotoTechnicalMetadataDetail(secondId)?.effectiveStatus).toBe('extracted')
+      expect(scheduler.hasQueuedFollowUp()).toBe(false)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('preserves pause, cancel, and restart semantics when an overlapping scan completed mid-job', async () => {
+    mkdirSync(rootDir, { recursive: true })
+    const firstPath = join(rootDir, 'pause-first.jpg')
+    const secondPath = join(rootDir, 'pause-second.jpg')
+    writeFileSync(
+      firstPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Canon EOS R5' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 10:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+    writeFileSync(
+      secondPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Nikon Zf' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:07 10:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+
+    const origRequest = thumbCoordinator.requestMetadataExtraction.bind(thumbCoordinator)
+    let markPausedTestStarted!: () => void
+    const pausedTestStarted = new Promise<void>((resolve) => {
+      markPausedTestStarted = resolve
+    })
+    let releaseGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    let holdActive = true
+
+    thumbCoordinator.requestMetadataExtraction = async (params) => {
+      if (holdActive && params.sourcePath === firstPath) {
+        holdActive = false
+        markPausedTestStarted()
+        await gate
+      }
+      return origRequest(params)
+    }
+
+    const scanListeners = new Set<(p: { jobId: number; status: string }) => void>()
+    const scanSource = {
+      onProgress(listener: (p: { jobId: number; status: string }) => void) {
+        scanListeners.add(listener)
+        return () => scanListeners.delete(listener)
+      }
+    }
+    const emitScan = (jobId: number, status: string): void => {
+      for (const listener of scanListeners) {
+        listener({ jobId, status })
+      }
+    }
+
+    metaCoordinator = new PhotoMetadataCoordinator({
+      catalog,
+      thumbnailCoordinator: thumbCoordinator
+    })
+    metaCoordinator.initialize()
+
+    const { scheduler, dispose } = attachAutoMetadataExtractionScheduler({
+      scanCoordinator: scanSource,
+      photoMetadataCoordinator: metaCoordinator,
+      isCatalogClosed: () => catalog.isClosed()
+    })
+
+    try {
+      const firstId = scanFixtureIntoCatalog(catalog, rootDir, firstPath)
+      emitScan(1, 'completed')
+      await pausedTestStarted
+
+      const secondId = scanFixtureIntoCatalog(catalog, rootDir, secondPath)
+      emitScan(2, 'completed')
+      expect(scheduler.hasQueuedFollowUp()).toBe(true)
+
+      // Pausing explicitly cancels the queued follow-up so pause stops background work
+      const pausePromise = metaCoordinator.pauseExtraction()
+      releaseGate()
+      const pausedState = await pausePromise
+      expect(pausedState.status).toBe('paused')
+      expect(scheduler.hasQueuedFollowUp()).toBe(false)
+
+      // Scanning while paused does not override the user's paused job
+      emitScan(3, 'completed')
+      expect(metaCoordinator.getProgress().status).toBe('paused')
+
+      // Resuming finishes job #1 cleanly
+      await metaCoordinator.resumeExtraction()
+      const resumedDone = await metaCoordinator.waitForCompletion()
+      expect(resumedDone.status).toBe('completed')
+
+      // Manual cancellation / interrupted restart behavior remain intact
+      await metaCoordinator.startExtraction()
+      const cancelled = await metaCoordinator.cancelExtraction()
+      expect(cancelled.status).toBe('cancelled')
+      expect(scheduler.hasQueuedFollowUp()).toBe(false)
+
+      // Second photo discovered during paused window should still be available for restart/startExtraction
+      expect(catalog.getPhotoTechnicalMetadataDetail(firstId)).toBeTruthy()
+      expect(catalog.getPhotoTechnicalMetadataDetail(secondId)?.effectiveStatus).toBe('unprocessed')
+    } finally {
+      dispose()
     }
   })
 })

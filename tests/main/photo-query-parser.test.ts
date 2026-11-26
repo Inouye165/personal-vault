@@ -195,6 +195,138 @@ describe('Offline gazetteer & photo query parser', () => {
     expect(visualContext.interpretedFilters.visualTerms).toBe('dog in snow')
   })
 
+  it('handles conversational lead-ins ("Show me ..."), possessive visual subjects ("My dog"), and determiners ("Dog in the snow")', () => {
+    const plain = interpretPhotoQuery({
+      queryText: 'Yellowstone in 2025',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    const showMe = interpretPhotoQuery({
+      queryText: 'Show me Yellowstone in 2025',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(showMe).toEqual(plain)
+    expect(showMe.interpretedFilters.visualTerms).toBeNull()
+
+    const findPhotos = interpretPhotoQuery({
+      queryText: 'Please show me all photos from Yellowstone in 2025?',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(findPhotos).toEqual(plain)
+
+    const takenOf = interpretPhotoQuery({
+      queryText: 'photos taken of Yellowstone in 2025',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(takenOf).toEqual(plain)
+
+    const showMeMountains = interpretPhotoQuery({
+      queryText: 'Show me mountains in Yellowstone',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(showMeMountains.clarification).toBeNull()
+    expect(showMeMountains.interpretedFilters.place?.label).toBe('Yellowstone National Park')
+    expect(showMeMountains.interpretedFilters.visualTerms).toBe('mountains')
+
+    for (const visualPossessive of [
+      'My dog',
+      'my golden retriever',
+      'our red car',
+      'Show me my dog',
+      'My dog in Yellowstone'
+    ]) {
+      const res = interpretPhotoQuery({
+        queryText: visualPossessive,
+        savedEvents: NO_EVENTS,
+        savedPlaces: NO_PLACES,
+        knownCameras: KNOWN_CAMERAS,
+        cameraLabels: NO_CAMERA_LABELS
+      })
+      expect(res.clarification).toBeNull()
+      if (visualPossessive === 'My dog in Yellowstone') {
+        expect(res.interpretedFilters.place?.label).toBe('Yellowstone National Park')
+        expect(res.interpretedFilters.visualTerms).toBe('My dog')
+      } else {
+        expect(res.interpretedFilters.date).toBeNull()
+        expect(res.interpretedFilters.visualTerms).toBe(
+          visualPossessive === 'Show me my dog' ? 'my dog' : visualPossessive
+        )
+      }
+    }
+
+    for (const visualScene of [
+      'Dog in the snow',
+      'Dog In The Snow',
+      'cats playing in deep snow',
+      'kids in the pool',
+      'kids in the swimming pool',
+      'bird in the sky',
+      'flowers in the garden',
+      'Find photos of dog in the snow'
+    ]) {
+      const res = interpretPhotoQuery({
+        queryText: visualScene,
+        savedEvents: NO_EVENTS,
+        savedPlaces: NO_PLACES,
+        knownCameras: KNOWN_CAMERAS,
+        cameraLabels: NO_CAMERA_LABELS
+      })
+      expect(res.clarification).toBeNull()
+      expect(res.interpretedFilters.place).toBeNull()
+      expect(res.interpretedFilters.visualTerms).toBeTruthy()
+    }
+
+    const showWedding = interpretPhotoQuery({
+      queryText: 'Show me my wedding week',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(showWedding.clarification?.kind).toBe('define_event')
+    expect(showWedding.clarification?.term).toBe('my wedding week')
+
+    const myGraduation = interpretPhotoQuery({
+      queryText: 'my graduation',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(myGraduation.clarification?.kind).toBe('define_event')
+    expect(myGraduation.clarification?.term).toBe('my graduation')
+
+    const showJune6 = interpretPhotoQuery({
+      queryText: 'Show me June 6 of any year',
+      savedEvents: NO_EVENTS,
+      savedPlaces: NO_PLACES,
+      knownCameras: KNOWN_CAMERAS,
+      cameraLabels: NO_CAMERA_LABELS
+    })
+    expect(showJune6.clarification).toBeNull()
+    expect(showJune6.interpretedFilters.date).toEqual({
+      mode: 'recurring_month_day',
+      label: 'June 6 (any year)',
+      captureMonth: 6,
+      captureDay: 6
+    })
+    expect(showJune6.interpretedFilters.visualTerms).toBeNull()
+  })
+
   it('supports explicit camera models and user camera labels without inferring ownership from make/model alone', () => {
     const inferredOwnership = interpretPhotoQuery({
       queryText: "Sarah's iPhone in Yosemite",
