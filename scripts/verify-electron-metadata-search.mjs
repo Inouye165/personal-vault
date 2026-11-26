@@ -804,7 +804,7 @@ async function main() {
       )
       .get().c
     verifyMigrated.close()
-    if (Number(maxVer) !== 20 || Number(tableCount) !== 4) {
+    if (Number(maxVer) < 20 || Number(tableCount) !== 4) {
       throw new Error(
         `Expected schema v20 and 4 user metadata tables, got v=${maxVer}, t=${tableCount}`
       )

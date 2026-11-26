@@ -388,6 +388,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     totalCount,
     isLoading,
     error,
+    errorDetails,
     selectedPhoto,
     selectedId,
     thumbnails,
@@ -1301,15 +1302,26 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
             )}
 
             {error && (
-              <div className="notice notice-error" role="alert">
+              <div className="notice notice-error" role="alert" data-testid="photos-load-error">
                 <AlertTriangle size={16} />
                 <div className="notice-content">
-                  <strong>Failed to load photographs</strong>
+                  <strong>
+                    {searchQuery.trim()
+                      ? "Couldn't complete photo search"
+                      : 'Failed to load photographs'}
+                  </strong>
                   <p>{error}</p>
+                  {errorDetails && (
+                    <details className="search-error-details">
+                      <summary>Diagnostics</summary>
+                      <span>{errorDetails}</span>
+                    </details>
+                  )}
                 </div>
                 <button
                   type="button"
                   className="btn btn-secondary btn-sm"
+                  data-testid="photos-retry-btn"
                   onClick={() => void refresh()}
                 >
                   Retry

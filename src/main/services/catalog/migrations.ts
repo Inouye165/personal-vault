@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 20
+export const CURRENT_SCHEMA_VERSION = 21
 
 export interface Migration {
   readonly version: number
@@ -1846,6 +1846,16 @@ export const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_camera_labels_label
           ON camera_labels(normalized_label);
+      `)
+    }
+  },
+  {
+    version: 21,
+    name: 'semantic_emb_file_loc_index',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_semantic_emb_file_loc
+          ON photo_semantic_embeddings(file_location_id);
       `)
     }
   }

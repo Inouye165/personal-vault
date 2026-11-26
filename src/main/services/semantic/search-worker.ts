@@ -180,6 +180,7 @@ export function executeSearchDatabaseQuery(
   const db = new DatabaseSync(catalogPath, { readOnly: true })
   let inReadTransaction = false
   try {
+    db.exec('PRAGMA busy_timeout = 5000;')
     db.exec('BEGIN DEFERRED;')
     inReadTransaction = true
 

@@ -810,8 +810,9 @@ export function PhotosSearchBar({
               · {formatCompactSearchTime(searchResult.queryLatencyMs)}
             </span>
             {searchMode !== 'metadata_only' && searchResult.unindexedCount > 0 && (
-              <span className="search-coverage-warning">
-                • {searchResult.unindexedCount} unindexed
+              <span className="search-coverage-warning" data-testid="search-partial-results-notice">
+                • Partial results — {searchResult.unindexedCount.toLocaleString()} unindexed (
+                {searchResult.eligibleCount.toLocaleString()} searched)
               </span>
             )}
             {searchMode !== 'metadata_only' && searchResult.staleCount > 0 && (
