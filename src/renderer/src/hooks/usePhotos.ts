@@ -208,12 +208,23 @@ function formatPhotoLoadError(rawMessage: string, isSearch: boolean): string {
   return "Couldn't load photographs right now. Try again."
 }
 
+interface PhotoViewQueryContext {
+  readonly queryText: string
+  readonly filterOverrides: InterpretedSearchFilters | null
+  readonly bypassVisualModel: boolean
+  readonly rating: PhotoRatingFilter
+  readonly flag: PhotoFlagFilter
+  readonly collection: number | null
+  readonly metadata: PhotoMetadataFilterState
+}
+
 interface LastGoodPhotoView {
   readonly pages: Map<number, PhotoItem[]>
   readonly totalCount: number
   readonly searchMode: 'metadata_only' | 'hybrid' | 'visual_only' | 'needs_clarification' | null
   readonly searchResultMeta: PhotosSearchBarResultMeta | null
   readonly searchScores: Map<number, number>
+  readonly viewQuery: PhotoViewQueryContext
 }
 
 export function usePhotos(): UsePhotosResult {
@@ -230,6 +241,16 @@ export function usePhotos(): UsePhotosResult {
   const totalCountRef = useRef(totalCount)
   const errorRef = useRef(error)
   const lastGoodViewRef = useRef<LastGoodPhotoView | null>(null)
+  const displayedViewQueryRef = useRef<PhotoViewQueryContext>({
+    queryText: '',
+    filterOverrides: null,
+    bypassVisualModel: false,
+    rating: 'all',
+    flag: 'all',
+    collection: null,
+    metadata: DEFAULT_PHOTO_METADATA_FILTERS
+  })
+  const restoredGridQueryRef = useRef<PhotoViewQueryContext | null>(null)
 
   // Filters state
   const [ratingFilter, setRatingFilterState] = useState<PhotoRatingFilter>('all')
@@ -294,7 +315,8 @@ export function usePhotos(): UsePhotosResult {
         totalCount: totalCountRef.current,
         searchMode: searchModeRef.current,
         searchResultMeta: searchResultMetaRef.current,
-        searchScores: new Map(searchScoresRef.current)
+        searchScores: new Map(searchScoresRef.current),
+        viewQuery: displayedViewQueryRef.current
       }
     }
   }, [])
@@ -380,18 +402,33 @@ export function usePhotos(): UsePhotosResult {
       }
       inFlightPagesRef.current.set(pageIndex, currentGeneration)
 
-      const filters = activeFilters ?? {
-        rating: ratingFilterRef.current,
-        flag: flagFilterRef.current,
-        collection: collectionIdRef.current,
-        metadata: metadataFiltersRef.current
-      }
-      const query =
-        activeFilters?.searchQuery !== undefined
+      const restoredViewQuery = pageIndex > 0 ? restoredGridQueryRef.current : null
+      const filters = restoredViewQuery
+        ? {
+            rating: restoredViewQuery.rating,
+            flag: restoredViewQuery.flag,
+            collection: restoredViewQuery.collection,
+            metadata: restoredViewQuery.metadata
+          }
+        : (activeFilters ?? {
+            rating: ratingFilterRef.current,
+            flag: flagFilterRef.current,
+            collection: collectionIdRef.current,
+            metadata: metadataFiltersRef.current
+          })
+      const query = restoredViewQuery
+        ? restoredViewQuery.queryText
+        : activeFilters?.searchQuery !== undefined
           ? activeFilters.searchQuery
           : searchQueryRef.current
 
-      const hasFilterOverrides = filterOverridesRef.current !== null
+      const activeFilterOverrides = restoredViewQuery
+        ? restoredViewQuery.filterOverrides
+        : filterOverridesRef.current
+      const activeBypassVisualModel = restoredViewQuery
+        ? restoredViewQuery.bypassVisualModel
+        : bypassVisualModelRef.current
+      const hasFilterOverrides = activeFilterOverrides !== null
 
       try {
         if (query || hasFilterOverrides) {
@@ -399,10 +436,8 @@ export function usePhotos(): UsePhotosResult {
             const res: MetadataAwarePhotoSearchResponse =
               await window.api.searchPhotosMetadataAware({
                 queryText: query,
-                ...(filterOverridesRef.current
-                  ? { filterOverrides: filterOverridesRef.current }
-                  : {}),
-                bypassVisualModel: bypassVisualModelRef.current,
+                ...(activeFilterOverrides ? { filterOverrides: activeFilterOverrides } : {}),
+                bypassVisualModel: activeBypassVisualModel,
                 offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
                 limit: PHOTO_BOUNDS.PAGE_SIZE,
                 ratingFilter: filters.rating,
@@ -430,6 +465,17 @@ export function usePhotos(): UsePhotosResult {
               return
             }
 
+            if (pageIndex === 0) {
+              displayedViewQueryRef.current = {
+                queryText: query,
+                filterOverrides: activeFilterOverrides,
+                bypassVisualModel: activeBypassVisualModel,
+                rating: filters.rating,
+                flag: filters.flag,
+                collection: filters.collection,
+                metadata: filters.metadata
+              }
+            }
             inFlightPagesRef.current.delete(pageIndex)
             setTotalCount(res.totalMatched)
             setModelStatus((prev) =>
@@ -602,6 +648,15 @@ export function usePhotos(): UsePhotosResult {
             throw new Error('Photos API unavailable')
           }
           if (pageIndex === 0) {
+            displayedViewQueryRef.current = {
+              queryText: '',
+              filterOverrides: null,
+              bypassVisualModel: false,
+              rating: filters.rating,
+              flag: filters.flag,
+              collection: filters.collection,
+              metadata: filters.metadata
+            }
             setSearchResultMeta(null)
             setSearchMode(null)
             interpretedFiltersRef.current = null
@@ -671,6 +726,17 @@ export function usePhotos(): UsePhotosResult {
           if (pageIndex === 0) {
             inFlightPagesRef.current.clear()
           } else {
+            if (pageIndex === 0) {
+              displayedViewQueryRef.current = {
+                queryText: query,
+                filterOverrides: activeFilterOverrides,
+                bypassVisualModel: activeBypassVisualModel,
+                rating: filters.rating,
+                flag: filters.flag,
+                collection: filters.collection,
+                metadata: filters.metadata
+              }
+            }
             inFlightPagesRef.current.delete(pageIndex)
           }
           const rawMsg = err instanceof Error ? err.message : 'Failed to load photographs'
@@ -685,6 +751,8 @@ export function usePhotos(): UsePhotosResult {
             if (pageIndex === 0) {
               const lastGood = lastGoodViewRef.current
               if (lastGood && lastGood.pages.size > 0) {
+                restoredGridQueryRef.current = lastGood.viewQuery
+                displayedViewQueryRef.current = lastGood.viewQuery
                 setPages(new Map(lastGood.pages))
                 setTotalCount(lastGood.totalCount)
                 setSearchMode(lastGood.searchMode)
@@ -698,6 +766,7 @@ export function usePhotos(): UsePhotosResult {
                   ])
                 )
               } else {
+                restoredGridQueryRef.current = null
                 setPages(new Map())
                 setTotalCount(0)
                 setSearchScores(new Map())
@@ -727,6 +796,7 @@ export function usePhotos(): UsePhotosResult {
         searchOwnerGenRef.current = allocateSearchOwnerGen()
       }
       snapshotLastGoodView()
+      restoredGridQueryRef.current = null
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
       inFlightPagesRef.current.clear()
@@ -768,6 +838,7 @@ export function usePhotos(): UsePhotosResult {
         searchOwnerGenRef.current = null
       }
       snapshotLastGoodView()
+      restoredGridQueryRef.current = null
       const nextGen = ++generationRef.current
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
@@ -812,6 +883,7 @@ export function usePhotos(): UsePhotosResult {
       cancelOwnerGen !== null ? { ownerGen: cancelOwnerGen } : undefined
     )
     lastGoodViewRef.current = null
+    restoredGridQueryRef.current = null
     const nextGen = ++generationRef.current
     pageLruRef.current = []
     pagePhotoIdsRef.current.clear()
@@ -844,6 +916,7 @@ export function usePhotos(): UsePhotosResult {
       setVisualModelRequired(false)
       searchOwnerGenRef.current = allocateSearchOwnerGen()
       snapshotLastGoodView()
+      restoredGridQueryRef.current = null
       const nextGen = ++generationRef.current
       pageLruRef.current = []
       pagePhotoIdsRef.current.clear()
@@ -1004,6 +1077,7 @@ export function usePhotos(): UsePhotosResult {
       await upsertSavedEvent(input)
       filterOverridesRef.current = null
       bypassVisualModelRef.current = false
+      restoredGridQueryRef.current = null
       setClarification(null)
       const nextGen = ++generationRef.current
       pageLruRef.current = []
@@ -1058,6 +1132,7 @@ export function usePhotos(): UsePhotosResult {
       await upsertSavedPlace(input)
       filterOverridesRef.current = null
       bypassVisualModelRef.current = false
+      restoredGridQueryRef.current = null
       setClarification(null)
       const nextGen = ++generationRef.current
       pageLruRef.current = []
@@ -1205,7 +1280,11 @@ export function usePhotos(): UsePhotosResult {
   )
 
   const refresh = useCallback(async () => {
+    if (searchQueryRef.current || filterOverridesRef.current) {
+      searchOwnerGenRef.current = allocateSearchOwnerGen()
+    }
     snapshotLastGoodView()
+    restoredGridQueryRef.current = null
     const nextGen = ++generationRef.current
     pageLruRef.current = []
     pagePhotoIdsRef.current.clear()
