@@ -50,6 +50,10 @@ import { ScanJobsPanel, type ScanJobsPanelProps } from './ScanJobsPanel'
 import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import { PhotosSearchBar } from './PhotosSearchBar'
 import { PhotoSelectedOcrSection } from './PhotoSelectedOcrSection'
+import {
+  matchGpsToOfflinePlaces,
+  resolveOfflinePlace
+} from '../../../shared/search/offline-gazetteer'
 import type {
   OriginalPhotoResult,
   PhotoItem,
@@ -148,6 +152,10 @@ function renderInferredCaptureDateValue(
     return 'Unknown (extraction failed)'
   }
 
+  if (effStatus === 'unavailable') {
+    return 'Unknown (file unavailable)'
+  }
+
   return 'Unknown'
 }
 
@@ -164,6 +172,8 @@ function formatEffectiveExtractionStatus(detail: PhotoTechnicalMetadataDetail | 
       return `Unsupported format${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
     case 'failed':
       return `Extraction failed${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
+    case 'unavailable':
+      return `Unavailable${detail.currentMetadata?.errorMessage ? ` — ${detail.currentMetadata.errorMessage}` : ''}`
     case 'stale':
       return 'Stale (source or parser recipe changed; re-run extraction)'
   }
@@ -388,11 +398,32 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     filterGeneration,
     searchQuery,
     isSearching,
+    searchMode,
+    interpretedFilters,
+    clarification,
+    visualModelRequired,
+    filteredCandidateCount,
     searchResultMeta,
     searchScores,
     modelStatus,
+    savedEvents,
+    savedPlaces,
     setSearchQuery,
     clearSearch,
+    updateInterpretedFilters,
+    clearInterpretedFilter,
+    showMetadataMatchesWithoutVisualModel,
+    saveEventAndRetrySearch,
+    selectDisambiguatedPlace,
+    saveCustomPlaceAndRetrySearch,
+    upsertSavedEvent,
+    deleteSavedEvent,
+    upsertSavedPlace,
+    deleteSavedPlace,
+    setPhotoUserPlace,
+    clearPhotoUserPlace,
+    upsertCameraLabel,
+    deleteCameraLabel,
     selectPhoto,
     setRatingFilter,
     setFlagFilter,
@@ -450,6 +481,9 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const [renamingCollectionId, setRenamingCollectionId] = useState<number | null>(null)
   const [renameInputValue, setRenameInputValue] = useState('')
   const [collectionActionError, setCollectionActionError] = useState<string | null>(null)
+  const [userPlaceDraft, setUserPlaceDraft] = useState('')
+  const [cameraLabelDraft, setCameraLabelDraft] = useState('')
+  const [trackedDetailKey, setTrackedDetailKey] = useState<string>('')
   const [viewMode, setViewMode] = useState<'grid' | 'similarity'>('grid')
   const [showSemanticPanel, setShowSemanticPanel] = useState(false)
   const [showMetadataPanel, setShowMetadataPanel] = useState(false)
@@ -567,7 +601,8 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     startExtraction: startMetadataExtraction,
     pauseExtraction: pauseMetadataExtraction,
     resumeExtraction: resumeMetadataExtraction,
-    cancelExtraction: cancelMetadataExtraction
+    cancelExtraction: cancelMetadataExtraction,
+    refreshMetadata
   } = usePhotoMetadata({
     selectedPhoto,
     isPanelOpen: showMetadataPanel,
@@ -578,6 +613,13 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
       }
     }
   })
+
+  const detailSyncKey = `${selectedPhoto?.id ?? 'none'}:${selectedMetadataDetail?.userPlace?.placeLabel ?? ''}:${selectedMetadataDetail?.cameraLabel?.label ?? ''}`
+  if (trackedDetailKey !== detailSyncKey) {
+    setTrackedDetailKey(detailSyncKey)
+    setUserPlaceDraft(selectedMetadataDetail?.userPlace?.placeLabel ?? '')
+    setCameraLabelDraft(selectedMetadataDetail?.cameraLabel?.label ?? '')
+  }
 
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [gridContainerEl, setGridContainerEl] = useState<HTMLDivElement | null>(null)
@@ -1031,39 +1073,61 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
             </div>
           </div>
 
-          {viewMode === 'grid' && (
-            <div className="photos-search-row">
-              <PhotosSearchBar
-                query={searchQuery}
-                isSearching={isSearching}
-                modelStatus={
-                  semanticIndex.modelStatus.state === 'installing' ? 'installing' : modelStatus
-                }
-                searchResult={searchResultMeta}
-                onSearch={setSearchQuery}
-                onClear={clearSearch}
-                modelDownloadProgress={
-                  modelStatus === 'installing'
-                    ? {
-                        downloadedBytes: semanticIndex.modelStatus.downloadedBytes,
-                        requiredBytes: semanticIndex.modelStatus.requiredBytes,
-                        currentArtifact: semanticIndex.modelStatus.currentArtifact
-                      }
-                    : null
-                }
-                indexingProgress={semanticIndex.indexProgress}
-                setupError={
-                  semanticIndex.actionError ??
-                  semanticIndex.modelStatus.error ??
-                  semanticIndex.indexProgress.lastError
-                }
-                searchReadyAnnouncement={searchReadyAnnouncement}
-                onEnablePhotoSearch={handleEnablePhotoSearch}
-                onCancelEnablePhotoSearch={handleCancelEnablePhotoSearch}
-                onDismissSearchReady={() => setDismissedReadyKey(readyAnnouncementKey)}
-              />
-            </div>
-          )}
+          {viewMode === 'grid' &&
+            (() => {
+              const effectiveModelStatus =
+                semanticIndex.modelStatus.state === 'installing'
+                  ? 'installing'
+                  : modelStatus === 'corrupt' || modelStatus === 'unprovisioned'
+                    ? modelStatus
+                    : semanticIndex.modelStatus.state !== 'missing'
+                      ? semanticIndex.modelStatus.state
+                      : modelStatus
+
+              return (
+                <div className="photos-search-row">
+                  <PhotosSearchBar
+                    query={searchQuery}
+                    isSearching={isSearching}
+                    modelStatus={effectiveModelStatus}
+                    searchMode={searchMode}
+                    searchResult={searchResultMeta}
+                    interpretedFilters={interpretedFilters}
+                    clarification={clarification}
+                    visualModelRequired={visualModelRequired}
+                    filteredCandidateCount={filteredCandidateCount}
+                    onSearch={setSearchQuery}
+                    onClear={clearSearch}
+                    onUpdateInterpretedFilters={updateInterpretedFilters}
+                    onClearInterpretedFilter={clearInterpretedFilter}
+                    onBypassVisualModel={showMetadataMatchesWithoutVisualModel}
+                    onSaveEventAndSearch={saveEventAndRetrySearch}
+                    onSelectDisambiguatedPlace={selectDisambiguatedPlace}
+                    onSaveCustomPlaceAndSearch={saveCustomPlaceAndRetrySearch}
+                    modelDownloadProgress={
+                      effectiveModelStatus === 'installing'
+                        ? {
+                            downloadedBytes: semanticIndex.modelStatus.downloadedBytes,
+                            requiredBytes: semanticIndex.modelStatus.requiredBytes,
+                            currentArtifact: semanticIndex.modelStatus.currentArtifact
+                          }
+                        : null
+                    }
+                    indexingProgress={semanticIndex.indexProgress}
+                    setupError={
+                      semanticIndex.actionError ??
+                      semanticIndex.modelStatus.error ??
+                      semanticIndex.indexProgress.lastError
+                    }
+                    searchReadyAnnouncement={searchReadyAnnouncement}
+                    onEnablePhotoSearch={handleEnablePhotoSearch}
+                    onCancelEnablePhotoSearch={handleCancelEnablePhotoSearch}
+                    onRetryIndexing={startIndexing}
+                    onDismissSearchReady={() => setDismissedReadyKey(readyAnnouncementKey)}
+                  />
+                </div>
+              )
+            })()}
 
           <div className="photos-controls-row">
             <div className="photos-mode-toggle" role="group" aria-label="Photo view mode">
@@ -1192,6 +1256,12 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                 onPauseExtraction={pauseMetadataExtraction}
                 onResumeExtraction={resumeMetadataExtraction}
                 onCancelExtraction={cancelMetadataExtraction}
+                savedEvents={savedEvents}
+                savedPlaces={savedPlaces}
+                onUpsertSavedEvent={upsertSavedEvent}
+                onDeleteSavedEvent={deleteSavedEvent}
+                onUpsertSavedPlace={upsertSavedPlace}
+                onDeleteSavedPlace={deleteSavedPlace}
                 onClose={closeFiltersDrawer}
               />
             </div>
@@ -1247,13 +1317,15 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
               </div>
             )}
 
-            {!isLoading && !error && totalCount === 0 && (
+            {!isLoading && !error && totalCount === 0 && !clarification && !visualModelRequired && (
               <div className="notice" role="status">
                 <ImageIcon size={24} />
                 <div className="notice-content">
                   <strong>
                     {searchQuery
-                      ? `No semantic matches found for "${searchQuery}"`
+                      ? searchMode === 'metadata_only'
+                        ? `No matching photos found for "${searchQuery}"`
+                        : `No semantic matches found for "${searchQuery}"`
                       : hasAnyActiveFilter
                         ? 'No photographs match the current filter criteria'
                         : 'No photographs discovered yet'}
@@ -1894,8 +1966,31 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                   <dt>Capture Date</dt>
                   <dd>{renderInferredCaptureDateValue(selectedPhoto, selectedMetadataDetail)}</dd>
 
-                  <dt>Capture Location</dt>
-                  <dd>Unknown</dd>
+                  <dt>Capture Location (GPS)</dt>
+                  <dd>
+                    {(() => {
+                      const gpsMeta = selectedMetadataDetail?.currentMetadata
+                      if (
+                        gpsMeta?.gpsStatus === 'present' &&
+                        gpsMeta.gpsLatitude !== null &&
+                        gpsMeta.gpsLongitude !== null
+                      ) {
+                        const matchedAreas = matchGpsToOfflinePlaces(
+                          gpsMeta.gpsLatitude,
+                          gpsMeta.gpsLongitude,
+                          savedPlaces
+                        )
+                        const areaLabel = matchedAreas.map((m) => m.label).join(', ')
+                        return areaLabel
+                          ? `${areaLabel} (${gpsMeta.gpsLatitude.toFixed(4)}, ${gpsMeta.gpsLongitude.toFixed(4)})`
+                          : `${gpsMeta.gpsLatitude.toFixed(4)}, ${gpsMeta.gpsLongitude.toFixed(4)}`
+                      }
+                      if (gpsMeta?.gpsStatus === 'invalid') {
+                        return 'Unknown (invalid GPS tags)'
+                      }
+                      return 'Unknown (no embedded GPS)'
+                    })()}
+                  </dd>
                 </dl>
               </div>
 
@@ -2038,13 +2133,56 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                           </>
                         )}
 
+                        <dt>GPS Coordinates</dt>
+                        <dd>
+                          {meta?.gpsStatus === 'present' &&
+                          meta.gpsLatitude !== null &&
+                          meta.gpsLongitude !== null ? (
+                            <div className="metadata-provenance-stack">
+                              <span className="mono-value">
+                                {meta.gpsLatitude.toFixed(5)}, {meta.gpsLongitude.toFixed(5)}
+                                {meta.gpsAltitudeM !== null
+                                  ? ` · ${Math.round(meta.gpsAltitudeM)} m`
+                                  : ''}
+                              </span>
+                              {(() => {
+                                const areaMatches = matchGpsToOfflinePlaces(
+                                  meta.gpsLatitude,
+                                  meta.gpsLongitude,
+                                  savedPlaces
+                                )
+                                return areaMatches.length > 0 ? (
+                                  <span className="sub-text">
+                                    Offline area: {areaMatches.map((m) => m.label).join(', ')}
+                                  </span>
+                                ) : null
+                              })()}
+                            </div>
+                          ) : meta?.gpsStatus === 'invalid' ? (
+                            <span className="metadata-warning-inline">
+                              Invalid GPS ({meta.gpsParseError ?? 'malformed coordinates'})
+                            </span>
+                          ) : (
+                            unknownFallback
+                          )}
+                        </dd>
+
                         <dt>Parser Provenance</dt>
                         <dd>
                           <div className="metadata-provenance-stack">
                             <span className="sub-text">
                               Recipe: `
-                              {selectedMetadataDetail?.parserRecipeVersion ?? 'exif_tech_v1'}`
+                              {selectedMetadataDetail?.parserRecipeVersion ?? 'exif_tech_v2'}`
                             </span>
+                            {meta && meta.unknownTagCount > 0 && (
+                              <span className="sub-text">
+                                {meta.unknownTagCount} unknown/proprietary tag(s) preserved in
+                                original bytes
+                              </span>
+                            )}
+                            {meta?.parserLimitsNote && (
+                              <span className="sub-text">{meta.parserLimitsNote}</span>
+                            )}
                             {selectedMetadataDetail &&
                               selectedMetadataDetail.historicalMetadataCount > 0 && (
                                 <span className="sub-text">
@@ -2057,14 +2195,142 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                       </dl>
 
                       {meta?.rawMetadataJson && (
-                        <details className="metadata-raw-json-details">
-                          <summary>Raw Embedded Tag Evidence (JSON)</summary>
+                        <details
+                          className="metadata-raw-json-details"
+                          data-testid="metadata-readable-tags"
+                        >
+                          <summary>Readable Embedded Tags &amp; Raw Evidence (JSON)</summary>
+                          {(() => {
+                            try {
+                              const parsed = JSON.parse(meta.rawMetadataJson) as {
+                                readableTags?: Record<string, string | number | boolean>
+                              }
+                              const entries = parsed.readableTags
+                                ? Object.entries(parsed.readableTags)
+                                : []
+                              if (entries.length > 0) {
+                                return (
+                                  <dl className="details-list metadata-readable-tags-list">
+                                    {entries.map(([k, v]) => (
+                                      <div key={k} className="metadata-readable-tag-row">
+                                        <dt>{k}</dt>
+                                        <dd className="mono-value">{String(v)}</dd>
+                                      </div>
+                                    ))}
+                                  </dl>
+                                )
+                              }
+                            } catch {
+                              // Fallback directly to raw JSON display
+                            }
+                            return null
+                          })()}
                           <pre className="metadata-raw-json-pre">{meta.rawMetadataJson}</pre>
                         </details>
                       )}
                     </>
                   )
                 })()}
+              </div>
+
+              <div className="details-section" data-testid="photo-user-metadata-section">
+                <h4>User-Assigned Metadata</h4>
+                <p className="sub-text">
+                  Stored separately from recorded file facts and embedded EXIF/GPS tags.
+                </p>
+                <div className="user-metadata-editor-block">
+                  <div className="user-metadata-field-row">
+                    <span className="control-label">Assigned Place:</span>
+                    <div className="user-metadata-controls">
+                      <input
+                        type="text"
+                        aria-label="User-assigned place"
+                        placeholder="e.g. Yellowstone National Park"
+                        value={userPlaceDraft}
+                        onChange={(e) => setUserPlaceDraft(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-xs"
+                        disabled={!userPlaceDraft.trim()}
+                        onClick={() => {
+                          const rawLabel = userPlaceDraft.trim()
+                          const resolvedOffline = resolveOfflinePlace(rawLabel, savedPlaces)
+                          const canonicalLabel =
+                            resolvedOffline.status === 'resolved'
+                              ? resolvedOffline.match.label
+                              : rawLabel
+                          const canonicalPlaceId =
+                            resolvedOffline.status === 'resolved'
+                              ? resolvedOffline.match.savedPlaceId
+                              : null
+                          void setPhotoUserPlace({
+                            fileLocationId: selectedPhoto.id,
+                            placeId: canonicalPlaceId,
+                            placeLabel: canonicalLabel
+                          }).then(() => refreshMetadata())
+                        }}
+                      >
+                        Save Place
+                      </button>
+                      {selectedMetadataDetail?.userPlace && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-xs"
+                          onClick={() =>
+                            void clearPhotoUserPlace(selectedPhoto.id).then(() => refreshMetadata())
+                          }
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {selectedMetadataDetail?.currentMetadata?.cameraNormalized && (
+                    <div className="user-metadata-field-row">
+                      <span className="control-label">
+                        Camera Label ({selectedMetadataDetail.currentMetadata.cameraDisplay}):
+                      </span>
+                      <div className="user-metadata-controls">
+                        <input
+                          type="text"
+                          aria-label="User-assigned camera label"
+                          placeholder="e.g. Family Travel Body"
+                          value={cameraLabelDraft}
+                          onChange={(e) => setCameraLabelDraft(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-xs"
+                          disabled={!cameraLabelDraft.trim()}
+                          onClick={() =>
+                            void upsertCameraLabel({
+                              cameraNormalized:
+                                selectedMetadataDetail.currentMetadata!.cameraNormalized!,
+                              label: cameraLabelDraft.trim()
+                            }).then(() => refreshMetadata())
+                          }
+                        >
+                          Save Label
+                        </button>
+                        {selectedMetadataDetail.cameraLabel && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-xs"
+                            onClick={() =>
+                              void deleteCameraLabel(selectedMetadataDetail.cameraLabel!.id).then(
+                                () => refreshMetadata()
+                              )
+                            }
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div className="details-section">

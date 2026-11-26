@@ -777,7 +777,7 @@ async function main() {
         let hasEnableSearch = false;
         for (let i = 0; i < 40; i++) {
           hasAddPhotos = Boolean(document.querySelector('[data-testid="photos-add-photos-btn"]'));
-          hasEnableSearch = Boolean(document.querySelector('[data-testid="enable-photo-search-btn"]'));
+          hasEnableSearch = Boolean(document.querySelector('[data-testid="turn-on-photo-search-btn"]'));
           if (hasAddPhotos && hasEnableSearch) break;
           await new Promise((r) => setTimeout(r, 100));
         }

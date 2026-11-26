@@ -132,9 +132,32 @@ import {
   GetPhotoMetadataDetailResponseSchema,
   GetPhotoMetadataFacetsRequestSchema,
   GetPhotoMetadataFacetsResponseSchema,
+  MetadataAwarePhotoSearchRequestSchema,
+  MetadataAwarePhotoSearchResponseSchema,
+  SavedEventsListResponseSchema,
+  UpsertSavedEventRequestSchema,
+  SavedEventSchema,
+  DeleteSavedRecordRequestSchema,
+  SavedPlacesListResponseSchema,
+  UpsertSavedPlaceRequestSchema,
+  SavedPlaceSchema,
+  SetPhotoUserPlaceRequestSchema,
+  ClearPhotoUserPlaceRequestSchema,
+  PhotoUserPlaceSchema,
+  CameraLabelsListResponseSchema,
+  UpsertCameraLabelRequestSchema,
+  CameraLabelSchema,
   type PhotoMetadataProgressResponse,
   type GetPhotoMetadataDetailResponse,
-  type GetPhotoMetadataFacetsResponse
+  type GetPhotoMetadataFacetsResponse,
+  type MetadataAwarePhotoSearchResponse,
+  type SavedEventsListResponse,
+  type SavedEvent,
+  type SavedPlacesListResponse,
+  type SavedPlace,
+  type PhotoUserPlace,
+  type CameraLabelsListResponse,
+  type CameraLabel
 } from '../../shared/validation/ipc-schemas'
 import type { CatalogDatabase } from '../services/catalog'
 import type { ScanJobCoordinator } from '../services/jobs'
@@ -160,6 +183,7 @@ import type {
   DocumentSemanticCoordinator
 } from '../services/documents/semantic'
 import { UnifiedSearchCoordinator } from '../services/unified-search'
+import { PhotoSearchCoordinator } from '../services/search'
 import type { ExportCoordinator } from '../services/export/coordinator'
 import type { BackupCoordinator } from '../services/backup/coordinator'
 import type { GoogleDriveAuthService } from '../services/backup/google-drive-auth'
@@ -187,6 +211,7 @@ export interface IpcHandlerOptions {
   readonly docSemanticCoordinator?: DocumentSemanticCoordinator
   readonly docSearchCoordinator?: DocumentSearchCoordinator
   readonly unifiedSearchCoordinator?: UnifiedSearchCoordinator
+  readonly photoSearchCoordinator?: PhotoSearchCoordinator
   readonly documentClassificationCoordinator?: DocumentClassificationCoordinator
   readonly exportCoordinator?: ExportCoordinator
   readonly backupCoordinator?: BackupCoordinator
@@ -226,6 +251,7 @@ export function registerIpcHandlers({
   docSemanticCoordinator,
   docSearchCoordinator,
   unifiedSearchCoordinator,
+  photoSearchCoordinator,
   documentClassificationCoordinator,
   exportCoordinator,
   backupCoordinator,
@@ -246,6 +272,17 @@ export function registerIpcHandlers({
       semanticSearchCoordinator: semanticSearchCoordinator ?? null,
       docSearchCoordinator: docSearchCoordinator ?? null
     })
+
+  const resolvedPhotoSearchCoordinator =
+    photoSearchCoordinator ??
+    (catalog
+      ? new PhotoSearchCoordinator({
+          catalog,
+          unifiedSearchCoordinator: resolvedUnifiedSearchCoordinator,
+          semanticModelManager: semanticModelManager ?? null,
+          photoMetadataCoordinator: photoMetadataCoordinator ?? null
+        })
+      : null)
 
   const handle = <Args extends unknown[], Result>(
     channel: string,
@@ -795,7 +832,12 @@ export function registerIpcHandlers({
       parserRecipeVersion: activeRecipe,
       captureDateFrom: parsed.data.captureDateFrom,
       captureDateTo: parsed.data.captureDateTo,
+      captureMonth: parsed.data.captureMonth,
+      captureDay: parsed.data.captureDay,
       includeUnknownCaptureDate: parsed.data.includeUnknownCaptureDate,
+      gpsBounds: parsed.data.gpsBounds,
+      userPlaceId: parsed.data.userPlaceId,
+      userPlaceLabel: parsed.data.userPlaceLabel,
       cameraNormalized: parsed.data.cameraNormalized,
       onlyUnknownCamera: parsed.data.onlyUnknownCamera,
       lensNormalized: parsed.data.lensNormalized,
@@ -1684,6 +1726,193 @@ export function registerIpcHandlers({
       throw new Error(`Invalid outgoing GetPhotoMetadataFacetsResponse: ${validated.error}`)
     }
     return validated.data
+  })
+
+  // --- Offline Metadata-Aware Photo Search & User-Assigned Metadata ---
+
+  handle(
+    IPC_CHANNELS.PHOTOS_SEARCH_METADATA_AWARE,
+    async (raw: unknown): Promise<MetadataAwarePhotoSearchResponse> => {
+      const parsed = validatePayload(MetadataAwarePhotoSearchRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming MetadataAwarePhotoSearchRequest: ${parsed.error}`)
+      }
+      if (!resolvedPhotoSearchCoordinator || !catalog || catalog.isClosed()) {
+        return {
+          mode: 'metadata_only',
+          items: [],
+          totalMatched: 0,
+          filteredCandidateCount: 0,
+          eligibleCount: 0,
+          unindexedCount: 0,
+          staleCount: 0,
+          corruptCount: 0,
+          offset: parsed.data.offset,
+          limit: parsed.data.limit,
+          hasMore: false,
+          queryLatencyMs: 0,
+          interpretedFilters: {
+            place: null,
+            date: null,
+            camera: null,
+            visualTerms: null
+          },
+          clarification: null,
+          visualModelRequired: false,
+          modelStatus: 'unprovisioned'
+        }
+      }
+      const res = await resolvedPhotoSearchCoordinator.search(parsed.data)
+      const validated = validatePayload(MetadataAwarePhotoSearchResponseSchema, res)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing MetadataAwarePhotoSearchResponse: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
+
+  handle(IPC_CHANNELS.SAVED_EVENTS_LIST, (): SavedEventsListResponse => {
+    if (!catalog || catalog.isClosed()) {
+      return { items: [] }
+    }
+    const items = catalog.listSavedEvents()
+    const validated = validatePayload(SavedEventsListResponseSchema, { items })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SavedEventsListResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.SAVED_EVENTS_UPSERT, (raw: unknown): SavedEvent => {
+    const parsed = validatePayload(UpsertSavedEventRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming UpsertSavedEventRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog unavailable')
+    }
+    const record = catalog.upsertSavedEvent(parsed.data)
+    const validated = validatePayload(SavedEventSchema, record)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SavedEvent: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.SAVED_EVENTS_DELETE, (raw: unknown): boolean => {
+    const parsed = validatePayload(DeleteSavedRecordRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming DeleteSavedRecordRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      return false
+    }
+    return catalog.deleteSavedEvent(parsed.data.id)
+  })
+
+  handle(IPC_CHANNELS.SAVED_PLACES_LIST, (): SavedPlacesListResponse => {
+    if (!catalog || catalog.isClosed()) {
+      return { items: [] }
+    }
+    const items = catalog.listSavedPlaces()
+    const validated = validatePayload(SavedPlacesListResponseSchema, { items })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SavedPlacesListResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.SAVED_PLACES_UPSERT, (raw: unknown): SavedPlace => {
+    const parsed = validatePayload(UpsertSavedPlaceRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming UpsertSavedPlaceRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog unavailable')
+    }
+    const record = catalog.upsertSavedPlace(parsed.data)
+    const validated = validatePayload(SavedPlaceSchema, record)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing SavedPlace: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.SAVED_PLACES_DELETE, (raw: unknown): boolean => {
+    const parsed = validatePayload(DeleteSavedRecordRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming DeleteSavedRecordRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      return false
+    }
+    return catalog.deleteSavedPlace(parsed.data.id)
+  })
+
+  handle(IPC_CHANNELS.PHOTO_USER_PLACE_SET, (raw: unknown): PhotoUserPlace => {
+    const parsed = validatePayload(SetPhotoUserPlaceRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming SetPhotoUserPlaceRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog unavailable')
+    }
+    const record = catalog.setPhotoUserPlace(parsed.data)
+    const validated = validatePayload(PhotoUserPlaceSchema, record)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing PhotoUserPlace: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.PHOTO_USER_PLACE_CLEAR, (raw: unknown): boolean => {
+    const parsed = validatePayload(ClearPhotoUserPlaceRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming ClearPhotoUserPlaceRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      return false
+    }
+    return catalog.clearPhotoUserPlace(parsed.data.fileLocationId)
+  })
+
+  handle(IPC_CHANNELS.CAMERA_LABELS_LIST, (): CameraLabelsListResponse => {
+    if (!catalog || catalog.isClosed()) {
+      return { items: [] }
+    }
+    const items = catalog.listCameraLabels()
+    const validated = validatePayload(CameraLabelsListResponseSchema, { items })
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing CameraLabelsListResponse: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.CAMERA_LABELS_UPSERT, (raw: unknown): CameraLabel => {
+    const parsed = validatePayload(UpsertCameraLabelRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming UpsertCameraLabelRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      throw new Error('Catalog unavailable')
+    }
+    const record = catalog.upsertCameraLabel(parsed.data)
+    const validated = validatePayload(CameraLabelSchema, record)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing CameraLabel: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.CAMERA_LABELS_DELETE, (raw: unknown): boolean => {
+    const parsed = validatePayload(DeleteSavedRecordRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming DeleteSavedRecordRequest: ${parsed.error}`)
+    }
+    if (!catalog || catalog.isClosed()) {
+      return false
+    }
+    return catalog.deleteCameraLabel(parsed.data.id)
   })
 
   if (photoMetadataCoordinator && getMainWindow) {

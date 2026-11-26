@@ -82,6 +82,13 @@ export {
   isSameOrDescendantPath,
   getEffectiveRoots
 } from './path-normalization'
+export {
+  UserPhotoMetadataRepository,
+  type UpsertSavedEventInput,
+  type UpsertSavedPlaceInput,
+  type SetPhotoUserPlaceInput,
+  type UpsertCameraLabelInput
+} from './user-photo-metadata-repository'
 export type {
   CatalogDatabaseOptions,
   SourceRecord,
@@ -124,5 +131,10 @@ export type {
   PhotoMetadataFacetItem,
   GetPhotoMetadataFacetsOptions,
   PhotoMetadataFacetsResult,
-  PhotoTechnicalMetadataDetailResult
+  PhotoTechnicalMetadataDetailResult,
+  GpsBoundingBox,
+  SavedEventRecord,
+  SavedPlaceRecord,
+  PhotoUserPlaceRecord,
+  CameraLabelRecord
 } from './types'

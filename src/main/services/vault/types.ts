@@ -101,12 +101,18 @@ export interface CopySourceParams {
   readonly expectedByteSize: number
 }
 
+export interface VaultPublishOps {
+  readonly renameSync?: (oldPath: string, newPath: string) => void
+  readonly copyFileSync?: (src: string, dest: string, mode?: number) => void
+}
+
 export interface CopyFileToVaultParams {
   readonly vaultPath: string
   readonly vaultId: string
   readonly importJobId: string
   readonly source: CopySourceParams
   readonly signal?: AbortSignal
+  readonly publishOps?: VaultPublishOps
 }
 
 export type CopyFileResult =

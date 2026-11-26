@@ -75,7 +75,8 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(onClear).toHaveBeenCalledTimes(1)
   })
 
-  it('displays an honest message when the semantic model is not installed', () => {
+  it('keeps the metadata search bar usable alongside the Turn on photo search onboarding panel when missing', () => {
+    const onEnable = vi.fn()
     render(
       <PhotosSearchBar
         query=""
@@ -83,10 +84,21 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
         modelStatus="unprovisioned"
         onSearch={vi.fn()}
         onClear={vi.fn()}
+        onEnablePhotoSearch={onEnable}
       />
     )
 
-    expect(screen.getByText(/offline search model is not installed/i)).toBeInTheDocument()
+    expect(screen.getByTestId('turn-on-photo-search-panel')).toBeInTheDocument()
+    expect(screen.getByText(/turn on photo search/i)).toBeInTheDocument()
+    expect(screen.getByText(/one-time ~149 mib download/i)).toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
+    expect(
+      screen.getByPlaceholderText(/search photos by description, place, date/i)
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('search-model-missing-notice')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('turn-on-photo-search-btn'))
+    expect(onEnable).toHaveBeenCalledTimes(1)
   })
 
   it('displays partial indexing warning and long-query truncation warning', () => {
@@ -117,7 +129,8 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
     expect(screen.getByText(/query truncated to 77 tokens/i)).toBeInTheDocument()
   })
 
-  it('distinguishes a verified corrupt installed model from a download/setup failure notice', () => {
+  it('distinguishes a damaged download from a setup failure and offers Try again while keeping offline metadata search active', () => {
+    const onRetry = vi.fn()
     const { rerender } = render(
       <PhotosSearchBar
         query="mountain"
@@ -125,27 +138,34 @@ describe('Stage 6D: PhotosSearchBar UI Component', () => {
         modelStatus="corrupt"
         onSearch={vi.fn()}
         onClear={vi.fn()}
+        onEnablePhotoSearch={onRetry}
       />
     )
 
-    expect(screen.getByTestId('search-model-corrupt-notice')).toBeInTheDocument()
-    expect(screen.getByText(/offline search model is invalid or damaged/i)).toBeInTheDocument()
-    expect(screen.getByText(/re-download or re-import the verified model/i)).toBeInTheDocument()
-    expect(screen.queryByTestId('search-model-error-notice')).not.toBeInTheDocument()
+    expect(screen.getByTestId('photo-search-setup-error')).toBeInTheDocument()
+    expect(screen.getByText(/appear damaged/i)).toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
+    expect(screen.queryByTestId('search-model-corrupt-notice')).not.toBeInTheDocument()
 
     rerender(
       <PhotosSearchBar
         query="mountain"
         isSearching={false}
         modelStatus="error"
+        setupError="Network timeout"
         onSearch={vi.fn()}
         onClear={vi.fn()}
+        onEnablePhotoSearch={onRetry}
       />
     )
 
-    expect(screen.getByTestId('search-model-error-notice')).toBeInTheDocument()
-    expect(screen.getByText(/download or setup failed/i)).toBeInTheDocument()
-    expect(screen.queryByText(/invalid or damaged/i)).not.toBeInTheDocument()
+    expect(screen.getByTestId('photo-search-setup-error')).toBeInTheDocument()
+    expect(screen.getByText(/couldn't finish setting up/i)).toBeInTheDocument()
+    expect(screen.queryByText(/appear damaged/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('search')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('retry-photo-search-btn'))
+    expect(onRetry).toHaveBeenCalledTimes(1)
   })
 
   it('displays corrupt candidate warning with reindex guidance when corruptCount > 0', () => {

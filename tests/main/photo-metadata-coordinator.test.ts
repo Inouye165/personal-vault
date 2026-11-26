@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CatalogDatabase } from '../../src/main/services/catalog/database'
 import { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
 import {
+  attachAutoMetadataExtractionScheduler,
   METADATA_PARSER_RECIPE_VERSION,
   PhotoMetadataCoordinator
 } from '../../src/main/services/metadata'
@@ -184,6 +185,7 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
       noMetadataCount: 2,
       unsupportedCount: 1,
       failedCount: 1,
+      unavailableCount: 0,
       staleCount: 0,
       unprocessedCount: 0
     })
@@ -518,6 +520,441 @@ describe('Stage 6C — PhotoMetadataCoordinator & Shared Bounded Worker Integrat
     expect(cancelled.pendingPhotos).toBe(1)
     expect(catalog.getPhotoTechnicalMetadataDetail(cancelId)?.effectiveStatus).toBe('unprocessed')
     expect(thumbCoordinator.getLiveWorkerCount()).toBeLessThanOrEqual(2)
+  })
+
+  it('distinguishes unavailable originals from failures, falls back to verified vault copy when available, and upgrades an existing v19 catalog cleanly', async () => {
+    const { mkdirSync } = await import('node:fs')
+    const { DatabaseSync } = await import('node:sqlite')
+    const { initializeVault, copyAndVerifyFileToVault } =
+      await import('../../src/main/services/vault')
+    mkdirSync(rootDir, { recursive: true })
+
+    // 1. Unavailable file (missing original, no vault copy) vs vault-backed missing original
+    const missingOriginal = join(rootDir, 'missing_no_vault.jpg')
+    const missingWithVault = join(rootDir, 'missing_with_vault.jpg')
+    const jpegWithMeta = await createJpegFixture({
+      width: 320,
+      height: 240,
+      ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Nikon Zf' }],
+      exifTags: [
+        { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 10:00:00' }
+      ]
+    })
+    writeFileSync(missingOriginal, jpegWithMeta)
+    writeFileSync(missingWithVault, jpegWithMeta)
+
+    const idNoVault = scanFixtureIntoCatalog(catalog, rootDir, missingOriginal)
+    const idWithVault = scanFixtureIntoCatalog(catalog, rootDir, missingWithVault)
+
+    // Hash and copy missingWithVault into an initialized vault
+    const sha = createHash('sha256').update(jpegWithMeta).digest('hex')
+    const stVault = statSync(missingWithVault)
+    catalog.recordHashObservationsBatch([
+      {
+        originalPath: missingWithVault,
+        sha256: sha,
+        observedByteSize: jpegWithMeta.length,
+        observedMtimeMs: stVault.mtimeMs,
+        hashedAtMs: Date.now()
+      }
+    ])
+
+    const vaultDir = join(tempDir, 'vault')
+    const vaultIdObj = initializeVault({ vaultPath: vaultDir, vaultName: 'Meta Vault' })
+    catalog.registerVault({
+      vaultId: vaultIdObj.vaultId,
+      vaultPath: vaultDir,
+      name: 'Meta Vault',
+      createdAtMs: vaultIdObj.createdAtMs
+    })
+    const locVault = catalog.getFileLocationById(idWithVault)!
+    const copyRes = await copyAndVerifyFileToVault({
+      vaultPath: vaultDir,
+      vaultId: vaultIdObj.vaultId,
+      importJobId: 'job-meta-vault',
+      source: {
+        fileLocationId: locVault.id,
+        discoveryObservationId: locVault.discoveryObservationId,
+        originalPath: missingWithVault,
+        fileName: 'missing_with_vault.jpg',
+        extension: '.jpg',
+        category: 'photo',
+        recordedFacts: {
+          byteSize: jpegWithMeta.length,
+          filesystemBirthtimeMs: stVault.birthtimeMs,
+          filesystemMtimeMs: stVault.mtimeMs,
+          firstDiscoveredAtMs: locVault.firstDiscoveredAtMs,
+          lastSeenAtMs: locVault.lastSeenAtMs,
+          hashObservationId: 1,
+          hashVerifiedAtMs: Date.now()
+        },
+        inferredMetadata: { inferredCaptureTimeMs: null },
+        reviewDecisions: { isPreferred: false, duplicateReviewStatus: null },
+        expectedSha256: sha,
+        expectedByteSize: jpegWithMeta.length
+      }
+    })
+    expect(copyRes.status).toBe('success')
+    if (copyRes.status === 'success') {
+      catalog.recordVaultCopy({
+        vaultId: vaultIdObj.vaultId,
+        sha256: copyRes.sha256,
+        byteSize: copyRes.byteSize,
+        relativePath: copyRes.relativePath,
+        manifestRelativePath: copyRes.manifestRelativePath,
+        verifiedAtMs: Date.now()
+      })
+    }
+
+    // Remove both originals from sourceDir to simulate disconnected drive
+    rmSync(missingOriginal)
+    rmSync(missingWithVault)
+
+    metaCoordinator = new PhotoMetadataCoordinator({
+      catalog,
+      thumbnailCoordinator: thumbCoordinator
+    })
+    metaCoordinator.initialize()
+    await metaCoordinator.startExtraction()
+    const done = await metaCoordinator.waitForCompletion()
+
+    expect(done.status).toBe('completed')
+    expect(done.unavailablePhotos).toBe(1)
+    expect(done.failedPhotos).toBe(0)
+    expect(done.extractedPhotos).toBe(1)
+    expect(done.coverage.unavailableCount).toBe(1)
+    expect(done.coverage.extractedCount).toBe(1)
+
+    expect(catalog.getPhotoTechnicalMetadataDetail(idNoVault)?.effectiveStatus).toBe('unavailable')
+    const vaultFallbackDetail = catalog.getPhotoTechnicalMetadataDetail(idWithVault)!
+    expect(vaultFallbackDetail.effectiveStatus).toBe('extracted')
+    expect(vaultFallbackDetail.currentMetadata?.cameraDisplay).toBe('Nikon Zf')
+    expect(vaultFallbackDetail.currentMetadata?.captureCalendarDate).toBe('2025-06-06')
+
+    // 2. Existing v19 catalog upgrade to v20: preserves annotations & triggers resumable v2 pass
+    const legacyDbPath = join(tempDir, 'legacy-v19.sqlite')
+    const legacyPhotoPath = join(rootDir, 'legacy_photo.jpg')
+    writeFileSync(legacyPhotoPath, jpegWithMeta)
+
+    // Seed a catalog at current version, then simulate an existing v19 catalog having only exif_tech_v1 metadata + user rating
+    const upgradeCatalog = CatalogDatabase.open({ catalogPath: legacyDbPath })
+    const legacyId = scanFixtureIntoCatalog(upgradeCatalog, rootDir, legacyPhotoPath)
+    const legacyLoc = upgradeCatalog.getFileLocationById(legacyId)!
+    const rev = `rev:${legacyLoc.discoveryObservationId}:${legacyLoc.byteSize}:${legacyLoc.filesystemMtimeMs}:unhashed`
+    upgradeCatalog.setPhotoAnnotation({
+      fileLocationId: legacyId,
+      rating: 5,
+      flag: 'pick',
+      expectedRevision: rev,
+      expectedVersion: 0
+    })
+    const v1Job = upgradeCatalog.createPhotoMetadataJob({ parserRecipeVersion: 'exif_tech_v1' })
+    const v1Items = upgradeCatalog.getNextPendingPhotoMetadataJobItems(v1Job.id, 10)
+    upgradeCatalog.completePhotoMetadataJobItem({
+      jobId: v1Job.id,
+      itemId: v1Items[0]!.id,
+      reused: false,
+      metadata: {
+        fileLocationId: legacyId,
+        discoveryObservationId: legacyLoc.discoveryObservationId,
+        parserRecipeVersion: 'exif_tech_v1',
+        extractionStatus: 'extracted',
+        contentSha256: sha,
+        contentRevision: `metarev:${legacyLoc.discoveryObservationId}:${legacyLoc.byteSize}:${legacyLoc.filesystemMtimeMs}:${sha}`,
+        observedByteSize: legacyLoc.byteSize,
+        observedMtimeMs: legacyLoc.filesystemMtimeMs,
+        recordedExtension: '.jpg',
+        detectedFormat: 'jpeg',
+        extensionFormatMismatch: false,
+        encodedWidthPx: 320,
+        encodedHeightPx: 240,
+        exifOrientation: 1,
+        displayWidthPx: 320,
+        displayHeightPx: 240,
+        captureDateSourceTag: 'DateTimeOriginal',
+        rawCaptureDateText: '2025:06:06 10:00:00',
+        captureSubseconds: null,
+        captureOffsetMinutes: null,
+        captureOffsetText: null,
+        captureTimezoneStatus: 'local_wall_clock_unknown_tz',
+        captureCalendarDate: '2025-06-06',
+        captureLocalIso: '2025-06-06T10:00:00',
+        captureUtcEpochMs: null,
+        captureDateParseError: null,
+        captureDateConflict: null,
+        cameraMakeRaw: 'Nikon',
+        cameraModelRaw: 'Nikon Zf',
+        cameraDisplay: 'Nikon Zf',
+        cameraNormalized: 'nikon zf',
+        lensMakeRaw: null,
+        lensModelRaw: null,
+        lensDisplay: null,
+        lensNormalized: null,
+        rawMetadataJson: null,
+        errorCode: null,
+        errorMessage: null
+      }
+    })
+    upgradeCatalog.close()
+
+    // Rewind schema_migrations to 19 to test actual v19 -> v20 migration on reopen
+    const rawSqlite = new DatabaseSync(legacyDbPath)
+    rawSqlite.exec('DELETE FROM schema_migrations WHERE version >= 20;')
+    rawSqlite.close()
+
+    const upgradedCatalog = CatalogDatabase.open({ catalogPath: legacyDbPath })
+    try {
+      const upgradedLoc = upgradedCatalog.getFileLocationById(legacyId)!
+      expect(upgradedLoc.rating).toBe(5)
+      expect(upgradedLoc.flag).toBe('pick')
+
+      // Under exif_tech_v2, the old exif_tech_v1 row is cleanly reported as stale and queued for resumable extraction
+      const covV2 = upgradedCatalog.getPhotoMetadataCoverage(METADATA_PARSER_RECIPE_VERSION)
+      expect(covV2.staleCount).toBe(1)
+      expect(covV2.extractedCount).toBe(0)
+
+      const upgradeCoord = new PhotoMetadataCoordinator({
+        catalog: upgradedCatalog,
+        thumbnailCoordinator: thumbCoordinator
+      })
+      upgradeCoord.initialize()
+      await upgradeCoord.startExtraction()
+      const upgradeDone = await upgradeCoord.waitForCompletion()
+      await upgradeCoord.shutdown()
+
+      expect(upgradeDone.status).toBe('completed')
+      expect(upgradeDone.extractedPhotos).toBe(1)
+      const detailAfterUpgrade = upgradedCatalog.getPhotoTechnicalMetadataDetail(legacyId)!
+      expect(detailAfterUpgrade.effectiveStatus).toBe('extracted')
+      expect(detailAfterUpgrade.historicalMetadataCount).toBe(1)
+      expect(detailAfterUpgrade.currentMetadata?.captureYear).toBe(2025)
+      expect(detailAfterUpgrade.currentMetadata?.captureMonth).toBe(6)
+      expect(detailAfterUpgrade.currentMetadata?.captureDay).toBe(6)
+    } finally {
+      upgradedCatalog.close()
+    }
+  })
+
+  it('queues and automatically runs a follow-up extraction pass when a second scan completes while an extraction job is in progress', async () => {
+    mkdirSync(rootDir, { recursive: true })
+    const firstPath = join(rootDir, 'scan1-photo.jpg')
+    const secondPath = join(rootDir, 'scan2-photo.jpg')
+    writeFileSync(
+      firstPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Canon EOS R5' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 10:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+    writeFileSync(
+      secondPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Sony ILCE-7M4' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:07:04 12:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+
+    const origRequest = thumbCoordinator.requestMetadataExtraction.bind(thumbCoordinator)
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve
+    })
+    let releaseFirst!: () => void
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let blockedFirstCall = false
+
+    thumbCoordinator.requestMetadataExtraction = async (params) => {
+      if (!blockedFirstCall && params.sourcePath === firstPath) {
+        blockedFirstCall = true
+        markFirstStarted()
+        await firstRelease
+      }
+      return origRequest(params)
+    }
+
+    const scanListeners = new Set<(p: { jobId: number; status: string }) => void>()
+    const scanSource = {
+      onProgress(listener: (p: { jobId: number; status: string }) => void) {
+        scanListeners.add(listener)
+        return () => scanListeners.delete(listener)
+      }
+    }
+    const emitScan = (jobId: number, status: string): void => {
+      for (const listener of scanListeners) {
+        listener({ jobId, status })
+      }
+    }
+
+    metaCoordinator = new PhotoMetadataCoordinator({
+      catalog,
+      thumbnailCoordinator: thumbCoordinator
+    })
+    metaCoordinator.initialize()
+
+    const { scheduler, dispose } = attachAutoMetadataExtractionScheduler({
+      scanCoordinator: scanSource,
+      photoMetadataCoordinator: metaCoordinator,
+      isCatalogClosed: () => catalog.isClosed()
+    })
+
+    try {
+      // Scan #1 discovers firstPath and completes -> starts extraction job #1 over fixed snapshot [firstId]
+      const firstId = scanFixtureIntoCatalog(catalog, rootDir, firstPath)
+      emitScan(1, 'running')
+      emitScan(1, 'completed')
+
+      // Wait deterministically until job #1 is held mid-extraction
+      await firstStarted
+      const duringFirst = metaCoordinator.getProgress()
+      expect(duringFirst.status).toBe('running')
+      expect(duringFirst.totalPhotos).toBe(1)
+
+      // While job #1 is still in progress, scan #2 catalogs secondPath and completes
+      const secondId = scanFixtureIntoCatalog(catalog, rootDir, secondPath)
+      emitScan(2, 'running')
+      emitScan(2, 'completed')
+
+      expect(scheduler.hasQueuedFollowUp()).toBe(true)
+
+      // Release job #1 and verify secondPath is picked up automatically without a 3rd scan or manual start
+      releaseFirst()
+
+      const deadline = Date.now() + 8_000
+      while (Date.now() < deadline) {
+        const cov = catalog.getPhotoMetadataCoverage(METADATA_PARSER_RECIPE_VERSION)
+        const prog = metaCoordinator.getProgress()
+        if (cov.extractedCount === 2 && cov.unprocessedCount === 0 && prog.status === 'completed') {
+          break
+        }
+        await new Promise((r) => setTimeout(r, 20))
+      }
+
+      const finalCoverage = catalog.getPhotoMetadataCoverage(METADATA_PARSER_RECIPE_VERSION)
+      expect(finalCoverage.extractedCount).toBe(2)
+      expect(finalCoverage.unprocessedCount).toBe(0)
+      expect(catalog.getPhotoTechnicalMetadataDetail(firstId)?.effectiveStatus).toBe('extracted')
+      expect(catalog.getPhotoTechnicalMetadataDetail(secondId)?.effectiveStatus).toBe('extracted')
+      expect(scheduler.hasQueuedFollowUp()).toBe(false)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('preserves pause, cancel, and restart semantics when an overlapping scan completed mid-job', async () => {
+    mkdirSync(rootDir, { recursive: true })
+    const firstPath = join(rootDir, 'pause-first.jpg')
+    const secondPath = join(rootDir, 'pause-second.jpg')
+    writeFileSync(
+      firstPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Canon EOS R5' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 10:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+    writeFileSync(
+      secondPath,
+      await createJpegFixture({
+        ifd0Tags: [{ tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Nikon Zf' }],
+        exifTags: [
+          { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:07 10:00:00' }
+        ],
+        littleEndian: true
+      })
+    )
+
+    const origRequest = thumbCoordinator.requestMetadataExtraction.bind(thumbCoordinator)
+    let markPausedTestStarted!: () => void
+    const pausedTestStarted = new Promise<void>((resolve) => {
+      markPausedTestStarted = resolve
+    })
+    let releaseGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    let holdActive = true
+
+    thumbCoordinator.requestMetadataExtraction = async (params) => {
+      if (holdActive && params.sourcePath === firstPath) {
+        holdActive = false
+        markPausedTestStarted()
+        await gate
+      }
+      return origRequest(params)
+    }
+
+    const scanListeners = new Set<(p: { jobId: number; status: string }) => void>()
+    const scanSource = {
+      onProgress(listener: (p: { jobId: number; status: string }) => void) {
+        scanListeners.add(listener)
+        return () => scanListeners.delete(listener)
+      }
+    }
+    const emitScan = (jobId: number, status: string): void => {
+      for (const listener of scanListeners) {
+        listener({ jobId, status })
+      }
+    }
+
+    metaCoordinator = new PhotoMetadataCoordinator({
+      catalog,
+      thumbnailCoordinator: thumbCoordinator
+    })
+    metaCoordinator.initialize()
+
+    const { scheduler, dispose } = attachAutoMetadataExtractionScheduler({
+      scanCoordinator: scanSource,
+      photoMetadataCoordinator: metaCoordinator,
+      isCatalogClosed: () => catalog.isClosed()
+    })
+
+    try {
+      const firstId = scanFixtureIntoCatalog(catalog, rootDir, firstPath)
+      emitScan(1, 'completed')
+      await pausedTestStarted
+
+      const secondId = scanFixtureIntoCatalog(catalog, rootDir, secondPath)
+      emitScan(2, 'completed')
+      expect(scheduler.hasQueuedFollowUp()).toBe(true)
+
+      // Pausing explicitly cancels the queued follow-up so pause stops background work
+      const pausePromise = metaCoordinator.pauseExtraction()
+      releaseGate()
+      const pausedState = await pausePromise
+      expect(pausedState.status).toBe('paused')
+      expect(scheduler.hasQueuedFollowUp()).toBe(false)
+
+      // Scanning while paused does not override the user's paused job
+      emitScan(3, 'completed')
+      expect(metaCoordinator.getProgress().status).toBe('paused')
+
+      // Resuming finishes job #1 cleanly
+      await metaCoordinator.resumeExtraction()
+      const resumedDone = await metaCoordinator.waitForCompletion()
+      expect(resumedDone.status).toBe('completed')
+
+      // Manual cancellation / interrupted restart behavior remain intact
+      await metaCoordinator.startExtraction()
+      const cancelled = await metaCoordinator.cancelExtraction()
+      expect(cancelled.status).toBe('cancelled')
+      expect(scheduler.hasQueuedFollowUp()).toBe(false)
+
+      // Second photo discovered during paused window should still be available for restart/startExtraction
+      expect(catalog.getPhotoTechnicalMetadataDetail(firstId)).toBeTruthy()
+      expect(catalog.getPhotoTechnicalMetadataDetail(secondId)?.effectiveStatus).toBe('unprocessed')
+    } finally {
+      dispose()
+    }
   })
 })
 

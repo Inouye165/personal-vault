@@ -115,6 +115,13 @@ export interface PaginationOptions {
   readonly limit?: number
 }
 
+export interface GpsBoundingBox {
+  readonly minLat: number
+  readonly maxLat: number
+  readonly minLon: number
+  readonly maxLon: number
+}
+
 export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly sourceId?: number
   readonly category?: 'photo' | 'document'
@@ -123,11 +130,16 @@ export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly ratingFilter?: 'all' | 'unrated' | '1' | '2' | '3' | '4' | '5'
   readonly flagFilter?: 'all' | 'none' | 'pick' | 'reject'
   readonly collectionId?: number | null
-  // Stage 6C SQL metadata filters
+  // Stage 6C + metadata-aware SQL metadata filters
   readonly parserRecipeVersion?: string
   readonly captureDateFrom?: string | null
   readonly captureDateTo?: string | null
+  readonly captureMonth?: number | null
+  readonly captureDay?: number | null
   readonly includeUnknownCaptureDate?: boolean
+  readonly gpsBounds?: GpsBoundingBox | null
+  readonly userPlaceId?: number | null
+  readonly userPlaceLabel?: string | null
   readonly cameraNormalized?: string | null
   readonly onlyUnknownCamera?: boolean
   readonly lensNormalized?: string | null
@@ -793,7 +805,8 @@ export interface PhotoTechnicalMetadataRecord {
   readonly fileLocationId: number
   readonly discoveryObservationId: number
   readonly parserRecipeVersion: string
-  readonly extractionStatus: 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'stale'
+  readonly extractionStatus:
+    'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'unavailable' | 'stale'
   readonly contentSha256: string | null
   readonly contentRevision: string
   readonly observedByteSize: number | null
@@ -816,10 +829,19 @@ export interface PhotoTechnicalMetadataRecord {
   readonly captureTimezoneStatus:
     'offset_present' | 'local_wall_clock_unknown_tz' | 'invalid_offset' | 'unknown'
   readonly captureCalendarDate: string | null
+  readonly captureYear: number | null
+  readonly captureMonth: number | null
+  readonly captureDay: number | null
   readonly captureLocalIso: string | null
   readonly captureUtcEpochMs: number | null
   readonly captureDateParseError: string | null
   readonly captureDateConflict: string | null
+
+  readonly gpsStatus: 'present' | 'absent' | 'invalid'
+  readonly gpsLatitude: number | null
+  readonly gpsLongitude: number | null
+  readonly gpsAltitudeM: number | null
+  readonly gpsParseError: string | null
 
   readonly cameraMakeRaw: string | null
   readonly cameraModelRaw: string | null
@@ -830,6 +852,8 @@ export interface PhotoTechnicalMetadataRecord {
   readonly lensDisplay: string | null
   readonly lensNormalized: string | null
 
+  readonly unknownTagCount: number
+  readonly parserLimitsNote: string | null
   readonly rawMetadataJson: string | null
   readonly errorCode: string | null
   readonly errorMessage: string | null
@@ -841,7 +865,7 @@ export interface SavePhotoTechnicalMetadataInput {
   readonly fileLocationId: number
   readonly discoveryObservationId: number
   readonly parserRecipeVersion: string
-  readonly extractionStatus: 'extracted' | 'no_metadata' | 'unsupported' | 'failed'
+  readonly extractionStatus: 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'unavailable'
   readonly contentSha256: string | null
   readonly contentRevision: string
   readonly observedByteSize: number | null
@@ -864,10 +888,19 @@ export interface SavePhotoTechnicalMetadataInput {
   readonly captureTimezoneStatus:
     'offset_present' | 'local_wall_clock_unknown_tz' | 'invalid_offset' | 'unknown'
   readonly captureCalendarDate: string | null
+  readonly captureYear?: number | null
+  readonly captureMonth?: number | null
+  readonly captureDay?: number | null
   readonly captureLocalIso: string | null
   readonly captureUtcEpochMs: number | null
   readonly captureDateParseError: string | null
   readonly captureDateConflict: string | null
+
+  readonly gpsStatus?: 'present' | 'absent' | 'invalid'
+  readonly gpsLatitude?: number | null
+  readonly gpsLongitude?: number | null
+  readonly gpsAltitudeM?: number | null
+  readonly gpsParseError?: string | null
 
   readonly cameraMakeRaw: string | null
   readonly cameraModelRaw: string | null
@@ -878,6 +911,8 @@ export interface SavePhotoTechnicalMetadataInput {
   readonly lensDisplay: string | null
   readonly lensNormalized: string | null
 
+  readonly unknownTagCount?: number
+  readonly parserLimitsNote?: string | null
   readonly rawMetadataJson: string | null
   readonly errorCode: string | null
   readonly errorMessage: string | null
@@ -890,6 +925,7 @@ export interface PhotoMetadataCoverageResult {
   readonly noMetadataCount: number
   readonly unsupportedCount: number
   readonly failedCount: number
+  readonly unavailableCount: number
   readonly staleCount: number
   readonly unprocessedCount: number
 }
@@ -906,6 +942,7 @@ export interface PhotoMetadataJobRecord {
   readonly reusedPhotos: number
   readonly unsupportedPhotos: number
   readonly failedPhotos: number
+  readonly unavailablePhotos: number
   readonly pendingPhotos: number
   readonly startedAtMs: number
   readonly updatedAtMs: number
@@ -929,7 +966,14 @@ export interface PhotoMetadataJobItemRecord {
   readonly expectedByteSize: number
   readonly expectedMtimeMs: number | null
   readonly status:
-    'pending' | 'extracted' | 'no_metadata' | 'reused' | 'unsupported' | 'failed' | 'skipped'
+    | 'pending'
+    | 'extracted'
+    | 'no_metadata'
+    | 'reused'
+    | 'unsupported'
+    | 'failed'
+    | 'unavailable'
+    | 'skipped'
   readonly errorCode: string | null
   readonly errorMessage: string | null
   readonly updatedAtMs: number | null
@@ -959,15 +1003,63 @@ export interface PhotoMetadataFacetsResult {
   readonly hasMore: boolean
 }
 
+export interface SavedEventRecord {
+  readonly id: number
+  readonly name: string
+  readonly normalizedName: string
+  readonly dateFrom: string
+  readonly dateTo: string
+  readonly notes: string | null
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export interface SavedPlaceRecord {
+  readonly id: number
+  readonly name: string
+  readonly normalizedName: string
+  readonly minLat: number
+  readonly maxLat: number
+  readonly minLon: number
+  readonly maxLon: number
+  readonly centerLat: number
+  readonly centerLon: number
+  readonly radiusKm: number | null
+  readonly notes: string | null
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export interface PhotoUserPlaceRecord {
+  readonly id: number
+  readonly fileLocationId: number
+  readonly placeId: number | null
+  readonly placeLabel: string
+  readonly normalizedLabel: string
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
+export interface CameraLabelRecord {
+  readonly id: number
+  readonly cameraNormalized: string
+  readonly label: string
+  readonly normalizedLabel: string
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
+
 export interface PhotoTechnicalMetadataDetailResult {
   readonly fileLocationId: number
   readonly currentRevision: string
   readonly effectiveStatus:
-    'unprocessed' | 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'stale'
+    'unprocessed' | 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'unavailable' | 'stale'
   readonly parserRecipeVersion: string
   readonly recordedExtension: string
   readonly historicalMetadataCount: number
   readonly currentMetadata: PhotoTechnicalMetadataRecord | null
+  readonly userPlace?: PhotoUserPlaceRecord | null
+  readonly cameraLabel?: CameraLabelRecord | null
 }
 
 // Stage 6D: Semantic Search

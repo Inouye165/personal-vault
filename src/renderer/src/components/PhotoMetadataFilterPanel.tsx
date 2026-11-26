@@ -1,4 +1,4 @@
-import { type ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 import {
   AlertTriangle,
   Camera,
@@ -14,7 +14,9 @@ import type {
   PhotoFileTypeBasis,
   PhotoFlagFilter,
   PhotoMetadataProgressResponse,
-  PhotoRatingFilter
+  PhotoRatingFilter,
+  SavedEvent,
+  SavedPlace
 } from '../../../shared/validation/ipc-schemas'
 import type { FacetSliceState } from '../hooks/usePhotoMetadata'
 import type { PhotoMetadataFilterState } from '../hooks/usePhotos'
@@ -46,6 +48,22 @@ export interface PhotoMetadataFilterPanelProps {
   readonly onPauseExtraction: () => Promise<void>
   readonly onResumeExtraction: () => Promise<void>
   readonly onCancelExtraction: () => Promise<void>
+  readonly savedEvents?: readonly SavedEvent[]
+  readonly savedPlaces?: readonly SavedPlace[]
+  readonly onUpsertSavedEvent?: (input: {
+    name: string
+    dateFrom: string
+    dateTo: string
+  }) => Promise<unknown>
+  readonly onDeleteSavedEvent?: (id: number) => Promise<void>
+  readonly onUpsertSavedPlace?: (input: {
+    name: string
+    minLat: number
+    maxLat: number
+    minLon: number
+    maxLon: number
+  }) => Promise<unknown>
+  readonly onDeleteSavedPlace?: (id: number) => Promise<void>
   readonly onClose?: () => void
 }
 
@@ -91,12 +109,27 @@ export function PhotoMetadataFilterPanel({
   onPauseExtraction,
   onResumeExtraction,
   onCancelExtraction,
+  savedEvents = [],
+  savedPlaces = [],
+  onUpsertSavedEvent,
+  onDeleteSavedEvent,
+  onUpsertSavedPlace,
+  onDeleteSavedPlace,
   onClose
 }: PhotoMetadataFilterPanelProps): ReactElement {
   const { coverage } = progress
   const unextractedTotal = coverage.unprocessedCount + coverage.staleCount
   const isRunning = progress.status === 'running'
   const isResumable = progress.status === 'paused' || progress.status === 'interrupted'
+
+  const [newEventName, setNewEventName] = useState('')
+  const [newEventFrom, setNewEventFrom] = useState('')
+  const [newEventTo, setNewEventTo] = useState('')
+  const [newPlaceName, setNewPlaceName] = useState('')
+  const [newPlaceMinLat, setNewPlaceMinLat] = useState('')
+  const [newPlaceMaxLat, setNewPlaceMaxLat] = useState('')
+  const [newPlaceMinLon, setNewPlaceMinLon] = useState('')
+  const [newPlaceMaxLon, setNewPlaceMaxLon] = useState('')
 
   const cameraHasSelectedInSlice =
     metadataFilters.cameraNormalized === null ||
@@ -233,6 +266,7 @@ export function PhotoMetadataFilterPanel({
             {coverage.noMetadataCount.toLocaleString()} no embedded EXIF ·{' '}
             {coverage.unsupportedCount.toLocaleString()} unsupported ·{' '}
             {coverage.failedCount.toLocaleString()} failed ·{' '}
+            {(coverage.unavailableCount ?? 0).toLocaleString()} unavailable ·{' '}
             {coverage.unprocessedCount.toLocaleString()} unprocessed
             {coverage.staleCount > 0 ? ` · ${coverage.staleCount.toLocaleString()} stale` : ''}
           </span>
@@ -707,6 +741,182 @@ export function PhotoMetadataFilterPanel({
           </div>
         </div>
       </div>
+
+      {(onUpsertSavedEvent || onUpsertSavedPlace) && (
+        <div className="metadata-user-definitions" data-testid="metadata-user-definitions">
+          {onUpsertSavedEvent && (
+            <div className="metadata-filter-card">
+              <h5>Saved Events (Offline Date Ranges)</h5>
+              {savedEvents.length > 0 && (
+                <ul className="metadata-saved-list">
+                  {savedEvents.map((ev) => (
+                    <li key={ev.id} className="metadata-saved-item">
+                      <span>
+                        <strong>{ev.name}</strong> ({ev.dateFrom} – {ev.dateTo})
+                      </span>
+                      {onDeleteSavedEvent && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-xs"
+                          onClick={() => void onDeleteSavedEvent(ev.id)}
+                          aria-label={`Delete event ${ev.name}`}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="metadata-inline-create-row">
+                <input
+                  type="text"
+                  placeholder="Event name"
+                  aria-label="New saved event name"
+                  value={newEventName}
+                  onChange={(e) => setNewEventName(e.target.value)}
+                />
+                <input
+                  type="date"
+                  aria-label="New saved event start date"
+                  value={newEventFrom}
+                  onChange={(e) => setNewEventFrom(e.target.value)}
+                />
+                <input
+                  type="date"
+                  aria-label="New saved event end date"
+                  value={newEventTo}
+                  onChange={(e) => setNewEventTo(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-xs"
+                  disabled={
+                    !newEventName.trim() ||
+                    !newEventFrom ||
+                    !newEventTo ||
+                    newEventFrom > newEventTo
+                  }
+                  onClick={() => {
+                    void onUpsertSavedEvent({
+                      name: newEventName.trim(),
+                      dateFrom: newEventFrom,
+                      dateTo: newEventTo
+                    })
+                    setNewEventName('')
+                    setNewEventFrom('')
+                    setNewEventTo('')
+                  }}
+                >
+                  Add Event
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onUpsertSavedPlace && (
+            <div className="metadata-filter-card">
+              <h5>Saved Places (Offline Bounds)</h5>
+              {savedPlaces.length > 0 && (
+                <ul className="metadata-saved-list">
+                  {savedPlaces.map((pl) => (
+                    <li key={pl.id} className="metadata-saved-item">
+                      <span>
+                        <strong>{pl.name}</strong> ({pl.minLat.toFixed(2)}..{pl.maxLat.toFixed(2)},{' '}
+                        {pl.minLon.toFixed(2)}..{pl.maxLon.toFixed(2)})
+                      </span>
+                      {onDeleteSavedPlace && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-xs"
+                          onClick={() => void onDeleteSavedPlace(pl.id)}
+                          aria-label={`Delete place ${pl.name}`}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="metadata-inline-create-row">
+                <input
+                  type="text"
+                  placeholder="Place name"
+                  aria-label="New saved place name"
+                  value={newPlaceName}
+                  onChange={(e) => setNewPlaceName(e.target.value)}
+                />
+                <input
+                  type="number"
+                  step="0.001"
+                  placeholder="Min lat"
+                  aria-label="New saved place min latitude"
+                  value={newPlaceMinLat}
+                  onChange={(e) => setNewPlaceMinLat(e.target.value)}
+                />
+                <input
+                  type="number"
+                  step="0.001"
+                  placeholder="Max lat"
+                  aria-label="New saved place max latitude"
+                  value={newPlaceMaxLat}
+                  onChange={(e) => setNewPlaceMaxLat(e.target.value)}
+                />
+                <input
+                  type="number"
+                  step="0.001"
+                  placeholder="Min lon"
+                  aria-label="New saved place min longitude"
+                  value={newPlaceMinLon}
+                  onChange={(e) => setNewPlaceMinLon(e.target.value)}
+                />
+                <input
+                  type="number"
+                  step="0.001"
+                  placeholder="Max lon"
+                  aria-label="New saved place max longitude"
+                  value={newPlaceMaxLon}
+                  onChange={(e) => setNewPlaceMaxLon(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-xs"
+                  onClick={() => {
+                    const minLat = Number(newPlaceMinLat)
+                    const maxLat = Number(newPlaceMaxLat)
+                    const minLon = Number(newPlaceMinLon)
+                    const maxLon = Number(newPlaceMaxLon)
+                    if (
+                      newPlaceName.trim() &&
+                      Number.isFinite(minLat) &&
+                      Number.isFinite(maxLat) &&
+                      Number.isFinite(minLon) &&
+                      Number.isFinite(maxLon) &&
+                      minLat <= maxLat
+                    ) {
+                      void onUpsertSavedPlace({
+                        name: newPlaceName.trim(),
+                        minLat,
+                        maxLat,
+                        minLon,
+                        maxLon
+                      })
+                      setNewPlaceName('')
+                      setNewPlaceMinLat('')
+                      setNewPlaceMaxLat('')
+                      setNewPlaceMinLon('')
+                      setNewPlaceMaxLon('')
+                    }
+                  }}
+                >
+                  Add Place
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   )
 }

@@ -641,19 +641,19 @@ async function main() {
       await sleep(100)
     }
 
-    // Verify missing model notice is displayed before any model is installed
+    // Verify missing model onboarding panel is displayed before any model is installed
     let missingBannerText = ''
     for (let i = 0; i < 30; i++) {
       missingBannerText = await evaluate(
         app.cdp,
-        `document.querySelector('[data-testid="search-model-missing-notice"]')?.textContent ?? ''`
+        `document.querySelector('[data-testid="turn-on-photo-search-panel"]')?.textContent ?? ''`
       )
-      if (missingBannerText.includes('not installed')) break
+      if (missingBannerText.includes('Turn on photo search')) break
       await sleep(100)
     }
-    if (!missingBannerText.includes('not installed')) {
+    if (!missingBannerText.includes('Turn on photo search')) {
       throw new Error(
-        `Expected missing model banner in PhotosSearchBar, got: '${missingBannerText}'`
+        `Expected missing model onboarding panel in PhotosSearchBar, got: '${missingBannerText}'`
       )
     }
 
@@ -668,14 +668,20 @@ async function main() {
     for (let i = 0; i < 40; i++) {
       errorBannerText = await evaluate(
         app.cdp,
-        `document.querySelector('[data-testid="search-model-error-notice"]')?.textContent ?? ''`
+        `document.querySelector('[data-testid="photo-search-setup-error"]')?.textContent ?? ''`
       )
-      if (errorBannerText.includes('download or setup failed')) break
+      if (
+        errorBannerText.includes("Couldn't turn on photo search") &&
+        (errorBannerText.includes('appear damaged') ||
+          errorBannerText.includes("couldn't finish setting up"))
+      ) {
+        break
+      }
       await sleep(100)
     }
-    if (!errorBannerText.includes('download or setup failed')) {
+    if (!errorBannerText.includes("Couldn't turn on photo search")) {
       throw new Error(
-        `Expected PhotosSearchBar download/setup failure recovery banner, got: '${errorBannerText}'`
+        `Expected PhotosSearchBar setup/corrupt failure recovery panel, got: '${errorBannerText}'`
       )
     }
     // Restore valid config.json and refresh baseline snapshot
@@ -713,15 +719,25 @@ async function main() {
       `Indexed ${completedIndex.processedPhotos} photos with real ONNX CLIP ViT-B/32 vision embeddings`
     )
 
-    await evaluate(app.cdp, `window.api.startPhotoMetadataExtraction()`)
-    const completedMeta = await waitForMetadataJob(app.cdp, 45000)
-    if (completedMeta.processedPhotos !== initialPhotoBaselines.size) {
+    let completedMeta = await evaluate(app.cdp, `window.api.getPhotoMetadataProgress()`)
+    if (completedMeta.status === 'running') {
+      completedMeta = await waitForMetadataJob(app.cdp, 45000)
+    }
+    const pendingMeta =
+      (completedMeta.coverage?.unprocessedCount ?? 0) + (completedMeta.coverage?.staleCount ?? 0)
+    if (pendingMeta > 0) {
+      await evaluate(app.cdp, `window.api.startPhotoMetadataExtraction()`)
+      completedMeta = await waitForMetadataJob(app.cdp, 45000)
+    }
+    const coveredCount =
+      (completedMeta.coverage?.extractedCount ?? 0) + (completedMeta.coverage?.noMetadataCount ?? 0)
+    if (coveredCount !== initialPhotoBaselines.size) {
       throw new Error(
-        `Expected ${initialPhotoBaselines.size} metadata-extracted photos, got ${completedMeta.processedPhotos}`
+        `Expected ${initialPhotoBaselines.size} metadata-covered photos, got ${JSON.stringify(completedMeta)}`
       )
     }
     pass(
-      `Extracted EXIF/container metadata for ${completedMeta.processedPhotos} photos (extracted=${completedMeta.extractedPhotos}, absentMetadata=${completedMeta.absentMetadataPhotos})`
+      `Extracted EXIF/container metadata for ${coveredCount} photos (extracted=${completedMeta.coverage.extractedCount}, absentMetadata=${completedMeta.coverage.noMetadataCount})`
     )
 
     // 9. Natural-language semantic queries with real text ONNX embedding

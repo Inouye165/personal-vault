@@ -5,7 +5,7 @@
  * across the shared ThumbnailCoordinator worker pool without requiring a semantic model.
  */
 
-import { statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { extname } from 'node:path'
 import type { CatalogDatabase } from '../catalog/database'
 import { resolveReadableFileLocation } from '../backup/recovered-file-resolver'
@@ -101,6 +101,7 @@ export class PhotoMetadataCoordinator {
         reusedPhotos: 0,
         unsupportedPhotos: 0,
         failedPhotos: 0,
+        unavailablePhotos: 0,
         pendingPhotos: 0,
         startedAtMs: null,
         updatedAtMs: null,
@@ -121,6 +122,7 @@ export class PhotoMetadataCoordinator {
       reusedPhotos: job.reusedPhotos,
       unsupportedPhotos: job.unsupportedPhotos,
       failedPhotos: job.failedPhotos,
+      unavailablePhotos: job.unavailablePhotos,
       pendingPhotos: job.pendingPhotos,
       startedAtMs: job.startedAtMs,
       updatedAtMs: job.updatedAtMs,
@@ -414,6 +416,7 @@ export class PhotoMetadataCoordinator {
           reusedPhotos: 0,
           unsupportedPhotos: 0,
           failedPhotos: 0,
+          unavailablePhotos: 0,
           pendingPhotos: 0,
           startedAtMs: null,
           updatedAtMs: null,
@@ -426,6 +429,7 @@ export class PhotoMetadataCoordinator {
             noMetadataCount: 0,
             unsupportedCount: 0,
             failedCount: 0,
+            unavailableCount: 0,
             staleCount: 0,
             unprocessedCount: 0
           }
@@ -475,7 +479,8 @@ export class PhotoMetadataCoordinator {
     )
 
     const resolved = resolveReadableFileLocation(this.catalog, item.fileLocationId, {
-      verifyPayloadHash: false
+      verifyPayloadHash: false,
+      allowVaultCopyFallbackForUnavailableSource: true
     })
     if (!resolved.ok) {
       if (resolved.errorCode === 'VAULT_UNAVAILABLE') {
@@ -487,6 +492,8 @@ export class PhotoMetadataCoordinator {
         })
         return
       }
+      const isUnavailable =
+        resolved.errorCode === 'FILE_UNAVAILABLE' || resolved.errorCode === 'VAULT_COPY_MISSING'
       const contentRevision = `metarev:${item.discoveryObservationId}:${item.expectedByteSize}:${item.expectedMtimeMs ?? 'null'}:${loc.activeHash ?? 'unhashed'}`
       try {
         this.catalog.completePhotoMetadataJobItem({
@@ -497,7 +504,7 @@ export class PhotoMetadataCoordinator {
             fileLocationId: loc.id,
             discoveryObservationId: item.discoveryObservationId,
             parserRecipeVersion: job.parserRecipeVersion,
-            extractionStatus: 'failed',
+            extractionStatus: isUnavailable ? 'unavailable' : 'failed',
             contentSha256: null,
             contentRevision,
             observedByteSize: item.expectedByteSize,
@@ -517,10 +524,18 @@ export class PhotoMetadataCoordinator {
             captureOffsetText: null,
             captureTimezoneStatus: 'unknown',
             captureCalendarDate: null,
+            captureYear: null,
+            captureMonth: null,
+            captureDay: null,
             captureLocalIso: null,
             captureUtcEpochMs: null,
             captureDateParseError: null,
             captureDateConflict: null,
+            gpsStatus: 'absent',
+            gpsLatitude: null,
+            gpsLongitude: null,
+            gpsAltitudeM: null,
+            gpsParseError: null,
             cameraMakeRaw: null,
             cameraModelRaw: null,
             cameraDisplay: null,
@@ -529,6 +544,8 @@ export class PhotoMetadataCoordinator {
             lensModelRaw: null,
             lensDisplay: null,
             lensNormalized: null,
+            unknownTagCount: 0,
+            parserLimitsNote: null,
             rawMetadataJson: null,
             errorCode: resolved.errorCode,
             errorMessage: resolved.errorMessage
@@ -645,10 +662,18 @@ export class PhotoMetadataCoordinator {
               captureOffsetText: reusable.captureOffsetText,
               captureTimezoneStatus: reusable.captureTimezoneStatus,
               captureCalendarDate: reusable.captureCalendarDate,
+              captureYear: reusable.captureYear,
+              captureMonth: reusable.captureMonth,
+              captureDay: reusable.captureDay,
               captureLocalIso: reusable.captureLocalIso,
               captureUtcEpochMs: reusable.captureUtcEpochMs,
               captureDateParseError: reusable.captureDateParseError,
               captureDateConflict: reusable.captureDateConflict,
+              gpsStatus: reusable.gpsStatus,
+              gpsLatitude: reusable.gpsLatitude,
+              gpsLongitude: reusable.gpsLongitude,
+              gpsAltitudeM: reusable.gpsAltitudeM,
+              gpsParseError: reusable.gpsParseError,
               cameraMakeRaw: reusable.cameraMakeRaw,
               cameraModelRaw: reusable.cameraModelRaw,
               cameraDisplay: reusable.cameraDisplay,
@@ -657,6 +682,8 @@ export class PhotoMetadataCoordinator {
               lensModelRaw: reusable.lensModelRaw,
               lensDisplay: reusable.lensDisplay,
               lensNormalized: reusable.lensNormalized,
+              unknownTagCount: reusable.unknownTagCount,
+              parserLimitsNote: reusable.parserLimitsNote,
               rawMetadataJson: reusable.rawMetadataJson,
               errorCode: null,
               errorMessage: null
@@ -780,6 +807,79 @@ export class PhotoMetadataCoordinator {
     const extracted = workerRes.extracted
     if (
       extracted.extractionStatus === 'failed' &&
+      extracted.errorCode === 'READ_FAILED' &&
+      !existsSync(resolved.filePath)
+    ) {
+      const contentRevision = `metarev:${item.discoveryObservationId}:${item.expectedByteSize}:${item.expectedMtimeMs ?? 'null'}:${loc.activeHash ?? 'unhashed'}`
+      try {
+        this.catalog.completePhotoMetadataJobItem({
+          jobId,
+          itemId: item.id,
+          reused: false,
+          metadata: {
+            fileLocationId: loc.id,
+            discoveryObservationId: item.discoveryObservationId,
+            parserRecipeVersion: job.parserRecipeVersion,
+            extractionStatus: 'unavailable',
+            contentSha256: null,
+            contentRevision,
+            observedByteSize: item.expectedByteSize,
+            observedMtimeMs: item.expectedMtimeMs,
+            recordedExtension: recordedExt,
+            detectedFormat: null,
+            extensionFormatMismatch: false,
+            encodedWidthPx: null,
+            encodedHeightPx: null,
+            exifOrientation: null,
+            displayWidthPx: null,
+            displayHeightPx: null,
+            captureDateSourceTag: null,
+            rawCaptureDateText: null,
+            captureSubseconds: null,
+            captureOffsetMinutes: null,
+            captureOffsetText: null,
+            captureTimezoneStatus: 'unknown',
+            captureCalendarDate: null,
+            captureYear: null,
+            captureMonth: null,
+            captureDay: null,
+            captureLocalIso: null,
+            captureUtcEpochMs: null,
+            captureDateParseError: null,
+            captureDateConflict: null,
+            gpsStatus: 'absent',
+            gpsLatitude: null,
+            gpsLongitude: null,
+            gpsAltitudeM: null,
+            gpsParseError: null,
+            cameraMakeRaw: null,
+            cameraModelRaw: null,
+            cameraDisplay: null,
+            cameraNormalized: null,
+            lensMakeRaw: null,
+            lensModelRaw: null,
+            lensDisplay: null,
+            lensNormalized: null,
+            unknownTagCount: 0,
+            parserLimitsNote: null,
+            rawMetadataJson: null,
+            errorCode: 'FILE_UNAVAILABLE',
+            errorMessage: extracted.errorMessage ?? 'Source file is unavailable on disk'
+          }
+        })
+      } catch (err) {
+        this.catalog.recordPhotoMetadataJobItemTransientFailure({
+          jobId,
+          itemId: item.id,
+          errorCode: 'COMMIT_REJECTED',
+          errorMessage: err instanceof Error ? err.message : String(err)
+        })
+      }
+      return
+    }
+
+    if (
+      extracted.extractionStatus === 'failed' &&
       (extracted.errorCode === 'SOURCE_MODIFIED' ||
         extracted.errorCode === 'ACCESS_DENIED' ||
         extracted.errorCode === 'READ_FAILED' ||
@@ -839,10 +939,18 @@ export class PhotoMetadataCoordinator {
           captureOffsetText: extracted.captureOffsetText,
           captureTimezoneStatus: extracted.captureTimezoneStatus,
           captureCalendarDate: extracted.captureCalendarDate,
+          captureYear: extracted.captureYear,
+          captureMonth: extracted.captureMonth,
+          captureDay: extracted.captureDay,
           captureLocalIso: extracted.captureLocalIso,
           captureUtcEpochMs: extracted.captureUtcEpochMs,
           captureDateParseError: extracted.captureDateParseError,
           captureDateConflict: extracted.captureDateConflict,
+          gpsStatus: extracted.gpsStatus,
+          gpsLatitude: extracted.gpsLatitude,
+          gpsLongitude: extracted.gpsLongitude,
+          gpsAltitudeM: extracted.gpsAltitudeM,
+          gpsParseError: extracted.gpsParseError,
           cameraMakeRaw: extracted.cameraMakeRaw,
           cameraModelRaw: extracted.cameraModelRaw,
           cameraDisplay: extracted.cameraDisplay,
@@ -851,6 +959,8 @@ export class PhotoMetadataCoordinator {
           lensModelRaw: extracted.lensModelRaw,
           lensDisplay: extracted.lensDisplay,
           lensNormalized: extracted.lensNormalized,
+          unknownTagCount: extracted.unknownTagCount,
+          parserLimitsNote: extracted.parserLimitsNote,
           rawMetadataJson: extracted.rawMetadataJson,
           errorCode: extracted.errorCode,
           errorMessage: extracted.errorMessage

@@ -2,12 +2,21 @@
  * @vitest-environment node
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { CatalogDatabase } from '../../src/main/services/catalog/database'
 import { VaultImportCoordinator } from '../../src/main/services/vault/coordinator'
+import { copyAndVerifyFileToVault } from '../../src/main/services/vault/copier'
 import { initializeVault } from '../../src/main/services/vault/identity'
 
 describe('VaultImportCoordinator', () => {
@@ -348,5 +357,88 @@ describe('VaultImportCoordinator', () => {
     expect(latest.status).toBe('failed')
     expect(latest.failedFiles).toBe(1)
     expect(latest.copiedFiles).toBe(0)
+  })
+
+  it('never records a verified import in catalog when fallback destination copy is corrupted', async () => {
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Corrupt Fallback Vault' })
+    db.registerVault({
+      vaultId: identity.vaultId,
+      vaultPath: vaultDir,
+      name: 'Corrupt Fallback Vault',
+      createdAtMs: identity.createdAtMs
+    })
+
+    db.registerSource(sourceDir)
+    const filePath = join(sourceDir, 'corrupt_fallback.jpg')
+    const content = Buffer.from('original-photo-payload-bytes-for-coordinator-test')
+    writeFileSync(filePath, content)
+    const stat = statSync(filePath)
+    const sha = createHash('sha256').update(content).digest('hex')
+
+    db.persistDiscoveryBatch(sourceDir, [
+      {
+        originalPath: filePath,
+        fileName: 'corrupt_fallback.jpg',
+        extension: '.jpg',
+        category: 'photo',
+        byteSize: content.length,
+        birthtimeMs: stat.birthtimeMs,
+        mtimeMs: stat.mtimeMs,
+        discoveredAtMs: 1730000000000
+      }
+    ])
+    const loc = db.getFileLocationByOriginalPath(filePath)!
+    db.recordHashObservationsBatch([
+      {
+        originalPath: filePath,
+        sha256: sha,
+        observedByteSize: content.length,
+        observedMtimeMs: stat.mtimeMs,
+        hashedAtMs: 1730000100000
+      }
+    ])
+
+    const fallbackCoordinator = new VaultImportCoordinator({
+      catalog: db,
+      copyAndVerifyFn: (params) =>
+        copyAndVerifyFileToVault({
+          ...params,
+          publishOps: {
+            renameSync: () => {
+              const err = new Error('EXDEV') as NodeJS.ErrnoException
+              err.code = 'EXDEV'
+              throw err
+            },
+            copyFileSync: (src, dest) => {
+              const buf = Buffer.from(readFileSync(src))
+              buf[buf.length - 1] = buf[buf.length - 1]! ^ 0xff
+              writeFileSync(dest, buf)
+            }
+          }
+        })
+    })
+
+    try {
+      await fallbackCoordinator.startImport({
+        vaultId: identity.vaultId,
+        fileLocationIds: [loc.id]
+      })
+      const job = await fallbackCoordinator.waitForCompletion()
+
+      expect(job.status).toBe('failed')
+      expect(job.verifiedFiles).toBe(0)
+      expect(job.copiedFiles).toBe(0)
+      expect(job.failedFiles).toBe(1)
+
+      expect(db.getVaultCopiesForVault(identity.vaultId)).toHaveLength(0)
+      const items = db.getVaultImportItems(job.id)
+      expect(items).toHaveLength(1)
+      expect(items[0]?.status).toBe('failed')
+      expect(
+        existsSync(join(vaultDir, 'files', sha.slice(0, 2), sha, 'corrupt_fallback.jpg'))
+      ).toBe(false)
+    } finally {
+      await fallbackCoordinator.shutdown()
+    }
   })
 })

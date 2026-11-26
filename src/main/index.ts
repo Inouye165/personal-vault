@@ -17,7 +17,10 @@ import {
   SemanticSearchCoordinator,
   APPROVED_DOWNLOAD_HOSTS
 } from './services/semantic'
-import { PhotoMetadataCoordinator } from './services/metadata'
+import {
+  attachAutoMetadataExtractionScheduler,
+  PhotoMetadataCoordinator
+} from './services/metadata'
 import { DocumentExtractionCoordinator } from './services/documents'
 import { DocumentClassificationCoordinator } from './services/documents/classification/coordinator'
 import {
@@ -32,6 +35,7 @@ import {
   DocumentSemanticCoordinator
 } from './services/documents/semantic'
 import { UnifiedSearchCoordinator } from './services/unified-search'
+import { PhotoSearchCoordinator } from './services/search'
 import { ExportCoordinator } from './services/export'
 import { BackupCoordinator } from './services/backup/coordinator'
 import { GoogleDriveAuthService } from './services/backup/google-drive-auth'
@@ -78,6 +82,7 @@ let semanticModelManager: SemanticModelManager | null = null
 let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
 let semanticSearchCoordinator: SemanticSearchCoordinator | null = null
 let photoMetadataCoordinator: PhotoMetadataCoordinator | null = null
+let disposeAutoMetadataScheduler: (() => void) | null = null
 let documentExtractionCoordinator: DocumentExtractionCoordinator | null = null
 let ocrModelManager: OcrModelManager | null = null
 let documentOcrCoordinator: DocumentOcrCoordinator | null = null
@@ -85,6 +90,7 @@ let docSemanticModelManager: DocSemanticModelManager | null = null
 let docSemanticCoordinator: DocumentSemanticCoordinator | null = null
 let docSearchCoordinator: DocumentSearchCoordinator | null = null
 let unifiedSearchCoordinator: UnifiedSearchCoordinator | null = null
+let photoSearchCoordinator: PhotoSearchCoordinator | null = null
 let documentClassificationCoordinator: DocumentClassificationCoordinator | null = null
 let exportCoordinator: ExportCoordinator | null = null
 let backupCoordinator: BackupCoordinator | null = null
@@ -302,6 +308,15 @@ if (!app.requestSingleInstanceLock()) {
       photoMetadataCoordinator.initialize()
       logStartup('photoMetadataCoordinator initialized')
 
+      const attachedMetaScheduler = attachAutoMetadataExtractionScheduler({
+        scanCoordinator: coordinator,
+        photoMetadataCoordinator,
+        isCatalogClosed: () => !catalog || catalog.isClosed(),
+        isDisabled: () => process.env.PV_DISABLE_AUTO_METADATA === '1',
+        log: logStartup
+      })
+      disposeAutoMetadataScheduler = attachedMetaScheduler.dispose
+
       semanticSearchCoordinator = new SemanticSearchCoordinator({
         catalog,
         modelManager: semanticModelManager,
@@ -398,6 +413,14 @@ if (!app.requestSingleInstanceLock()) {
       })
       logStartup('unifiedSearchCoordinator initialized')
 
+      photoSearchCoordinator = new PhotoSearchCoordinator({
+        catalog,
+        unifiedSearchCoordinator,
+        semanticModelManager,
+        photoMetadataCoordinator
+      })
+      logStartup('photoSearchCoordinator initialized')
+
       documentClassificationCoordinator = new DocumentClassificationCoordinator({
         catalog,
         maxAppLiveWorkers: 3,
@@ -459,6 +482,7 @@ if (!app.requestSingleInstanceLock()) {
         docSemanticCoordinator,
         docSearchCoordinator,
         unifiedSearchCoordinator,
+        photoSearchCoordinator,
         documentClassificationCoordinator,
         exportCoordinator,
         backupCoordinator,
@@ -502,6 +526,10 @@ if (!app.requestSingleInstanceLock()) {
             logStartup('shutting down vault coordinator')
             await vaultCoordinator.shutdown()
             logStartup('vault coordinator shutdown done')
+          }
+          if (disposeAutoMetadataScheduler) {
+            disposeAutoMetadataScheduler()
+            disposeAutoMetadataScheduler = null
           }
           if (photoMetadataCoordinator) {
             logStartup('shutting down photo metadata coordinator')

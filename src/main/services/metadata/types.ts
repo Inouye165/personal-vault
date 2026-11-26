@@ -2,12 +2,12 @@
  * Personal Vault — Stage 6C Technical Photo Metadata Contracts & Resource Bounds
  */
 
-export const METADATA_PARSER_RECIPE_VERSION = 'exif_tech_v1' as const
+export const METADATA_PARSER_RECIPE_VERSION = 'exif_tech_v2' as const
 
 export const METADATA_LIMITS = {
   MAX_SOURCE_SIZE_BYTES: 128 * 1024 * 1024, // 128 MiB
   MAX_METADATA_PARSE_BYTES: 4 * 1024 * 1024, // 4 MiB max embedded metadata payload
-  MAX_RAW_EVIDENCE_JSON_BYTES: 16 * 1024, // 16 KiB max serialized raw evidence JSON
+  MAX_RAW_EVIDENCE_JSON_BYTES: 32 * 1024, // 32 KiB max serialized raw evidence JSON
   MAX_TEXT_LENGTH: 256,
   MAX_DIMENSION_EDGE_PX: 100_000,
   MAX_DIMENSION_AREA_PX: 1_000_000_000, // 1 Gigapixel header cap
@@ -19,10 +19,12 @@ export const METADATA_LIMITS = {
 } as const
 
 export type MetadataExtractionStatus =
-  'unprocessed' | 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'stale'
+  'unprocessed' | 'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'unavailable' | 'stale'
 
 export type PersistedMetadataExtractionStatus =
-  'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'stale'
+  'extracted' | 'no_metadata' | 'unsupported' | 'failed' | 'unavailable' | 'stale'
+
+export type GpsExtractionStatus = 'present' | 'absent' | 'invalid'
 
 export type CaptureDateSourceTag = 'DateTimeOriginal' | 'DateTimeDigitized'
 
@@ -95,10 +97,19 @@ export interface ExtractedPhotoMetadataResult {
   readonly captureOffsetText: string | null
   readonly captureTimezoneStatus: CaptureTimezoneStatus
   readonly captureCalendarDate: string | null
+  readonly captureYear: number | null
+  readonly captureMonth: number | null
+  readonly captureDay: number | null
   readonly captureLocalIso: string | null
   readonly captureUtcEpochMs: number | null
   readonly captureDateParseError: string | null
   readonly captureDateConflict: string | null
+
+  readonly gpsStatus: GpsExtractionStatus
+  readonly gpsLatitude: number | null
+  readonly gpsLongitude: number | null
+  readonly gpsAltitudeM: number | null
+  readonly gpsParseError: string | null
 
   readonly cameraMakeRaw: string | null
   readonly cameraModelRaw: string | null
@@ -109,6 +120,8 @@ export interface ExtractedPhotoMetadataResult {
   readonly lensDisplay: string | null
   readonly lensNormalized: string | null
 
+  readonly unknownTagCount: number
+  readonly parserLimitsNote: string | null
   readonly rawMetadataJson: string | null
   readonly errorCode: string | null
   readonly errorMessage: string | null
@@ -121,6 +134,7 @@ export interface PhotoMetadataCoverageSnapshot {
   readonly noMetadataCount: number
   readonly unsupportedCount: number
   readonly failedCount: number
+  readonly unavailableCount: number
   readonly staleCount: number
   readonly unprocessedCount: number
 }
@@ -137,6 +151,7 @@ export interface PhotoMetadataExtractionProgress {
   readonly reusedPhotos: number
   readonly unsupportedPhotos: number
   readonly failedPhotos: number
+  readonly unavailablePhotos: number
   readonly pendingPhotos: number
   readonly startedAtMs: number | null
   readonly updatedAtMs: number | null

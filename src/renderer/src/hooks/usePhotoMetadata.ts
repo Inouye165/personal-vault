@@ -13,7 +13,7 @@ export const METADATA_FACET_PAGE_SIZE = 15
 const DEFAULT_METADATA_PROGRESS: PhotoMetadataProgressResponse = {
   jobId: null,
   status: 'idle',
-  parserRecipeVersion: 'exif_tech_v1',
+  parserRecipeVersion: 'exif_tech_v2',
   totalPhotos: 0,
   processedPhotos: 0,
   extractedPhotos: 0,
@@ -21,18 +21,20 @@ const DEFAULT_METADATA_PROGRESS: PhotoMetadataProgressResponse = {
   reusedPhotos: 0,
   unsupportedPhotos: 0,
   failedPhotos: 0,
+  unavailablePhotos: 0,
   pendingPhotos: 0,
   startedAtMs: null,
   updatedAtMs: null,
   completedAtMs: null,
   lastError: null,
   coverage: {
-    parserRecipeVersion: 'exif_tech_v1',
+    parserRecipeVersion: 'exif_tech_v2',
     totalPhotos: 0,
     extractedCount: 0,
     noMetadataCount: 0,
     unsupportedCount: 0,
     failedCount: 0,
+    unavailableCount: 0,
     staleCount: 0,
     unprocessedCount: 0
   }

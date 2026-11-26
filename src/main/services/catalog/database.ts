@@ -21,6 +21,13 @@ import { DocumentSemanticRepository } from './document-semantic-repository'
 import { DocumentClassificationRepository } from './document-classification-repository'
 import { ExportRepository } from './export-repository'
 import { BackupRepository } from './backup-repository'
+import {
+  UserPhotoMetadataRepository,
+  type SetPhotoUserPlaceInput,
+  type UpsertCameraLabelInput,
+  type UpsertSavedEventInput,
+  type UpsertSavedPlaceInput
+} from './user-photo-metadata-repository'
 import type {
   DocumentDetailItem,
   GetDocumentExtensionFacetsRequest,
@@ -108,6 +115,10 @@ import type {
   GetPhotoMetadataFacetsOptions,
   PhotoMetadataFacetsResult,
   PhotoTechnicalMetadataDetailResult,
+  SavedEventRecord,
+  SavedPlaceRecord,
+  PhotoUserPlaceRecord,
+  CameraLabelRecord,
   SemanticSearchCatalogInput,
   SemanticSearchCatalogResult,
   PopulateRecoveredCatalogInput,
@@ -409,6 +420,7 @@ export class CatalogDatabase {
   private documentClassificationMutationSeq = 0
   private readonly exportRepository: ExportRepository
   private readonly backupRepository: BackupRepository
+  private readonly userPhotoMetadataRepository: UserPhotoMetadataRepository
 
   private constructor(
     db: DatabaseSync,
@@ -454,6 +466,9 @@ export class CatalogDatabase {
     })
     this.backupRepository = new BackupRepository({
       db: this.db
+    })
+    this.userPhotoMetadataRepository = new UserPhotoMetadataRepository({
+      getDb: () => this.getRawDb()
     })
   }
 
@@ -5801,6 +5816,7 @@ export class CatalogDatabase {
           COALESCE(SUM(CASE WHEN tm.extraction_status = 'no_metadata' THEN 1 ELSE 0 END), 0) AS no_metadata_count,
           COALESCE(SUM(CASE WHEN tm.extraction_status = 'unsupported' THEN 1 ELSE 0 END), 0) AS unsupported_count,
           COALESCE(SUM(CASE WHEN tm.extraction_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+          COALESCE(SUM(CASE WHEN tm.extraction_status = 'unavailable' THEN 1 ELSE 0 END), 0) AS unavailable_count,
           COALESCE(SUM(CASE
             WHEN tm.id IS NULL AND EXISTS (
               SELECT 1 FROM photo_technical_metadata h WHERE h.file_location_id = f.id
@@ -5830,6 +5846,7 @@ export class CatalogDatabase {
       noMetadataCount: Number(row?.no_metadata_count ?? 0),
       unsupportedCount: Number(row?.unsupported_count ?? 0),
       failedCount: Number(row?.failed_count ?? 0),
+      unavailableCount: Number(row?.unavailable_count ?? 0),
       staleCount: Number(row?.stale_count ?? 0),
       unprocessedCount: Number(row?.unprocessed_count ?? 0)
     }
@@ -5850,9 +5867,9 @@ export class CatalogDatabase {
           INSERT INTO photo_metadata_jobs (
             id, status, parser_recipe_version,
             total_photos, processed_photos, extracted_photos, absent_metadata_photos,
-            reused_photos, unsupported_photos, failed_photos, pending_photos,
+            reused_photos, unsupported_photos, failed_photos, unavailable_photos, pending_photos,
             started_at_ms, updated_at_ms, completed_at_ms, last_error
-          ) VALUES (?, 'running', ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?, NULL, NULL);
+          ) VALUES (?, 'running', ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?, NULL, NULL);
         `
         )
         .run(jobId, recipe, now, now)
@@ -6240,6 +6257,20 @@ export class CatalogDatabase {
         )
         .run(params.metadata.fileLocationId, params.metadata.parserRecipeVersion)
 
+      const derivePart = (idxStart: number, len: number): number | null => {
+        if (
+          !params.metadata.captureCalendarDate ||
+          params.metadata.captureCalendarDate.length !== 10
+        ) {
+          return null
+        }
+        const n = Number(params.metadata.captureCalendarDate.slice(idxStart, idxStart + len))
+        return Number.isFinite(n) ? n : null
+      }
+      const captureYear = params.metadata.captureYear ?? derivePart(0, 4)
+      const captureMonth = params.metadata.captureMonth ?? derivePart(5, 2)
+      const captureDay = params.metadata.captureDay ?? derivePart(8, 2)
+
       this.db
         .prepare(
           `
@@ -6250,10 +6281,13 @@ export class CatalogDatabase {
             encoded_width_px, encoded_height_px, exif_orientation, display_width_px, display_height_px,
             capture_date_source_tag, raw_capture_date_text, capture_subseconds,
             capture_offset_minutes, capture_offset_text, capture_timezone_status,
-            capture_calendar_date, capture_local_iso, capture_utc_epoch_ms,
+            capture_calendar_date, capture_year, capture_month, capture_day,
+            capture_local_iso, capture_utc_epoch_ms,
             capture_date_parse_error, capture_date_conflict,
+            gps_status, gps_latitude, gps_longitude, gps_altitude_m, gps_parse_error,
             camera_make_raw, camera_model_raw, camera_display, camera_normalized,
             lens_make_raw, lens_model_raw, lens_display, lens_normalized,
+            unknown_tag_count, parser_limits_note,
             raw_metadata_json, error_code, error_message, created_at_ms, is_current
           ) VALUES (
             ?, ?, ?, ?,
@@ -6262,10 +6296,13 @@ export class CatalogDatabase {
             ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
-            ?, ?, ?,
+            ?, ?, ?, ?,
             ?, ?,
+            ?, ?,
+            ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
+            ?, ?,
             ?, ?, ?, ?, 1
           );
         `
@@ -6294,10 +6331,18 @@ export class CatalogDatabase {
           params.metadata.captureOffsetText,
           params.metadata.captureTimezoneStatus,
           params.metadata.captureCalendarDate,
+          captureYear,
+          captureMonth,
+          captureDay,
           params.metadata.captureLocalIso,
           params.metadata.captureUtcEpochMs,
           params.metadata.captureDateParseError,
           params.metadata.captureDateConflict,
+          params.metadata.gpsStatus ?? 'absent',
+          params.metadata.gpsLatitude ?? null,
+          params.metadata.gpsLongitude ?? null,
+          params.metadata.gpsAltitudeM ?? null,
+          params.metadata.gpsParseError ?? null,
           params.metadata.cameraMakeRaw,
           params.metadata.cameraModelRaw,
           params.metadata.cameraDisplay,
@@ -6306,6 +6351,8 @@ export class CatalogDatabase {
           params.metadata.lensModelRaw,
           params.metadata.lensDisplay,
           params.metadata.lensNormalized,
+          params.metadata.unknownTagCount ?? 0,
+          params.metadata.parserLimitsNote ?? null,
           params.metadata.rawMetadataJson,
           params.metadata.errorCode,
           params.metadata.errorMessage,
@@ -6338,6 +6385,7 @@ export class CatalogDatabase {
       const isReused = isProcessed && params.reused ? 1 : 0
       const isUnsupported = mStatus === 'unsupported' ? 1 : 0
       const isFailed = mStatus === 'failed' ? 1 : 0
+      const isUnavailable = mStatus === 'unavailable' ? 1 : 0
 
       this.db
         .prepare(
@@ -6349,6 +6397,7 @@ export class CatalogDatabase {
               reused_photos = reused_photos + ?,
               unsupported_photos = unsupported_photos + ?,
               failed_photos = failed_photos + ?,
+              unavailable_photos = unavailable_photos + ?,
               pending_photos = CASE WHEN pending_photos > 0 THEN pending_photos - 1 ELSE 0 END,
               updated_at_ms = ?
           WHERE id = ?;
@@ -6361,6 +6410,7 @@ export class CatalogDatabase {
           isReused,
           isUnsupported,
           isFailed,
+          isUnavailable,
           now,
           params.jobId
         )
@@ -6490,6 +6540,11 @@ export class CatalogDatabase {
       effectiveStatus = 'unprocessed'
     }
 
+    const userPlace = this.userPhotoMetadataRepository.getPhotoUserPlace(fileLocationId)
+    const cameraLabel = currentMetadata?.cameraNormalized
+      ? this.userPhotoMetadataRepository.getCameraLabel(currentMetadata.cameraNormalized)
+      : null
+
     return {
       fileLocationId,
       currentRevision,
@@ -6497,8 +6552,85 @@ export class CatalogDatabase {
       parserRecipeVersion,
       recordedExtension: fileRow.extension,
       historicalMetadataCount,
-      currentMetadata
+      currentMetadata,
+      userPlace,
+      cameraLabel
     }
+  }
+
+  public listSavedEvents(): SavedEventRecord[] {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.listSavedEvents()
+  }
+
+  public findSavedEventByName(name: string): SavedEventRecord | null {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.findSavedEventByName(name)
+  }
+
+  public upsertSavedEvent(input: UpsertSavedEventInput): SavedEventRecord {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.upsertSavedEvent(input)
+  }
+
+  public deleteSavedEvent(id: number): boolean {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.deleteSavedEvent(id)
+  }
+
+  public listSavedPlaces(): SavedPlaceRecord[] {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.listSavedPlaces()
+  }
+
+  public findSavedPlaceByName(name: string): SavedPlaceRecord | null {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.findSavedPlaceByName(name)
+  }
+
+  public upsertSavedPlace(input: UpsertSavedPlaceInput): SavedPlaceRecord {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.upsertSavedPlace(input)
+  }
+
+  public deleteSavedPlace(id: number): boolean {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.deleteSavedPlace(id)
+  }
+
+  public getPhotoUserPlace(fileLocationId: number): PhotoUserPlaceRecord | null {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.getPhotoUserPlace(fileLocationId)
+  }
+
+  public setPhotoUserPlace(input: SetPhotoUserPlaceInput): PhotoUserPlaceRecord {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.setPhotoUserPlace(input)
+  }
+
+  public clearPhotoUserPlace(fileLocationId: number): boolean {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.clearPhotoUserPlace(fileLocationId)
+  }
+
+  public listCameraLabels(): CameraLabelRecord[] {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.listCameraLabels()
+  }
+
+  public getCameraLabel(cameraNormalized: string | null): CameraLabelRecord | null {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.getCameraLabel(cameraNormalized)
+  }
+
+  public upsertCameraLabel(input: UpsertCameraLabelInput): CameraLabelRecord {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.upsertCameraLabel(input)
+  }
+
+  public deleteCameraLabel(id: number): boolean {
+    this.assertOpen()
+    return this.userPhotoMetadataRepository.deleteCameraLabel(id)
   }
 
   public getPhotoMetadataFacets(options: GetPhotoMetadataFacetsOptions): PhotoMetadataFacetsResult {
@@ -6697,6 +6829,7 @@ export class CatalogDatabase {
       reusedPhotos: Number(row.reused_photos),
       unsupportedPhotos: Number(row.unsupported_photos),
       failedPhotos: Number(row.failed_photos),
+      unavailablePhotos: Number(row.unavailable_photos ?? 0),
       pendingPhotos: Number(row.pending_photos),
       startedAtMs: Number(row.started_at_ms),
       updatedAtMs: Number(row.updated_at_ms),
@@ -6773,10 +6906,20 @@ export class CatalogDatabase {
         row.capture_timezone_status
       ) as PhotoTechnicalMetadataRecord['captureTimezoneStatus'],
       captureCalendarDate: strOrNull(row.capture_calendar_date),
+      captureYear: numOrNull(row.capture_year),
+      captureMonth: numOrNull(row.capture_month),
+      captureDay: numOrNull(row.capture_day),
       captureLocalIso: strOrNull(row.capture_local_iso),
       captureUtcEpochMs: numOrNull(row.capture_utc_epoch_ms),
       captureDateParseError: strOrNull(row.capture_date_parse_error),
       captureDateConflict: strOrNull(row.capture_date_conflict),
+
+      gpsStatus: (strOrNull(row.gps_status) ??
+        'absent') as PhotoTechnicalMetadataRecord['gpsStatus'],
+      gpsLatitude: numOrNull(row.gps_latitude),
+      gpsLongitude: numOrNull(row.gps_longitude),
+      gpsAltitudeM: numOrNull(row.gps_altitude_m),
+      gpsParseError: strOrNull(row.gps_parse_error),
 
       cameraMakeRaw: strOrNull(row.camera_make_raw),
       cameraModelRaw: strOrNull(row.camera_model_raw),
@@ -6787,6 +6930,8 @@ export class CatalogDatabase {
       lensDisplay: strOrNull(row.lens_display),
       lensNormalized: strOrNull(row.lens_normalized),
 
+      unknownTagCount: Number(row.unknown_tag_count ?? 0),
+      parserLimitsNote: strOrNull(row.parser_limits_note),
       rawMetadataJson: strOrNull(row.raw_metadata_json),
       errorCode: strOrNull(row.error_code),
       errorMessage: strOrNull(row.error_message),

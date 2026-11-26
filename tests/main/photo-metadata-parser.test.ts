@@ -7,10 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildAdobeDngHeader,
   buildCanonCr2Header,
+  buildGpsTags,
+  buildRawTiffExifBuffer,
   createCraftedPngWithDimensions,
+  createHeicWithExif,
   createJpegFixture,
   createPngFixture,
-  EXIF_TAG_IDS
+  EXIF_TAG_IDS,
+  GPS_TAG_IDS
 } from '../helpers/exif-fixture-builder'
 import {
   extractPhotoMetadataFromFile,
@@ -599,5 +603,131 @@ describe('Stage 6C — Photo Metadata Parser, Provenance & Normalization', () =>
     expect(contraRes.captureCalendarDate).toBeNull()
     expect(contraRes.captureTimezoneStatus).toBe('invalid_offset')
     expect(contraRes.captureDateParseError).toMatch(/contradictory/i)
+  })
+
+  it('extracts GPS coordinates, local date parts, readable tags, and unknown/proprietary tag counts from JPEG and HEIC while preserving original bytes', async () => {
+    const tiffWithGpsAndUnknown = buildRawTiffExifBuffer({
+      ifd0Tags: [
+        { tagId: EXIF_TAG_IDS.Make, type: 'ascii', value: 'Apple' },
+        { tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'iPhone 15 Pro' },
+        { tagId: EXIF_TAG_IDS.Orientation, type: 'short', value: 1 },
+        { tagId: EXIF_TAG_IDS.Software, type: 'ascii', value: 'iOS 18.2' }
+      ],
+      exifTags: [
+        { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 13:45:10' },
+        { tagId: EXIF_TAG_IDS.OffsetTimeOriginal, type: 'ascii', value: '-06:00' },
+        { tagId: EXIF_TAG_IDS.ExposureTime, type: 'rational', value: [1, 250] },
+        { tagId: EXIF_TAG_IDS.FNumber, type: 'rational', value: [18, 10] },
+        { tagId: EXIF_TAG_IDS.ISOSpeedRatings, type: 'short', value: 64 },
+        { tagId: EXIF_TAG_IDS.MakerNote, type: 'undefined', value: Buffer.from([1, 2, 3, 4, 5, 6]) }
+      ],
+      gpsTags: buildGpsTags({
+        lat: 44.4605,
+        lon: -110.8281,
+        altitudeM: 2245.5
+      })
+    })
+
+    // 1. Synthetic JPEG with Yellowstone GPS + MakerNote
+    const jpgBuf = await createJpegFixture({
+      width: 400,
+      height: 300,
+      ifd0Tags: [
+        { tagId: EXIF_TAG_IDS.Make, type: 'ascii', value: 'Canon' },
+        { tagId: EXIF_TAG_IDS.Model, type: 'ascii', value: 'Canon EOS R5' }
+      ],
+      exifTags: [
+        { tagId: EXIF_TAG_IDS.DateTimeOriginal, type: 'ascii', value: '2025:06:06 13:45:10' },
+        { tagId: EXIF_TAG_IDS.OffsetTimeOriginal, type: 'ascii', value: '-06:00' },
+        { tagId: EXIF_TAG_IDS.ExposureTime, type: 'rational', value: [1, 125] },
+        { tagId: EXIF_TAG_IDS.ISOSpeedRatings, type: 'short', value: 200 },
+        { tagId: EXIF_TAG_IDS.MakerNote, type: 'undefined', value: Buffer.from([9, 8, 7, 6, 5]) }
+      ],
+      gpsTags: buildGpsTags({ lat: 44.4605, lon: -110.8281, altitudeM: 2245.5 })
+    })
+    const jpgPath = join(tempDir, 'yellowstone.jpg')
+    writeFileSync(jpgPath, jpgBuf)
+
+    const jpgRes = await extractPhotoMetadataFromFile({
+      sourcePath: jpgPath,
+      recordedExtension: '.jpg',
+      approvedRoots: [tempDir]
+    })
+    expect(jpgRes.extractionStatus).toBe('extracted')
+    expect(jpgRes.captureYear).toBe(2025)
+    expect(jpgRes.captureMonth).toBe(6)
+    expect(jpgRes.captureDay).toBe(6)
+    expect(jpgRes.gpsStatus).toBe('present')
+    expect(jpgRes.gpsLatitude).toBeCloseTo(44.4605, 3)
+    expect(jpgRes.gpsLongitude).toBeCloseTo(-110.8281, 3)
+    expect(jpgRes.gpsAltitudeM).toBeCloseTo(2245.5, 1)
+    expect(jpgRes.unknownTagCount).toBeGreaterThanOrEqual(1)
+    expect(jpgRes.parserLimitsNote).toMatch(/preserve|MakerNote|unknown/i)
+    expect(jpgRes.rawMetadataJson).toContain('ExposureTime')
+    expect(jpgRes.rawMetadataJson).toContain('ISOSpeedRatings')
+
+    // 2. Synthetic HEIC with Yellowstone GPS + MakerNote
+    const heicBuf = createHeicWithExif(tiffWithGpsAndUnknown)
+    const heicPath = join(tempDir, 'yellowstone.heic')
+    writeFileSync(heicPath, heicBuf)
+
+    const heicRes = await extractPhotoMetadataFromFile({
+      sourcePath: heicPath,
+      recordedExtension: '.heic',
+      approvedRoots: [tempDir]
+    })
+    expect(heicRes.extractionStatus).toBe('extracted')
+    expect(heicRes.detectedFormat).toBe('heic')
+    expect(heicRes.captureYear).toBe(2025)
+    expect(heicRes.captureMonth).toBe(6)
+    expect(heicRes.captureDay).toBe(6)
+    expect(heicRes.gpsStatus).toBe('present')
+    expect(heicRes.gpsLatitude).toBeCloseTo(44.4605, 3)
+    expect(heicRes.gpsLongitude).toBeCloseTo(-110.8281, 3)
+    expect(heicRes.cameraDisplay).toBe('Apple iPhone 15 Pro')
+    expect(heicRes.unknownTagCount).toBeGreaterThanOrEqual(1)
+    expect(heicRes.rawMetadataJson).toContain('iOS 18.2')
+
+    // 3. Southern/Western hemisphere coordinates remain negative
+    const southWestBuf = await createJpegFixture({
+      gpsTags: buildGpsTags({ lat: -33.8688, lon: -70.6693 })
+    })
+    const swPath = join(tempDir, 'santiago.jpg')
+    writeFileSync(swPath, southWestBuf)
+    const swRes = await extractPhotoMetadataFromFile({
+      sourcePath: swPath,
+      recordedExtension: '.jpg',
+      approvedRoots: [tempDir]
+    })
+    expect(swRes.gpsStatus).toBe('present')
+    expect(swRes.gpsLatitude).toBeCloseTo(-33.8688, 3)
+    expect(swRes.gpsLongitude).toBeCloseTo(-70.6693, 3)
+
+    // 4. Partial / invalid GPS (latitude only without longitude) is marked 'invalid' cleanly
+    const partialGpsBuf = await createJpegFixture({
+      gpsTags: [
+        { tagId: GPS_TAG_IDS.GPSLatitudeRef, type: 'ascii', value: 'N' },
+        {
+          tagId: GPS_TAG_IDS.GPSLatitude,
+          type: 'rational',
+          value: [
+            [44, 1],
+            [0, 1],
+            [0, 1]
+          ]
+        }
+      ]
+    })
+    const partialPath = join(tempDir, 'partial-gps.jpg')
+    writeFileSync(partialPath, partialGpsBuf)
+    const partialRes = await extractPhotoMetadataFromFile({
+      sourcePath: partialPath,
+      recordedExtension: '.jpg',
+      approvedRoots: [tempDir]
+    })
+    expect(partialRes.gpsStatus).toBe('invalid')
+    expect(partialRes.gpsLatitude).toBeNull()
+    expect(partialRes.gpsLongitude).toBeNull()
+    expect(partialRes.gpsParseError).toBeTruthy()
   })
 })
