@@ -1533,18 +1533,33 @@ async function main() {
     }
     pass('Semantic match non-factual disclaimer rendered in DOM')
 
-    // Check Top results UI (no raw % match overlays on thumbnails; raw score inside Photograph Details)
-    let topResultsText = ''
+    // Check normal grid UI (no Top results showcase, no raw % match overlays; raw score inside Photograph Details)
+    let gridState = null
     for (let i = 0; i < 40; i++) {
-      topResultsText = await evaluate(
+      gridState = await evaluate(
         app.cdp,
-        `document.querySelector('[data-testid="photos-top-results"]')?.textContent ?? ''`
+        `(() => {
+          const cards = Array.from(document.querySelectorAll('.photos-grid-container .photo-card.photo-cell'))
+          const names = cards.map((c) => c.querySelector('.photo-filename')?.textContent ?? '')
+          return {
+            hasTopResults: Boolean(document.querySelector('[data-testid="photos-top-results"]')),
+            hasToggleBtn: Boolean(document.querySelector('[data-testid="photos-toggle-other-results-btn"]')),
+            names
+          }
+        })()`
       )
-      if (topResultsText.includes('sunset_beach.jpg')) break
+      if (gridState.names.includes('sunset_beach.jpg')) break
       await sleep(150)
     }
-    if (!topResultsText.includes('sunset_beach.jpg')) {
-      throw new Error(`Expected sunset_beach.jpg in Top results, got: '${topResultsText}'`)
+    if (
+      !gridState ||
+      gridState.hasTopResults ||
+      gridState.hasToggleBtn ||
+      !gridState.names.includes('sunset_beach.jpg')
+    ) {
+      throw new Error(
+        `Expected sunset_beach.jpg in normal photo grid without Top results/toggle, got: ${JSON.stringify(gridState)}`
+      )
     }
     const thumbOverlayCount = await evaluate(
       app.cdp,
@@ -1559,7 +1574,9 @@ async function main() {
     await evaluate(
       app.cdp,
       `(() => {
-        const card = document.querySelector('[data-testid="photos-top-results"] .photo-featured-card')
+        const card = Array.from(
+          document.querySelectorAll('.photos-grid-container .photo-card.photo-cell')
+        ).find((el) => (el.querySelector('.photo-filename')?.textContent ?? '').includes('sunset_beach.jpg'))
         if (card) card.click()
       })()`
     )
@@ -1585,7 +1602,7 @@ async function main() {
       })()`
     )
     pass(
-      `Photos search UI rendered Top results and Search Relevance details cleanly: '${detailsScoreText.trim()}'`
+      `Photos search UI rendered normal grid results and Search Relevance details cleanly: '${detailsScoreText.trim()}'`
     )
 
     // Clear search and verify restoration of ordinary browsing
@@ -1848,25 +1865,25 @@ async function main() {
       `Photos UI rendered large-catalog match badge ('${largeMatchBadge}') and corrupt vector warning ('${corruptDomWarning}')`
     )
 
-    // Expand "Show other results" so virtualized grid cells mount for deep scroll & LRU traversal
-    let otherExpanded = false
+    // Verify virtualized grid cells mount immediately without any "Show other results" toggle
+    let immediateGridReady = false
     for (let i = 0; i < 40; i++) {
-      otherExpanded = await evaluate(
+      immediateGridReady = await evaluate(
         app.cdp,
         `(() => {
-          const btn = document.querySelector('[data-testid="photos-toggle-other-results-btn"]')
-          if (!btn) return false
-          if (btn.getAttribute('aria-expanded') !== 'true') {
-            btn.click()
-          }
-          return btn.getAttribute('aria-expanded') === 'true'
+          const hasToggle = Boolean(document.querySelector('[data-testid="photos-toggle-other-results-btn"]'))
+          const hasTop = Boolean(document.querySelector('[data-testid="photos-top-results"]'))
+          const cells = document.querySelectorAll('.photos-grid-container .photo-card.photo-cell')
+          return !hasToggle && !hasTop && cells.length > 0
         })()`
       )
-      if (otherExpanded) break
+      if (immediateGridReady) break
       await sleep(100)
     }
-    if (!otherExpanded) {
-      throw new Error('Could not expand "Show other results" toggle for deep scroll verification')
+    if (!immediateGridReady) {
+      throw new Error(
+        'Expected normal virtualized grid cells immediately without Top results or toggle'
+      )
     }
 
     // Scroll virtual grid to bottom (beyond offset 10,000) and verify deep cards mount with search scores and bounded DOM cells (<= 200)
@@ -1924,15 +1941,14 @@ async function main() {
       app.cdp,
       `(() => {
         const grid = document.querySelector('.photos-grid-container')
-        const headerHeight = document.querySelector('.photos-search-results-showcase')?.offsetHeight ?? 0
-        const virtualRange = grid ? Math.max(1, grid.scrollHeight - headerHeight - grid.clientHeight) : 1
-        return { headerHeight, virtualRange }
+        const virtualRange = grid ? Math.max(1, grid.scrollHeight - grid.clientHeight) : 1
+        return { virtualRange }
       })()`
     )
     for (let p = 1; p <= 44; p++) {
-      const targetScroll =
-        scrollMetrics.headerHeight +
-        Math.floor(((p * 50) / expectedLargeMatchCount) * scrollMetrics.virtualRange)
+      const targetScroll = Math.floor(
+        ((p * 50) / expectedLargeMatchCount) * scrollMetrics.virtualRange
+      )
       await evaluate(
         app.cdp,
         `(() => {
@@ -2013,12 +2029,11 @@ async function main() {
           const rawPages = grid?.getAttribute('data-cached-pages') ?? ''
           const cachedPages = rawPages.split(',').filter(Boolean).map((n) => Number(n))
           const cards = Array.from(document.querySelectorAll('.photo-card'))
-          const topFeaturedTitle =
-            document.querySelector('[data-testid="photos-top-results"] .photo-featured-title')
-              ?.textContent ?? ''
+          const firstGridTitle =
+            cards[0]?.querySelector('.photo-filename')?.textContent ?? ''
           return {
             mountedCells: cards.length,
-            topFeaturedTitle,
+            firstGridTitle,
             cachedPageCount: Number(grid?.getAttribute('data-cached-page-count') ?? 0),
             cachedPages,
             searchScoreCount: Number(grid?.getAttribute('data-search-score-count') ?? 0)
@@ -2028,7 +2043,7 @@ async function main() {
       await collectLargeDiagSample()
       if (
         returnedPage0State.cachedPages.includes(0) &&
-        returnedPage0State.topFeaturedTitle.includes('sunset_beach.jpg') &&
+        returnedPage0State.firstGridTitle.includes('sunset_beach.jpg') &&
         returnedPage0State.searchScoreCount === 2000 &&
         returnedPage0State.mountedCells > 0
       ) {
@@ -2038,7 +2053,7 @@ async function main() {
     }
     if (
       !returnedPage0State ||
-      !returnedPage0State.topFeaturedTitle.includes('sunset_beach.jpg') ||
+      !returnedPage0State.firstGridTitle.includes('sunset_beach.jpg') ||
       returnedPage0State.searchScoreCount !== 2000
     ) {
       throw new Error(

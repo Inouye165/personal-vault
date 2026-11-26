@@ -433,6 +433,13 @@ describe('Renderer Photo Search Timeout Recovery, Retry & Partial-Index Clarity'
     await waitFor(() => {
       expect(screen.getByText('hawaii_1.jpg')).toBeInTheDocument()
     })
+    expect(screen.getByText('hawaii_2.jpg')).toBeInTheDocument()
+    expect(screen.getByText('hawaii_3.jpg')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-1001')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-1002')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-1003')).toBeInTheDocument()
+    expect(screen.queryByTestId('photos-top-results')).toBeNull()
+    expect(screen.queryByTestId('photos-toggle-other-results-btn')).toBeNull()
     expect(screen.queryByTestId('photos-load-error')).toBeNull()
     expect(screen.queryByText('browse_1.jpg')).toBeNull()
     expect(screen.queryByText('browse_101.jpg')).toBeNull()
@@ -596,7 +603,13 @@ describe('Renderer Photo Search Timeout Recovery, Retry & Partial-Index Clarity'
     })
     expect(searchInput.value).toBe('hawaii')
     expect(screen.getByText('sunset_1.jpg')).toBeInTheDocument()
+    expect(screen.getByText('sunset_2.jpg')).toBeInTheDocument()
+    expect(screen.getByText('sunset_3.jpg')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-501')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-502')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-503')).toBeInTheDocument()
     expect(screen.queryByTestId('photos-top-results')).toBeNull()
+    expect(screen.queryByTestId('photos-toggle-other-results-btn')).toBeNull()
 
     // 3. Scroll restored "sunset" grid beyond cached page 0 -> must query "sunset", NEVER "hawaii" again
     const callsBeforeScroll = searchMock.mock.calls.length

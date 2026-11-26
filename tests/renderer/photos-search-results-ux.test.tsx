@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PhotosPanel } from '../../src/renderer/src/components/PhotosPanel'
 import { PhotoSelectedOcrSection } from '../../src/renderer/src/components/PhotoSelectedOcrSection'
 import type { VaultApi } from '../../src/preload/index.d'
-import type { PhotoItem, SemanticSearchResponse } from '../../src/shared/validation/ipc-schemas'
+import type {
+  MetadataAwarePhotoSearchRequest,
+  MetadataAwarePhotoSearchResponse,
+  PhotoItem,
+  SemanticSearchResponse
+} from '../../src/shared/validation/ipc-schemas'
 
 function makePhoto(id: number, fileName = `photo_${id}.jpg`): PhotoItem {
   return {
@@ -164,7 +169,25 @@ describe('Photos search results hierarchy and Copy text UX', () => {
     Reflect.deleteProperty(window, 'api')
   })
 
-  it('leads with prominent Top results, moves raw score into details, and expands Show other results', async () => {
+  it('renders all search results immediately in the normal grid from #1 without Top results or expand toggles', async () => {
+    vi.mocked(window.api.searchPhotosSemantic).mockImplementation(async ({ offset = 0 }) => ({
+      ...makeSearchResponse(
+        offset === 0
+          ? [
+              { photo: photos[0]!, score: 0.312 },
+              { photo: photos[1]!, score: 0.264 },
+              { photo: photos[2]!, score: 0.221 },
+              { photo: photos[3]!, score: 0.215 },
+              { photo: photos[4]!, score: 0.205 }
+            ]
+          : []
+      ),
+      totalMatched: 5,
+      unindexedCount: 12,
+      eligibleCount: 14,
+      offset
+    }))
+
     await act(async () => {
       render(<PhotosPanel />)
     })
@@ -175,53 +198,266 @@ describe('Photos search results hierarchy and Copy text UX', () => {
       fireEvent.submit(searchInput.closest('form')!)
     })
 
-    const topSection = await screen.findByTestId('photos-top-results')
-    expect(topSection).toHaveTextContent(/top results/i)
-    expect(within(topSection).getByText('employee_schedule.jpg')).toBeInTheDocument()
-    expect(within(topSection).getByText('schedule_screenshot.jpg')).toBeInTheDocument()
+    const grid = document.querySelector('.photos-grid-container') as HTMLDivElement
+    expect(grid).not.toBeNull()
 
-    // Raw "% match" overlay must not clutter thumbnail cards in the main results view
+    await waitFor(() => {
+      expect(within(grid).getByText('employee_schedule.jpg')).toBeInTheDocument()
+    })
+
+    // No separate Top results cards, Other results section, or expand button
+    expect(screen.queryByTestId('photos-top-results')).toBeNull()
+    expect(screen.queryByTestId('photos-other-results-section')).toBeNull()
+    expect(screen.queryByTestId('photos-toggle-other-results-btn')).toBeNull()
+    expect(document.querySelector('.photo-featured-card')).toBeNull()
+
+    // Result count and partial-results notice remain visible
+    expect(screen.getByTestId('search-match-badge')).toHaveTextContent('5 semantic matches')
+    expect(screen.getByTestId('search-partial-results-notice')).toHaveTextContent(
+      /Partial results — 12 unindexed \(14 searched\)/i
+    )
+
+    // Results #1..#5 appear immediately in order as ordinary photo-cell tiles without clicking anything
+    const tiles = Array.from(grid.querySelectorAll('.photo-card.photo-cell')) as HTMLDivElement[]
+    expect(tiles.map((t) => t.id)).toEqual([
+      'photo-cell-1',
+      'photo-cell-2',
+      'photo-cell-3',
+      'photo-cell-4',
+      'photo-cell-5'
+    ])
+    expect(within(grid).getByText('weekend_dog.jpg')).toBeInTheDocument()
+    expect(within(grid).getByText('living_room.jpg')).toBeInTheDocument()
+    expect(within(grid).getByText('family_dinner.jpg')).toBeInTheDocument()
+
+    // Results #1, #2, and #3 share uniform grid tile dimensions, starting at (0, 0)
+    expect(tiles[0]!.style.top).toBe('0px')
+    expect(tiles[0]!.style.left).toBe('0px')
+    expect(tiles[0]!.style.width).toBe(tiles[2]!.style.width)
+    expect(tiles[1]!.style.width).toBe(tiles[2]!.style.width)
+    expect(tiles[0]!.style.height).toBe(tiles[2]!.style.height)
+    expect(tiles[1]!.style.height).toBe(tiles[2]!.style.height)
+
+    // Raw "% match" overlay must not clutter thumbnail cards in the grid
     expect(document.querySelector('.badge-similarity-score')).toBeNull()
     expect(screen.queryByText(/31% match/i)).not.toBeInTheDocument()
 
-    // Remaining 3 results are behind the disclosure toggle initially
-    const toggleBtn = screen.getByTestId('photos-toggle-other-results-btn')
-    expect(toggleBtn).toHaveAttribute('aria-expanded', 'false')
-    expect(toggleBtn).toHaveTextContent(/show other results \(3\)/i)
-    expect(screen.queryByText('weekend_dog.jpg')).not.toBeInTheDocument()
-
-    // Clicking the toggle reveals the remaining results without duplicating top 2
+    // Selecting result #1 opens Photograph Details with similarity score and Open original
     await act(async () => {
-      fireEvent.click(toggleBtn)
-    })
-
-    expect(toggleBtn).toHaveAttribute('aria-expanded', 'true')
-    expect(toggleBtn).toHaveTextContent(/hide other results/i)
-    expect(await screen.findByText('weekend_dog.jpg')).toBeInTheDocument()
-    expect(screen.getByText('living_room.jpg')).toBeInTheDocument()
-    expect(screen.getByText('family_dinner.jpg')).toBeInTheDocument()
-
-    // Selecting a result photo surfaces raw similarity score honestly inside Details
-    const firstCard = within(topSection)
-      .getByText('employee_schedule.jpg')
-      .closest('[role="button"]')!
-    await act(async () => {
-      fireEvent.click(firstCard)
+      fireEvent.click(tiles[0]!)
     })
 
     const scoreDetail = await screen.findByTestId('photo-search-similarity-detail')
     expect(scoreDetail).toHaveTextContent('0.312')
     expect(scoreDetail).toHaveTextContent(/not a probability/i)
+    expect(screen.getByTestId('photos-open-original-btn')).toBeInTheDocument()
+  })
 
-    // Changing query resets "Other results" back to collapsed, and hides toggle when <= 2 results
+  it('paginates 179 visual/hybrid results smoothly across page boundaries without duplicates or gaps and preserves metadata-only ordering', async () => {
+    const hawaiiPhotos = Array.from({ length: 179 }, (_, i) =>
+      makePhoto(1001 + i, `hawaii_${i + 1}.jpg`)
+    )
+    const metadataOnlyPhotos = [
+      makePhoto(2001, 'meta_c_third.jpg'),
+      makePhoto(2002, 'meta_a_first.jpg'),
+      makePhoto(2003, 'meta_b_second.jpg'),
+      makePhoto(2004, 'meta_d_fourth.jpg')
+    ]
+
+    const searchMetadataAwareMock = vi.fn(
+      async (req: MetadataAwarePhotoSearchRequest): Promise<MetadataAwarePhotoSearchResponse> => {
+        const offset = req.offset ?? 0
+        const limit = req.limit ?? 50
+        if (req.queryText === 'meta only') {
+          const slice = metadataOnlyPhotos.slice(offset, offset + limit)
+          return {
+            mode: 'metadata_only',
+            items: slice.map((photo, idx) => ({
+              photo,
+              score: null,
+              rank: offset + idx + 1,
+              matchSource: 'metadata' as const
+            })),
+            totalMatched: metadataOnlyPhotos.length,
+            filteredCandidateCount: metadataOnlyPhotos.length,
+            eligibleCount: metadataOnlyPhotos.length,
+            unindexedCount: 0,
+            staleCount: 0,
+            corruptCount: 0,
+            offset,
+            limit,
+            hasMore: offset + slice.length < metadataOnlyPhotos.length,
+            queryLatencyMs: 6,
+            interpretedFilters: {
+              place: null,
+              date: {
+                mode: 'year',
+                label: '2025',
+                captureDateFrom: '2025-01-01',
+                captureDateTo: '2025-12-31'
+              },
+              camera: null,
+              visualTerms: null
+            },
+            clarification: null,
+            visualModelRequired: false,
+            modelStatus: 'ready'
+          }
+        }
+
+        const slice = hawaiiPhotos.slice(offset, offset + limit)
+        return {
+          mode: 'hybrid',
+          items: slice.map((photo, idx) => ({
+            photo,
+            score: Number((0.9 - (offset + idx) * 0.002).toFixed(4)),
+            rank: offset + idx + 1,
+            matchSource: 'hybrid' as const
+          })),
+          totalMatched: hawaiiPhotos.length,
+          filteredCandidateCount: 300,
+          eligibleCount: 250,
+          unindexedCount: 50,
+          staleCount: 0,
+          corruptCount: 0,
+          offset,
+          limit,
+          hasMore: offset + slice.length < hawaiiPhotos.length,
+          queryLatencyMs: 18,
+          interpretedFilters: {
+            place: null,
+            date: null,
+            camera: null,
+            visualTerms: 'Hawaii'
+          },
+          clarification: null,
+          visualModelRequired: false,
+          modelStatus: 'ready'
+        }
+      }
+    )
+
+    window.api = {
+      ...window.api,
+      searchPhotosMetadataAware: searchMetadataAwareMock
+    } as unknown as VaultApi
+
     await act(async () => {
-      fireEvent.change(searchInput, { target: { value: 'two only' } })
+      render(<PhotosPanel />)
+    })
+
+    const searchInput = await screen.findByPlaceholderText(/search photos by description/i)
+    await act(async () => {
+      fireEvent.change(searchInput, { target: { value: 'Hawaii' } })
       fireEvent.submit(searchInput.closest('form')!)
     })
 
+    const grid = document.querySelector('.photos-grid-container') as HTMLDivElement
+    expect(grid).not.toBeNull()
+
     await waitFor(() => {
-      expect(screen.queryByTestId('photos-toggle-other-results-btn')).not.toBeInTheDocument()
+      expect(within(grid).getByText('hawaii_1.jpg')).toBeInTheDocument()
+      expect(within(grid).getByText('hawaii_2.jpg')).toBeInTheDocument()
+      expect(within(grid).getByText('hawaii_3.jpg')).toBeInTheDocument()
     })
+
+    expect(screen.queryByTestId('photos-top-results')).toBeNull()
+    expect(screen.queryByTestId('photos-toggle-other-results-btn')).toBeNull()
+    expect(screen.getByTestId('search-match-badge')).toHaveTextContent('179 semantic matches')
+    expect(screen.getByTestId('search-partial-results-notice')).toHaveTextContent(
+      /Partial results — 50 unindexed \(250 searched\)/i
+    )
+
+    const virtualHeight = Number.parseInt(
+      (document.querySelector('.photos-virtual-container') as HTMLDivElement).style.height || '0',
+      10
+    )
+    expect(virtualHeight).toBeGreaterThan(0)
+
+    // Scroll across page 0->1, 1->2, and 2->3 boundaries and collect rendered tiles in visual order
+    const seenIds = new Set<string>()
+    const orderedIds: string[] = []
+    const recordVisibleTiles = () => {
+      const tiles = Array.from(grid.querySelectorAll('.photo-card.photo-cell'))
+        .map((el) => ({
+          id: el.id,
+          top: Number.parseInt((el as HTMLElement).style.top || '0', 10),
+          left: Number.parseInt((el as HTMLElement).style.left || '0', 10)
+        }))
+        .sort((a, b) => a.top - b.top || a.left - b.left)
+
+      // No duplicate IDs rendered simultaneously in the DOM
+      expect(new Set(tiles.map((t) => t.id)).size).toBe(tiles.length)
+      for (const tile of tiles) {
+        if (!seenIds.has(tile.id)) {
+          seenIds.add(tile.id)
+          orderedIds.push(tile.id)
+        }
+      }
+    }
+
+    recordVisibleTiles()
+    const scrollStops = [
+      Math.floor(virtualHeight * 0.26),
+      Math.floor(virtualHeight * 0.54),
+      Math.floor(virtualHeight * 0.85),
+      virtualHeight
+    ]
+    for (const stop of scrollStops) {
+      await act(async () => {
+        fireEvent.scroll(grid, { target: { scrollTop: stop } })
+      })
+      await waitFor(() => {
+        expect(grid.querySelectorAll('.photo-skeleton').length).toBe(0)
+      })
+      recordVisibleTiles()
+    }
+
+    // Verify all 4 pages (offsets 0, 50, 100, 150) loaded in order and boundary items appeared cleanly
+    const requestedOffsets = searchMetadataAwareMock.mock.calls.map((c) => c[0]?.offset ?? 0)
+    expect(requestedOffsets.filter((o) => o < 179)).toEqual([0, 50, 100, 150])
+    expect(within(grid).getByText('hawaii_179.jpg')).toBeInTheDocument()
+    expect(orderedIds.slice(0, 3)).toEqual([
+      'photo-cell-1001',
+      'photo-cell-1002',
+      'photo-cell-1003'
+    ])
+    // Boundary pairs 50/51 and 100/101 must remain contiguous without drops or duplicates
+    for (const boundaryId of [
+      'photo-cell-1050',
+      'photo-cell-1051',
+      'photo-cell-1100',
+      'photo-cell-1101'
+    ]) {
+      expect(seenIds.has(boundaryId)).toBe(true)
+    }
+    const idx50 = orderedIds.indexOf('photo-cell-1050')
+    expect(orderedIds[idx50 + 1]).toBe('photo-cell-1051')
+    const idx100 = orderedIds.indexOf('photo-cell-1100')
+    expect(orderedIds[idx100 + 1]).toBe('photo-cell-1101')
+
+    // Metadata-only search preserves returned order in the same normal grid
+    await act(async () => {
+      fireEvent.change(searchInput, { target: { value: 'meta only' } })
+      fireEvent.submit(searchInput.closest('form')!)
+    })
+    let metaGrid!: HTMLDivElement
+    await waitFor(() => {
+      metaGrid = document.querySelector('.photos-grid-container') as HTMLDivElement
+      expect(metaGrid).not.toBeNull()
+      expect(within(metaGrid).getByText('meta_c_third.jpg')).toBeInTheDocument()
+    })
+    const metaTiles = Array.from(
+      metaGrid.querySelectorAll('.photo-card.photo-cell')
+    ) as HTMLDivElement[]
+    expect(metaTiles.map((t) => t.id)).toEqual([
+      'photo-cell-2001',
+      'photo-cell-2002',
+      'photo-cell-2003',
+      'photo-cell-2004'
+    ])
+    expect(screen.queryByTestId('photos-top-results')).toBeNull()
+    expect(screen.queryByTestId('photos-toggle-other-results-btn')).toBeNull()
   })
 
   it('evicts Page 0 during deep search scroll and reloads Page 0 only when returning to top', async () => {
@@ -268,20 +504,19 @@ describe('Photos search results hierarchy and Copy text UX', () => {
       fireEvent.submit(searchInput.closest('form')!)
     })
 
-    const toggleBtn = await screen.findByTestId('photos-toggle-other-results-btn')
-    await act(async () => {
-      fireEvent.click(toggleBtn)
-    })
-
     const grid = document.querySelector('.photos-grid-container') as HTMLDivElement
     expect(grid).not.toBeNull()
+    await waitFor(() => {
+      expect(within(grid).getByText('search_photo_1.jpg')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('photos-toggle-other-results-btn')).toBeNull()
     const scrollHeight = Number.parseInt(
       (document.querySelector('.photos-virtual-container') as HTMLDivElement).style.height ||
         '120000',
       10
     )
 
-    // Traverse through 42+ pages while scrolled deep past the Top results header
+    // Traverse through 42+ pages across the unified virtualized grid
     const observedPages = new Set<number>([0])
     for (let p = 1; p <= 44; p += 1) {
       const targetScroll = Math.max(
@@ -300,7 +535,7 @@ describe('Photos search results hierarchy and Copy text UX', () => {
     }
 
     expect(observedPages.size).toBeGreaterThan(40)
-    // Page 0 must have been evicted rather than pinned MRU by Top results
+    // Page 0 must have been evicted rather than pinned MRU
     const pagesAfterDeepScroll = (grid.getAttribute('data-cached-pages') ?? '')
       .split(',')
       .filter(Boolean)
@@ -309,7 +544,7 @@ describe('Photos search results hierarchy and Copy text UX', () => {
     expect(Number(grid.getAttribute('data-search-score-count'))).toBe(2000)
     expect(offsetZeroRequests).toHaveLength(1)
 
-    // Scroll back to top (scrollTop = 0) and confirm Page 0 reloads cleanly
+    // Scroll back to top (scrollTop = 0) and confirm Page 0 reloads cleanly in the grid
     await act(async () => {
       fireEvent.scroll(grid, { target: { scrollTop: 0 } })
     })
@@ -321,9 +556,8 @@ describe('Photos search results hierarchy and Copy text UX', () => {
       expect(cached).toContain(0)
     })
     expect(offsetZeroRequests).toHaveLength(2)
-    expect(
-      within(screen.getByTestId('photos-top-results')).getByText('search_photo_1.jpg')
-    ).toBeInTheDocument()
+    expect(within(grid).getByText('search_photo_1.jpg')).toBeInTheDocument()
+    expect(document.getElementById('photo-cell-1')).toBeInTheDocument()
   })
 
   it('shows Copy text in PhotoSelectedOcrSection only when extracted text and clipboard writeText exist', async () => {

@@ -29,7 +29,6 @@ import {
   FolderPlus,
   Edit2,
   SlidersHorizontal,
-  Sparkles,
   Cpu,
   ArrowLeft
 } from 'lucide-react'
@@ -77,15 +76,6 @@ function formatDate(ms: number | null): string {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit'
-  })
-}
-
-function formatShortDate(ms: number | null): string {
-  if (ms === null || ms === undefined || isNaN(ms)) return 'Unknown date'
-  return new Date(ms).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric'
   })
 }
 
@@ -283,100 +273,6 @@ function PhotoCardCell({
   )
 }
 
-interface FeaturedPhotoCardProps {
-  photo: PhotoItem
-  thumb?: ThumbnailResult
-  isSelected: boolean
-  onSelect: (id: number) => void
-  onOpenOriginal: (photo: PhotoItem) => void
-  requestThumbnail: (photo: PhotoItem, priority?: 'high' | 'normal' | 'low') => void
-  cancelThumbnail: (id: number) => void
-}
-
-function FeaturedPhotoCard({
-  photo,
-  thumb,
-  isSelected,
-  onSelect,
-  onOpenOriginal,
-  requestThumbnail,
-  cancelThumbnail
-}: FeaturedPhotoCardProps): ReactElement {
-  useEffect(() => {
-    requestThumbnail(photo, 'high')
-    return () => {
-      cancelThumbnail(photo.id)
-    }
-  }, [photo, requestThumbnail, cancelThumbnail])
-
-  const dateLabel = formatShortDate(photo.inferredCaptureTimeMs ?? photo.filesystemMtimeMs)
-
-  return (
-    <div
-      id={`photo-featured-${photo.id}`}
-      className={`photo-featured-card ${isSelected ? 'selected' : ''}`}
-      role="button"
-      tabIndex={0}
-      aria-label={`${photo.fileName}, ${dateLabel}, ${formatBytes(photo.byteSize)}`}
-      aria-pressed={isSelected}
-      onClick={() => onSelect(photo.id)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onSelect(photo.id)
-        }
-      }}
-    >
-      <div className="photo-featured-media">
-        {thumb?.status === 'ready' ? (
-          <img
-            src={thumb.dataUrl}
-            alt={photo.fileName}
-            className="photo-featured-img"
-            loading="lazy"
-          />
-        ) : thumb?.status === 'unsupported' ? (
-          <div className="thumbnail-placeholder unsupported">
-            <FileQuestion size={36} />
-            <span className="placeholder-tag">Unsupported</span>
-          </div>
-        ) : thumb?.status === 'error' ? (
-          <div className="thumbnail-placeholder error">
-            <AlertTriangle size={36} />
-            <span className="placeholder-tag">Unavailable</span>
-          </div>
-        ) : (
-          <div className="thumbnail-placeholder loading">
-            <FileImage size={36} className="pulse" />
-            <span className="placeholder-tag">Loading…</span>
-          </div>
-        )}
-      </div>
-      <div className="photo-featured-footer">
-        <div className="photo-featured-meta">
-          <span className="photo-featured-title" title={photo.fileName}>
-            {photo.fileName}
-          </span>
-          <span className="photo-featured-subtitle">
-            {dateLabel} · {formatBytes(photo.byteSize)}
-          </span>
-        </div>
-        <button
-          type="button"
-          className="btn-open-pill"
-          onClick={(e) => {
-            e.stopPropagation()
-            onOpenOriginal(photo)
-          }}
-          aria-label={`Open ${photo.fileName}`}
-        >
-          Open
-        </button>
-      </div>
-    </div>
-  )
-}
-
 export interface PhotosPanelProps {
   readonly scanJobs?: ScanJobsPanelProps
 }
@@ -491,14 +387,6 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const [showAddScanPanel, setShowAddScanPanel] = useState(false)
   const [onboardingTriggered, setOnboardingTriggered] = useState(false)
   const [dismissedReadyKey, setDismissedReadyKey] = useState<string | null>(null)
-  const [showOtherResults, setShowOtherResults] = useState(false)
-  const [trackedSearchQuery, setTrackedSearchQuery] = useState(searchQuery)
-  if (trackedSearchQuery !== searchQuery) {
-    setTrackedSearchQuery(searchQuery)
-    if (showOtherResults) {
-      setShowOtherResults(false)
-    }
-  }
   const autoIndexStartedRef = useRef(false)
   const lastCompletedScanJobIdRef = useRef<number | null>(
     scanJobs?.job?.status === 'completed' ? scanJobs.job.jobId : null
@@ -713,75 +601,63 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     originalRequestGenRef.current += 1
   }, [selectedPhoto?.id])
 
-  const handleOpenOriginalFor = useCallback(
-    async (photoToOpen: PhotoItem) => {
-      const targetId = photoToOpen.id
-      const targetName = photoToOpen.fileName
-      if (selectedId !== targetId) {
-        selectPhoto(targetId)
+  const handleOpenOriginal = useCallback(async () => {
+    if (!selectedPhoto) return
+    const targetId = selectedPhoto.id
+    const targetName = selectedPhoto.fileName
+    selectedPhotoIdRef.current = targetId
+    const reqGen = ++originalRequestGenRef.current
+    setOriginalViewerState({
+      open: true,
+      locationId: targetId,
+      fileName: targetName,
+      loading: true,
+      result: null,
+      error: null
+    })
+    try {
+      const res = await window.api.getOriginalPhoto({ locationId: targetId })
+      if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
+        return
       }
-      selectedPhotoIdRef.current = targetId
-      const reqGen = ++originalRequestGenRef.current
-      setOriginalViewerState({
-        open: true,
-        locationId: targetId,
-        fileName: targetName,
-        loading: true,
-        result: null,
-        error: null
-      })
-      try {
-        const res = await window.api.getOriginalPhoto({ locationId: targetId })
-        if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
-          return
-        }
-        if (res.status === 'ready') {
-          setOriginalViewerState({
-            open: true,
-            locationId: targetId,
-            fileName: targetName,
-            loading: false,
-            result: res,
-            error: null
-          })
-        } else {
-          setOriginalViewerState({
-            open: true,
-            locationId: targetId,
-            fileName: targetName,
-            loading: false,
-            result: res,
-            error: res.reason
-          })
-        }
-      } catch (err: unknown) {
-        if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
-          return
-        }
+      if (res.status === 'ready') {
         setOriginalViewerState({
           open: true,
           locationId: targetId,
           fileName: targetName,
           loading: false,
-          result: null,
-          error: err instanceof Error ? err.message : 'Failed to load original photograph'
+          result: res,
+          error: null
+        })
+      } else {
+        setOriginalViewerState({
+          open: true,
+          locationId: targetId,
+          fileName: targetName,
+          loading: false,
+          result: res,
+          error: res.reason
         })
       }
-    },
-    [selectedId, selectPhoto]
-  )
-
-  const handleOpenOriginal = useCallback(async () => {
-    if (!selectedPhoto) return
-    await handleOpenOriginalFor(selectedPhoto)
-  }, [selectedPhoto, handleOpenOriginalFor])
+    } catch (err: unknown) {
+      if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
+        return
+      }
+      setOriginalViewerState({
+        open: true,
+        locationId: targetId,
+        fileName: targetName,
+        loading: false,
+        result: null,
+        error: err instanceof Error ? err.message : 'Failed to load original photograph'
+      })
+    }
+  }, [selectedPhoto])
 
   const restorePhotoFocus = useCallback(() => {
     const id = lastSelectedIdRef.current
     if (id === null) return null
-    return (
-      document.getElementById(`photo-cell-${id}`) ?? document.getElementById(`photo-featured-${id}`)
-    )
+    return document.getElementById(`photo-cell-${id}`)
   }, [])
 
   const isFiltersDrawerOpen = showMetadataPanel && viewMode === 'grid'
@@ -833,25 +709,6 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const scrollTop = scrollState.generation === filterGeneration ? scrollState.top : 0
   const [containerHeight, setContainerHeight] = useState(600)
   const [containerWidth, setContainerWidth] = useState(800)
-  const [searchHeaderEl, setSearchHeaderEl] = useState<HTMLDivElement | null>(null)
-  const [searchHeaderHeight, setSearchHeaderHeight] = useState(0)
-
-  const handleSearchHeaderRef = useCallback((el: HTMLDivElement | null) => {
-    setSearchHeaderEl(el)
-  }, [])
-
-  // Measure optional search header showcase above the virtualized remaining grid
-  useEffect(() => {
-    if (!searchHeaderEl) return
-    const measure = () => {
-      setSearchHeaderHeight(searchHeaderEl.offsetHeight)
-    }
-    measure()
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(measure)
-    observer.observe(searchHeaderEl)
-    return () => observer.disconnect()
-  }, [searchHeaderEl])
 
   // Reset scroll viewport DOM position whenever filters change or reset so result pages never mix
   useEffect(() => {
@@ -890,14 +747,6 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     setScrollState({ generation: filterGeneration, top: target.scrollTop })
   }
 
-  const isSearchActive =
-    viewMode === 'grid' && searchQuery.trim().length > 0 && !error && totalCount > 0
-  const topResultCount = isSearchActive ? Math.min(2, totalCount) : 0
-  const otherResultCount = isSearchActive ? Math.max(0, totalCount - topResultCount) : 0
-  const gridItemOffset = isSearchActive ? topResultCount : 0
-  const gridTotalCount = Math.max(0, totalCount - gridItemOffset)
-  const effectiveSearchHeaderHeight = isSearchActive ? searchHeaderHeight : 0
-
   // Responsive virtualization calculations filling available content width
   const isNarrowGrid = containerWidth < 480
   const gap = isNarrowGrid ? 10 : 16
@@ -905,52 +754,33 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const columns = Math.max(1, Math.floor((containerWidth + gap) / (targetCellWidth + gap)))
   const cellWidth = Math.max(120, Math.floor((containerWidth - (columns - 1) * gap) / columns))
   const cellHeight = Math.min(240, Math.max(185, Math.round(cellWidth * 1.1)))
-  const totalRows = Math.ceil(gridTotalCount / columns)
+  const totalRows = Math.ceil(totalCount / columns)
   const rowHeight = cellHeight + gap
   const totalHeight = Math.max(0, totalRows * rowHeight - gap)
 
   // Visible window range calculation (bounded to max 200 cells)
-  const gridScrollTop = Math.max(0, scrollTop - effectiveSearchHeaderHeight)
-  const startRow = Math.max(0, Math.floor(gridScrollTop / rowHeight) - 1)
+  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 1)
   const visibleRowCount = Math.ceil(containerHeight / rowHeight) + 2
   const endRow = Math.min(totalRows, startRow + visibleRowCount)
 
-  const renderGridCells = !isSearchActive || showOtherResults
-  const isTopResultsInViewport =
-    !renderGridCells || scrollTop <= effectiveSearchHeaderHeight + containerHeight
-  const startIndex = gridItemOffset + startRow * columns
-  const rawEndIndex = gridItemOffset + endRow * columns
-  const endIndex = renderGridCells
-    ? Math.min(totalCount, Math.min(rawEndIndex, startIndex + PHOTO_BOUNDS.MAX_MOUNTED_CELLS))
-    : Math.min(totalCount, topResultCount)
+  const startIndex = startRow * columns
+  const rawEndIndex = endRow * columns
+  const endIndex = Math.min(
+    totalCount,
+    Math.min(rawEndIndex, startIndex + PHOTO_BOUNDS.MAX_MOUNTED_CELLS)
+  )
 
   // Trigger loading of required page range
   useEffect(() => {
-    if (totalCount > 0) {
-      if (isSearchActive && isTopResultsInViewport) {
-        ensureRangeLoaded(0, Math.min(totalCount, topResultCount))
-      }
-      if (renderGridCells && endIndex > startIndex) {
-        ensureRangeLoaded(startIndex, endIndex)
-      }
+    if (totalCount > 0 && endIndex > startIndex) {
+      ensureRangeLoaded(startIndex, endIndex)
     }
-  }, [
-    totalCount,
-    isSearchActive,
-    isTopResultsInViewport,
-    topResultCount,
-    renderGridCells,
-    startIndex,
-    endIndex,
-    ensureRangeLoaded
-  ])
+  }, [totalCount, startIndex, endIndex, ensureRangeLoaded])
 
   // Build cell indices array for mounted range
   const visibleIndices: number[] = []
-  if (renderGridCells) {
-    for (let i = startIndex; i < endIndex; i++) {
-      visibleIndices.push(i)
-    }
+  for (let i = startIndex; i < endIndex; i++) {
+    visibleIndices.push(i)
   }
 
   // Keyboard navigation within grid
@@ -1367,153 +1197,67 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                 data-cached-pages={cachedPageIndices.join(',')}
                 data-search-score-count={searchScores.size}
               >
-                {isSearchActive && (
-                  <div ref={handleSearchHeaderRef} className="photos-search-results-showcase">
-                    <section
-                      className="photos-top-results-section"
-                      data-testid="photos-top-results"
-                      aria-label="Top search results"
-                    >
-                      <div className="photos-top-results-header">
-                        <div className="photos-top-results-icon" aria-hidden="true">
-                          <Sparkles size={18} />
-                        </div>
-                        <div className="photos-top-results-copy">
-                          <h3>Top results</h3>
-                          <p>
-                            {searchResultMeta
-                              ? `Searched ${searchResultMeta.eligibleCount.toLocaleString()} ${searchResultMeta.eligibleCount === 1 ? 'photo' : 'photos'} in ${(searchResultMeta.queryLatencyMs / 1000).toFixed(searchResultMeta.queryLatencyMs < 100 ? 1 : 2)}s. Showing the closest matches first.`
-                              : 'Showing the closest matches first.'}
-                          </p>
-                        </div>
-                      </div>
+                <div
+                  className="photos-virtual-height-holder photos-virtual-container"
+                  style={{
+                    height: `${totalHeight}px`,
+                    position: 'relative',
+                    width: '100%'
+                  }}
+                >
+                  {visibleIndices.map((index) => {
+                    const photo = getPhoto(index)
+                    const row = Math.floor(index / columns)
+                    const col = index % columns
+                    const top = row * rowHeight
+                    const left = col * (cellWidth + gap)
 
-                      <div className="photos-top-results-grid">
-                        {Array.from({ length: topResultCount }, (_, index) => {
-                          const photo = getPhoto(index)
-                          if (!photo) {
-                            return (
-                              <div
-                                key={`featured-loading-${index}`}
-                                className="photo-featured-card"
-                              >
-                                <div className="photo-featured-media">
-                                  <div className="thumbnail-placeholder loading">
-                                    <FileImage size={32} className="pulse" />
-                                    <span className="placeholder-tag">Loading…</span>
-                                  </div>
-                                </div>
-                              </div>
-                            )
-                          }
-                          return (
-                            <FeaturedPhotoCard
-                              key={photo.id}
-                              photo={photo}
-                              thumb={thumbnails.get(photo.id)}
-                              isSelected={selectedId === photo.id}
-                              onSelect={selectPhoto}
-                              onOpenOriginal={(item) => void handleOpenOriginalFor(item)}
-                              requestThumbnail={requestThumbnail}
-                              cancelThumbnail={cancelThumbnail}
-                            />
-                          )
-                        })}
-                      </div>
-                    </section>
-
-                    {otherResultCount > 0 && (
-                      <section
-                        className="photos-other-results-section"
-                        data-testid="photos-other-results-section"
-                        aria-label="Other search results"
-                      >
-                        <div className="photos-other-results-bar">
-                          <div className="photos-other-results-copy">
-                            <h3>Other results</h3>
-                            <p>Remaining ranked matches, tucked away so top matches stay clear.</p>
-                          </div>
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm photos-toggle-other-btn"
-                            data-testid="photos-toggle-other-results-btn"
-                            aria-expanded={showOtherResults}
-                            onClick={() => setShowOtherResults((prev) => !prev)}
-                          >
-                            {showOtherResults
-                              ? 'Hide other results'
-                              : `Show other results (${otherResultCount.toLocaleString()})`}
-                          </button>
-                        </div>
-                      </section>
-                    )}
-                  </div>
-                )}
-
-                {renderGridCells && gridTotalCount > 0 && (
-                  <div
-                    className="photos-virtual-height-holder photos-virtual-container"
-                    style={{
-                      height: `${totalHeight}px`,
-                      position: 'relative',
-                      width: '100%'
-                    }}
-                  >
-                    {visibleIndices.map((index) => {
-                      const photo = getPhoto(index)
-                      const displayIndex = index - gridItemOffset
-                      const row = Math.floor(displayIndex / columns)
-                      const col = displayIndex % columns
-                      const top = row * rowHeight
-                      const left = col * (cellWidth + gap)
-
-                      if (!photo) {
-                        return (
-                          <div
-                            key={`placeholder-${index}`}
-                            className="photo-card photo-cell photo-skeleton"
-                            style={{
-                              position: 'absolute',
-                              top: `${top}px`,
-                              left: `${left}px`,
-                              width: `${cellWidth}px`,
-                              height: `${cellHeight}px`
-                            }}
-                          >
-                            <div className="photo-thumbnail-container">
-                              <div className="thumbnail-placeholder loading">
-                                <FileImage size={28} className="pulse" />
-                              </div>
-                            </div>
-                            <div className="photo-card-info">
-                              <span className="photo-filename">Loading…</span>
-                            </div>
-                          </div>
-                        )
-                      }
-
-                      const thumb = thumbnails.get(photo.id)
-                      const isSelected = selectedId === photo.id
-
+                    if (!photo) {
                       return (
-                        <PhotoCardCell
-                          key={photo.id}
-                          photo={photo}
-                          thumb={thumb}
-                          isSelected={isSelected}
-                          top={top}
-                          left={left}
-                          cellWidth={cellWidth}
-                          cellHeight={cellHeight}
-                          onSelect={selectPhoto}
-                          onKeyDown={handleKeyDown}
-                          requestThumbnail={requestThumbnail}
-                          cancelThumbnail={cancelThumbnail}
-                        />
+                        <div
+                          key={`placeholder-${index}`}
+                          className="photo-card photo-cell photo-skeleton"
+                          style={{
+                            position: 'absolute',
+                            top: `${top}px`,
+                            left: `${left}px`,
+                            width: `${cellWidth}px`,
+                            height: `${cellHeight}px`
+                          }}
+                        >
+                          <div className="photo-thumbnail-container">
+                            <div className="thumbnail-placeholder loading">
+                              <FileImage size={28} className="pulse" />
+                            </div>
+                          </div>
+                          <div className="photo-card-info">
+                            <span className="photo-filename">Loading…</span>
+                          </div>
+                        </div>
                       )
-                    })}
-                  </div>
-                )}
+                    }
+
+                    const thumb = thumbnails.get(photo.id)
+                    const isSelected = selectedId === photo.id
+
+                    return (
+                      <PhotoCardCell
+                        key={photo.id}
+                        photo={photo}
+                        thumb={thumb}
+                        isSelected={isSelected}
+                        top={top}
+                        left={left}
+                        cellWidth={cellWidth}
+                        cellHeight={cellHeight}
+                        onSelect={selectPhoto}
+                        onKeyDown={handleKeyDown}
+                        requestThumbnail={requestThumbnail}
+                        cancelThumbnail={cancelThumbnail}
+                      />
+                    )
+                  })}
+                </div>
               </div>
             )}
           </>

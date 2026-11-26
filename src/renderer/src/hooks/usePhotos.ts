@@ -1298,6 +1298,7 @@ export function usePhotos(): UsePhotosResult {
     setIsSearching(Boolean(searchQueryRef.current || filterOverridesRef.current))
     setError(null)
     setErrorDetails(null)
+    setFilterGeneration((prev) => prev + 1)
     await loadPage(0, nextGen)
   }, [loadPage, snapshotLastGoodView])
 
