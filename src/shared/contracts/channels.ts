@@ -159,7 +159,13 @@ export const IPC_CHANNELS = {
   BACKUP_GDRIVE_DISCONNECT: 'backup:gdrive-disconnect',
   BACKUP_GDRIVE_LIST_FOLDERS: 'backup:gdrive-list-folders',
   BACKUP_GDRIVE_CREATE_FOLDER: 'backup:gdrive-create-folder',
-  BACKUP_PROGRESS_EVENT: 'backup:progress-event'
+  BACKUP_PROGRESS_EVENT: 'backup:progress-event',
+  UPDATE_GET_STATE: 'update:get-state',
+  UPDATE_CHECK: 'update:check',
+  UPDATE_INSTALL_NOW: 'update:install-now',
+  UPDATE_DEFER: 'update:defer',
+  UPDATE_DISMISS_ERROR: 'update:dismiss-error',
+  UPDATE_STATE_EVENT: 'update:state-event'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]

@@ -11,6 +11,9 @@
     "build:unpack": "npm run build && electron-builder --dir",
     "build:installer": "npm run verify:vcredist && npm run build && electron-builder --win",
     "verify:windows-candidate": "node scripts/verify-windows-candidate.mjs",
+    "build:release": "node scripts/build-release.mjs",
+    "verify:release-bundle": "node scripts/verify-release-bundle.mjs",
+    "verify:updater": "node scripts/verify-updater-windows.mjs",
     "fetch:vcredist": "node scripts/fetch-vcredist-x64.mjs",
     "verify:vcredist": "node scripts/fetch-vcredist-x64.mjs --verify-only",
     "smoke:dev": "node scripts/smoke.mjs --mode=dev",
@@ -73,6 +76,7 @@
   "dependencies": {
     "@huggingface/tokenizers": "0.2.0",
     "@napi-rs/canvas": "1.1.1",
+    "electron-updater": "^6.8.11",
     "exifreader": "4.54.0",
     "fast-xml-parser": "^5.12.1",
     "fflate": "^0.8.3",

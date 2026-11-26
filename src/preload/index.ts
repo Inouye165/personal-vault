@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../shared/contracts/channels.js'
 import {
+  UpdateActionResponseSchema,
+  UpdateStateSchema,
+  type UpdateActionResponseDto,
+  type UpdateStateDto
+} from '../shared/validation/update-ipc-schemas.js'
+import {
   BackupConfigureDestinationRequestSchema,
   BackupDestinationRecordSchema,
   BackupGoogleDriveAuthStatusSchema,
@@ -2318,6 +2324,64 @@ const api: VaultApi = {
     ipcRenderer.on(IPC_CHANNELS.BACKUP_PROGRESS_EVENT, wrapped)
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.BACKUP_PROGRESS_EVENT, wrapped)
+    }
+  },
+
+  async getUpdateState(): Promise<UpdateStateDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UPDATE_GET_STATE)
+    const result = validatePayload(UpdateStateSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getUpdateState response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async checkForUpdates(): Promise<UpdateActionResponseDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UPDATE_CHECK)
+    const result = validatePayload(UpdateActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid checkForUpdates response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async installUpdateNow(): Promise<UpdateActionResponseDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UPDATE_INSTALL_NOW)
+    const result = validatePayload(UpdateActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid installUpdateNow response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async deferUpdate(): Promise<UpdateActionResponseDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UPDATE_DEFER)
+    const result = validatePayload(UpdateActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid deferUpdate response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async dismissUpdateError(): Promise<UpdateActionResponseDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.UPDATE_DISMISS_ERROR)
+    const result = validatePayload(UpdateActionResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid dismissUpdateError response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onUpdateState(listener: (state: UpdateStateDto) => void): () => void {
+    const wrapped = (_event: Electron.IpcRendererEvent, raw: unknown): void => {
+      const result = validatePayload(UpdateStateSchema, raw)
+      if (result.success) {
+        listener(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.UPDATE_STATE_EVENT, wrapped)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.UPDATE_STATE_EVENT, wrapped)
     }
   }
 }

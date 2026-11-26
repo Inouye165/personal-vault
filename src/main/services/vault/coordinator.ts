@@ -45,7 +45,9 @@ export class VaultImportCoordinator {
   private isStarting = false
   private isPaused = false
   private isShutdown = false
+  private updateInstallPending = false
   private completionPromise: Promise<CatalogVaultImportJobRecord> | null = null
+  private activeCompletionPromise: Promise<CatalogVaultImportJobRecord> | null = null
 
   constructor(options: VaultImportCoordinatorOptions) {
     this.catalog = options.catalog
@@ -55,6 +57,10 @@ export class VaultImportCoordinator {
 
   public setCaptureGuard(guard: BackupCaptureGuard | undefined): void {
     this.captureGuard = guard
+  }
+
+  public setUpdateInstallPending(pending: boolean): void {
+    this.updateInstallPending = pending
   }
 
   public async initialize(): Promise<void> {
@@ -74,6 +80,24 @@ export class VaultImportCoordinator {
     }
     const dbActive = this.catalog.getActiveVaultImportJob()
     return dbActive !== null && (dbActive.status === 'running' || dbActive.status === 'paused')
+  }
+
+  public isWriting(): boolean {
+    return this.isStarting || this.activeJob !== null || this.activeCompletionPromise !== null
+  }
+
+  public async waitForActiveWriteToFinish(): Promise<void> {
+    while (this.isWriting()) {
+      if (this.activeCompletionPromise) {
+        try {
+          await this.activeCompletionPromise
+        } catch {
+          // Completion or failure status is persisted in SQLite.
+        }
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
   }
 
   public getActiveImportJob(): CatalogVaultImportJobRecord | null {
@@ -111,6 +135,9 @@ export class VaultImportCoordinator {
   }
 
   public async startImport(options: StartImportOptions): Promise<CatalogVaultImportJobRecord> {
+    if (this.updateInstallPending) {
+      throw new Error('Cannot start vault import while an application update is installing')
+    }
     if (this.hasActiveJob()) {
       throw new Error('An import job is already active or starting')
     }
@@ -165,11 +192,19 @@ export class VaultImportCoordinator {
       this.isPaused = false
 
       // Spawn background import pipeline and return the job record promptly
-      this.completionPromise = this.runImportPipeline(
+      const pipelinePromise = this.runImportPipeline(
         jobRecord,
         activeVault.vaultPath,
         selectedItems
       )
+      this.completionPromise = pipelinePromise
+      this.activeCompletionPromise = pipelinePromise
+      const clearActiveCompletion = () => {
+        if (this.activeCompletionPromise === pipelinePromise) {
+          this.activeCompletionPromise = null
+        }
+      }
+      void pipelinePromise.then(clearActiveCompletion, clearActiveCompletion)
 
       return jobRecord
     } finally {
@@ -470,6 +505,9 @@ export class VaultImportCoordinator {
   }
 
   public async resumeImport(jobId?: string): Promise<CatalogVaultImportJobRecord> {
+    if (this.updateInstallPending) {
+      throw new Error('Cannot resume vault import while an application update is installing')
+    }
     if (this.hasActiveJob()) {
       throw new Error('An import job is already actively running or starting')
     }
@@ -511,12 +549,20 @@ export class VaultImportCoordinator {
       this.isPaused = false
       this.catalog.updateVaultImportStatus(job.id, 'running')
 
-      this.completionPromise = this.runImportPipeline(job, activeVault.vaultPath, itemDetails, {
+      const pipelinePromise = this.runImportPipeline(job, activeVault.vaultPath, itemDetails, {
         copiedFiles: job.copiedFiles,
         copiedBytes: job.copiedBytes,
         verifiedFiles: job.verifiedFiles,
         failedFiles: job.failedFiles
       })
+      this.completionPromise = pipelinePromise
+      this.activeCompletionPromise = pipelinePromise
+      const clearActiveCompletion = () => {
+        if (this.activeCompletionPromise === pipelinePromise) {
+          this.activeCompletionPromise = null
+        }
+      }
+      void pipelinePromise.then(clearActiveCompletion, clearActiveCompletion)
 
       return this.catalog.getVaultImportJob(job.id)!
     } finally {

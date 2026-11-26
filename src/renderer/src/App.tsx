@@ -7,8 +7,10 @@ import { PhotosPanel } from './components/PhotosPanel'
 import { ScanJobsPanel } from './components/ScanJobsPanel'
 import { Sidebar } from './components/Sidebar'
 import { UnifiedSearchPanel } from './components/UnifiedSearchPanel'
+import { UpdateBanner } from './components/UpdateBanner'
 import { VaultImportPanel } from './components/VaultImportPanel'
 import { BackupRestorePanel } from './components/BackupRestorePanel'
+import { useAppUpdater } from './hooks/useAppUpdater'
 import { useScanJobs } from './hooks/useScanJobs'
 import { useMediaQuery } from './hooks/useMediaQuery'
 import { useTheme } from './hooks/useTheme'
@@ -25,6 +27,7 @@ export function App() {
   const headerSearchInputRef = useRef<HTMLInputElement>(null)
   const { state, notifyTab, refreshStatus } = useVaultApi()
   const { theme, setTheme } = useTheme()
+  const updater = useAppUpdater()
   const scanJobs = useScanJobs()
   const isAllSurfaceActive =
     state.phase === 'ready' && state.vaultStatus.sourceCount > 0 && currentTab === 'all'
@@ -76,6 +79,8 @@ export function App() {
         currentTab={currentTab}
         onSelectTab={selectTab}
         appVersion={state.phase === 'ready' ? state.appInfo.version : undefined}
+        updateState={updater.updateState}
+        onCheckForUpdates={() => void updater.checkForUpdates()}
         isOpen={isMobileNavOpen}
         isMobileViewport={isMobileViewport}
         onClose={closeMobileNav}
@@ -104,6 +109,13 @@ export function App() {
           navToggleRef={mobileNavTriggerRef}
           theme={theme}
           onSelectTheme={setTheme}
+        />
+        <UpdateBanner
+          state={updater.updateState}
+          onInstallNow={() => void updater.installUpdateNow()}
+          onDefer={() => void updater.deferUpdate()}
+          onCheckForUpdates={() => void updater.checkForUpdates()}
+          onDismissError={() => void updater.dismissUpdateError()}
         />
         <div className="content-area">
           {state.phase === 'loading' && (
