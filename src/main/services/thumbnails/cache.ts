@@ -10,11 +10,9 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   statSync,
   lstatSync,
   unlinkSync,
-  utimesSync,
   writeFileSync,
   realpathSync,
   promises as fsPromises
@@ -60,6 +58,41 @@ export function readWebPDimensions(buffer: Buffer): { width: number; height: num
     return { width, height }
   }
   return null
+}
+
+export function hasValidWebPStructure(
+  buffer: Buffer,
+  maxBytes: number = THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES
+): { width: number; height: number } | null {
+  if (!buffer || buffer.length <= 30 || buffer.length > maxBytes) {
+    return null
+  }
+  const dims = readWebPDimensions(buffer)
+  if (
+    !dims ||
+    dims.width <= 0 ||
+    dims.height <= 0 ||
+    dims.width > THUMBNAIL_LIMITS.MAX_DIMENSION_PX ||
+    dims.height > THUMBNAIL_LIMITS.MAX_DIMENSION_PX
+  ) {
+    return null
+  }
+  const riffSize = buffer.readUInt32LE(4)
+  if (riffSize + 8 > buffer.length || riffSize + 9 < buffer.length) {
+    return null
+  }
+  const chunkHeader = buffer.toString('ascii', 12, 16)
+  if (chunkHeader === 'VP8 ') {
+    // VP8 keyframe requires valid 3-byte frame tag with non-zero first partition and 0x9d 0x01 0x2a start code
+    const frameTag = buffer[20]! | (buffer[21]! << 8) | (buffer[22]! << 16)
+    const isKeyframe = (frameTag & 1) === 0
+    const firstPartSize = frameTag >> 5
+    const hasStartCode = buffer[23] === 0x9d && buffer[24] === 0x01 && buffer[25] === 0x2a
+    if (!isKeyframe || firstPartSize <= 0 || !hasStartCode) {
+      return null
+    }
+  }
+  return dims
 }
 
 export async function validateWebPIntegrity(
@@ -228,7 +261,7 @@ export class ThumbnailDiskCache {
     buffer: Buffer
   ): Promise<{ width: number; height: number } | null> {
     if (this.customValidator === false) {
-      return readWebPDimensions(buffer)
+      return hasValidWebPStructure(buffer, this.maxThumbnailSizeBytes)
     }
     if (typeof this.customValidator === 'function') {
       try {
@@ -238,6 +271,20 @@ export class ThumbnailDiskCache {
       }
     }
     return validateWebPIntegrity(buffer, this.maxThumbnailSizeBytes)
+  }
+
+  public has(key: string): boolean {
+    try {
+      this.assertValidKey(key)
+      const filePath = join(this.cacheDir, `${key}.thumb`)
+      if (!existsSync(filePath)) return false
+      const st = lstatSync(filePath)
+      return (
+        !st.isSymbolicLink() && st.isFile() && st.size > 30 && st.size <= this.maxThumbnailSizeBytes
+      )
+    } catch {
+      return false
+    }
   }
 
   private assertSeparationAndContainment(): void {
@@ -276,57 +323,33 @@ export class ThumbnailDiskCache {
     this.assertSeparationAndContainment()
     const filePath = join(this.cacheDir, `${key}.thumb`)
 
-    if (!existsSync(filePath)) {
-      return null
-    }
-
     try {
-      const lstat = lstatSync(filePath)
+      const lstat = await fsPromises.lstat(filePath)
       if (lstat.isSymbolicLink() || !lstat.isFile()) {
-        try {
-          unlinkSync(filePath)
-        } catch {
-          // ignore
-        }
+        await fsPromises.unlink(filePath).catch(() => {})
         return null
       }
 
       if (lstat.size === 0 || lstat.size > this.maxThumbnailSizeBytes) {
-        try {
-          unlinkSync(filePath)
-        } catch {
-          // ignore
-        }
+        await fsPromises.unlink(filePath).catch(() => {})
         return null
       }
 
-      const buf = readFileSync(filePath)
+      const buf = await fsPromises.readFile(filePath)
       if (buf.length === 0 || buf.length > this.maxThumbnailSizeBytes) {
-        try {
-          unlinkSync(filePath)
-        } catch {
-          // ignore
-        }
+        await fsPromises.unlink(filePath).catch(() => {})
         return null
       }
 
       const dims = await this.validateIntegrity(buf)
       if (!dims) {
-        try {
-          unlinkSync(filePath)
-        } catch {
-          // ignore
-        }
+        await fsPromises.unlink(filePath).catch(() => {})
         return null
       }
 
-      // Update access time for LRU tracking
-      try {
-        const now = new Date()
-        utimesSync(filePath, now, now)
-      } catch {
-        // Non-fatal if touch fails
-      }
+      // Update access time for LRU tracking (non-blocking)
+      const now = new Date()
+      void fsPromises.utimes(filePath, now, now).catch(() => {})
 
       return buf
     } catch {

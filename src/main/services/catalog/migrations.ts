@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 21
+export const CURRENT_SCHEMA_VERSION = 22
 
 export interface Migration {
   readonly version: number
@@ -1856,6 +1856,31 @@ export const MIGRATIONS: readonly Migration[] = [
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_semantic_emb_file_loc
           ON photo_semantic_embeddings(file_location_id);
+      `)
+    }
+  },
+  {
+    version: 22,
+    name: 'photo_thumbnail_prep_state',
+    up: (db: DatabaseSync) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_thumbnail_state (
+          file_location_id INTEGER PRIMARY KEY REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL,
+          content_sha256 TEXT,
+          observed_byte_size INTEGER NOT NULL CHECK (observed_byte_size >= 0),
+          observed_mtime_ms REAL,
+          recipe_version TEXT NOT NULL,
+          cache_key TEXT,
+          status TEXT NOT NULL CHECK (status IN ('ready', 'unsupported', 'unavailable', 'failed')),
+          error_code TEXT,
+          error_message TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 0),
+          updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_photo_thumb_state_status
+          ON photo_thumbnail_state(status, recipe_version);
       `)
     }
   }

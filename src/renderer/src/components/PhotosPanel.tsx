@@ -179,8 +179,6 @@ interface PhotoCardCellProps {
   cellHeight: number
   onSelect: (id: number) => void
   onKeyDown: (e: KeyboardEvent<HTMLDivElement>, photo: PhotoItem) => void
-  requestThumbnail: (photo: PhotoItem, priority?: 'high' | 'normal' | 'low') => void
-  cancelThumbnail: (id: number) => void
 }
 
 function PhotoCardCell({
@@ -192,19 +190,14 @@ function PhotoCardCell({
   cellWidth,
   cellHeight,
   onSelect,
-  onKeyDown,
-  requestThumbnail,
-  cancelThumbnail
+  onKeyDown
 }: PhotoCardCellProps): ReactElement {
-  useEffect(() => {
-    requestThumbnail(photo, 'high')
-    return () => {
-      cancelThumbnail(photo.id)
-    }
-  }, [photo, requestThumbnail, cancelThumbnail])
-
   const ratingDesc = photo.rating ? `${photo.rating} stars` : 'unrated'
   const flagDesc = photo.flag && photo.flag !== 'none' ? photo.flag : 'no flag'
+  const offlineSuffix =
+    (thumb?.status === 'ready' && thumb.originalUnavailable) || thumb?.status === 'missing'
+      ? ', original unavailable'
+      : ''
 
   return (
     <div
@@ -219,28 +212,43 @@ function PhotoCardCell({
       }}
       role="button"
       tabIndex={0}
-      aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}, ${ratingDesc}, ${flagDesc}`}
+      aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}, ${ratingDesc}, ${flagDesc}${offlineSuffix}`}
       aria-pressed={isSelected}
       onClick={() => onSelect(photo.id)}
       onKeyDown={(e) => onKeyDown(e, photo)}
     >
       <div className="photo-thumbnail-container">
         {thumb?.status === 'ready' ? (
-          <img
-            src={thumb.dataUrl}
-            alt={photo.fileName}
-            className="photo-thumbnail-img"
-            loading="lazy"
-          />
+          <>
+            <img
+              src={thumb.dataUrl}
+              alt={photo.fileName}
+              className="photo-thumbnail-img"
+              loading="lazy"
+            />
+            {thumb.originalUnavailable && (
+              <span
+                className="thumbnail-status-badge"
+                title="Showing cached preview because the original file is unavailable"
+              >
+                Original unavailable
+              </span>
+            )}
+          </>
         ) : thumb?.status === 'unsupported' ? (
-          <div className="thumbnail-placeholder unsupported">
+          <div className="thumbnail-placeholder unsupported" title={thumb.reason}>
             <FileQuestion size={32} />
             <span className="placeholder-tag">Unsupported</span>
           </div>
-        ) : thumb?.status === 'error' ? (
-          <div className="thumbnail-placeholder error">
+        ) : thumb?.status === 'missing' ? (
+          <div className="thumbnail-placeholder unavailable" title={thumb.reason}>
             <AlertTriangle size={32} />
-            <span className="placeholder-tag">Unavailable</span>
+            <span className="placeholder-tag">Original unavailable</span>
+          </div>
+        ) : thumb?.status === 'error' ? (
+          <div className="thumbnail-placeholder error" title={thumb.message}>
+            <AlertTriangle size={32} />
+            <span className="placeholder-tag">Preview unavailable</span>
           </div>
         ) : (
           <div className="thumbnail-placeholder loading">
@@ -288,6 +296,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     selectedPhoto,
     selectedId,
     thumbnails,
+    thumbnailPrepProgress,
     ratingFilter,
     flagFilter,
     collectionId,
@@ -702,16 +711,26 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     restoreFocusTo: restorePhotoFocus
   })
 
-  const [scrollState, setScrollState] = useState<{ generation: number; top: number }>({
+  const [scrollState, setScrollState] = useState<{
+    generation: number
+    top: number
+    direction: 'down' | 'up'
+  }>({
     generation: 0,
-    top: 0
+    top: 0,
+    direction: 'down'
   })
   const scrollTop = scrollState.generation === filterGeneration ? scrollState.top : 0
+  const scrollDirection =
+    scrollState.generation === filterGeneration ? scrollState.direction : 'down'
+  const prevScrollTopRef = useRef<number>(0)
+  const activeThumbIdsRef = useRef<Set<number>>(new Set())
   const [containerHeight, setContainerHeight] = useState(600)
   const [containerWidth, setContainerWidth] = useState(800)
 
   // Reset scroll viewport DOM position whenever filters change or reset so result pages never mix
   useEffect(() => {
+    prevScrollTopRef.current = 0
     if (filterGeneration > 0 && containerRef.current) {
       containerRef.current.scrollTop = 0
     }
@@ -744,7 +763,12 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget
-    setScrollState({ generation: filterGeneration, top: target.scrollTop })
+    const nextTop = target.scrollTop
+    const prevTop = prevScrollTopRef.current
+    const direction: 'down' | 'up' =
+      nextTop > prevTop ? 'down' : nextTop < prevTop ? 'up' : scrollDirection
+    prevScrollTopRef.current = nextTop
+    setScrollState({ generation: filterGeneration, top: nextTop, direction })
   }
 
   // Responsive virtualization calculations filling available content width
@@ -758,11 +782,18 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const rowHeight = cellHeight + gap
   const totalHeight = Math.max(0, totalRows * rowHeight - gap)
 
-  // Visible window range calculation (bounded to max 200 cells)
-  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 1)
-  const visibleRowCount = Math.ceil(containerHeight / rowHeight) + 2
-  const endRow = Math.min(totalRows, startRow + visibleRowCount)
+  // Strictly visible viewport rows + bounded scroll-direction prefetch rows (capped to MAX_MOUNTED_CELLS)
+  const PREFETCH_ROWS_AHEAD = 3
+  const PREFETCH_ROWS_BEHIND = 1
+  const viewportStartRow = Math.max(0, Math.floor(scrollTop / rowHeight))
+  const viewportEndRow = Math.min(totalRows, Math.ceil((scrollTop + containerHeight) / rowHeight))
+  const rowsAbove = scrollDirection === 'up' ? PREFETCH_ROWS_AHEAD : PREFETCH_ROWS_BEHIND
+  const rowsBelow = scrollDirection === 'down' ? PREFETCH_ROWS_AHEAD : PREFETCH_ROWS_BEHIND
+  const startRow = Math.max(0, viewportStartRow - rowsAbove)
+  const endRow = Math.min(totalRows, viewportEndRow + rowsBelow)
 
+  const viewportStartIndex = Math.min(totalCount, viewportStartRow * columns)
+  const viewportEndIndex = Math.min(totalCount, viewportEndRow * columns)
   const startIndex = startRow * columns
   const rawEndIndex = endRow * columns
   const endIndex = Math.min(
@@ -770,12 +801,97 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     Math.min(rawEndIndex, startIndex + PHOTO_BOUNDS.MAX_MOUNTED_CELLS)
   )
 
-  // Trigger loading of required page range
+  // Trigger loading of required page range (covers both visible rows and scroll-direction prefetch rows)
   useEffect(() => {
     if (totalCount > 0 && endIndex > startIndex) {
       ensureRangeLoaded(startIndex, endIndex)
     }
   }, [totalCount, startIndex, endIndex, ensureRangeLoaded])
+
+  // Schedule visible tiles at high priority first, then bounded prefetch rows in the scroll direction at normal priority
+  useEffect(() => {
+    if (viewMode !== 'grid' || totalCount === 0 || endIndex <= startIndex) {
+      for (const id of activeThumbIdsRef.current) {
+        cancelThumbnail(id, { queuedOnly: true })
+      }
+      activeThumbIdsRef.current = new Set()
+      return
+    }
+
+    const desiredIds = new Set<number>()
+    const visibleStart = Math.max(startIndex, viewportStartIndex)
+    const visibleEnd = Math.min(endIndex, viewportEndIndex)
+
+    // 1. Visible viewport tiles first (high priority)
+    for (let i = visibleStart; i < visibleEnd; i++) {
+      const photo = getPhoto(i)
+      if (photo) {
+        desiredIds.add(photo.id)
+        requestThumbnail(photo, 'high')
+      }
+    }
+
+    // 2. Scroll-direction prefetch rows (normal priority)
+    if (scrollDirection === 'up') {
+      for (let i = visibleStart - 1; i >= startIndex; i--) {
+        const photo = getPhoto(i)
+        if (photo && !desiredIds.has(photo.id)) {
+          desiredIds.add(photo.id)
+          requestThumbnail(photo, 'normal')
+        }
+      }
+      for (let i = visibleEnd; i < endIndex; i++) {
+        const photo = getPhoto(i)
+        if (photo && !desiredIds.has(photo.id)) {
+          desiredIds.add(photo.id)
+          requestThumbnail(photo, 'normal')
+        }
+      }
+    } else {
+      for (let i = visibleEnd; i < endIndex; i++) {
+        const photo = getPhoto(i)
+        if (photo && !desiredIds.has(photo.id)) {
+          desiredIds.add(photo.id)
+          requestThumbnail(photo, 'normal')
+        }
+      }
+      for (let i = visibleStart - 1; i >= startIndex; i--) {
+        const photo = getPhoto(i)
+        if (photo && !desiredIds.has(photo.id)) {
+          desiredIds.add(photo.id)
+          requestThumbnail(photo, 'normal')
+        }
+      }
+    }
+
+    // 3. Cancel only queued UI requests that scrolled out of the visible + prefetch window
+    for (const prevId of activeThumbIdsRef.current) {
+      if (!desiredIds.has(prevId)) {
+        cancelThumbnail(prevId, { queuedOnly: true })
+      }
+    }
+    activeThumbIdsRef.current = desiredIds
+  }, [
+    viewMode,
+    totalCount,
+    startIndex,
+    endIndex,
+    viewportStartIndex,
+    viewportEndIndex,
+    scrollDirection,
+    getPhoto,
+    requestThumbnail,
+    cancelThumbnail
+  ])
+
+  useEffect(() => {
+    return () => {
+      for (const id of activeThumbIdsRef.current) {
+        cancelThumbnail(id, { queuedOnly: true })
+      }
+      activeThumbIdsRef.current = new Set()
+    }
+  }, [cancelThumbnail])
 
   // Build cell indices array for mounted range
   const visibleIndices: number[] = []
@@ -856,6 +972,22 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
               <span className="count-badge">
                 {totalCount.toLocaleString()} {totalCount === 1 ? 'photo' : 'photos'}
               </span>
+              {thumbnailPrepProgress?.status === 'running' &&
+                thumbnailPrepProgress.pendingPhotos > 0 &&
+                totalCount > 0 && (
+                  <span
+                    className="photos-prep-status"
+                    data-testid="photos-prep-status"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    Preparing photo previews (
+                    {(
+                      thumbnailPrepProgress.totalPhotos - thumbnailPrepProgress.pendingPhotos
+                    ).toLocaleString()}{' '}
+                    of {thumbnailPrepProgress.totalPhotos.toLocaleString()})
+                  </span>
+                )}
             </div>
 
             <div className="photos-toolbar-actions">
@@ -1252,8 +1384,6 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                         cellHeight={cellHeight}
                         onSelect={selectPhoto}
                         onKeyDown={handleKeyDown}
-                        requestThumbnail={requestThumbnail}
-                        cancelThumbnail={cancelThumbnail}
                       />
                     )
                   })}
@@ -1313,6 +1443,14 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                       />
                     )
                   }
+                  if (selectedThumb?.status === 'missing') {
+                    return (
+                      <div className="details-preview-placeholder unavailable">
+                        <AlertTriangle size={36} />
+                        <span>Original unavailable</span>
+                      </div>
+                    )
+                  }
                   return (
                     <div className="details-preview-placeholder">
                       <ImageIcon size={48} />
@@ -1320,6 +1458,13 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                   )
                 })()}
               </div>
+              {thumbnails.get(selectedPhoto.id)?.status === 'ready' &&
+                (thumbnails.get(selectedPhoto.id) as Extract<ThumbnailResult, { status: 'ready' }>)
+                  .originalUnavailable && (
+                  <p className="sub-text details-preview-unavailable-note" role="status">
+                    Original unavailable — showing cached preview
+                  </p>
+                )}
               <div className="details-preview-actions">
                 <button
                   ref={originalOpenBtnRef}

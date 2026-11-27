@@ -1093,3 +1093,45 @@ export interface SemanticSearchCatalogResult {
   readonly hasMore: boolean
   readonly queryLatencyMs: number
 }
+
+export type PhotoThumbnailPrepStatus = 'ready' | 'unsupported' | 'unavailable' | 'failed'
+
+export interface PhotoThumbnailPrepSummary {
+  readonly totalPhotos: number
+  readonly preparedPhotos: number
+  readonly unsupportedPhotos: number
+  readonly unavailablePhotos: number
+  readonly failedPhotos: number
+  readonly pendingPhotos: number
+}
+
+export interface PhotoThumbnailPrepCandidate {
+  readonly fileLocationId: number
+  readonly sourceId: number
+  readonly sourceRootPath: string
+  readonly sourceKind: 'user' | 'recovery_manifest'
+  readonly originalPath: string
+  readonly discoveryObservationId: number
+  readonly byteSize: number
+  readonly filesystemMtimeMs: number | null
+  readonly activeHash: string | null
+}
+
+export interface PhotoThumbnailReadyStateRow {
+  readonly fileLocationId: number
+  readonly cacheKey: string | null
+}
+
+export interface UpsertPhotoThumbnailStateInput {
+  readonly fileLocationId: number
+  readonly discoveryObservationId: number
+  readonly contentSha256: string | null
+  readonly observedByteSize: number
+  readonly observedMtimeMs: number | null
+  readonly recipeVersion: string
+  readonly cacheKey: string | null
+  readonly status: PhotoThumbnailPrepStatus
+  readonly errorCode?: string | null
+  readonly errorMessage?: string | null
+  readonly updatedAtMs?: number
+}

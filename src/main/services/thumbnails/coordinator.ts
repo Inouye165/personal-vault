@@ -7,16 +7,18 @@
  * file preservation.
  */
 
-import { realpathSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { lstatSync, promises as fsPromises, realpathSync, statSync } from 'node:fs'
+import { dirname, parse, relative, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks'
-import { ThumbnailDiskCache, readWebPDimensions } from './cache'
+import { hasValidWebPStructure, ThumbnailDiskCache, readWebPDimensions } from './cache'
 import { resolveMainWorkerScriptPath } from '../worker-path'
 import { AppWorkerBudget } from '../worker-budget'
 import {
   THUMBNAIL_LIMITS,
+  type CancelThumbnailOptions,
   type ThumbnailCoordinatorOptions,
+  type ThumbnailPrepareResult,
   type ThumbnailRequestParams,
   type ThumbnailDiagnostics,
   type FingerprintJobResult,
@@ -40,8 +42,32 @@ interface NormalizedThumbnailRequestParams {
   readonly expectedMtimeMs: number | null
   readonly expectedSha256: string | null
   readonly priority?: 'high' | 'normal' | 'low'
+  readonly consumerType: 'ui' | 'background'
   readonly approvedRootsOverride?: readonly string[]
   readonly verifySourceBeforeCacheHit?: boolean
+}
+
+interface ThumbnailWaiter {
+  readonly waiterId: number
+  readonly locationId: number
+  readonly consumerType: 'ui' | 'background'
+  readonly priorityOrder: number
+  readonly resolve: (res: ThumbnailResult) => void
+}
+
+interface PreFlightToken {
+  readonly waiterId: number
+  readonly locationId: number
+  readonly consumerType: 'ui' | 'background'
+  cancelled: boolean
+}
+
+interface CoalescedThumbnailJob {
+  readonly coalesceKey: string
+  readonly cacheKey: string
+  readonly item: QueuedThumbnailItem
+  waiters: ThumbnailWaiter[]
+  settled: boolean
 }
 
 interface QueuedThumbnailItem {
@@ -50,6 +76,7 @@ interface QueuedThumbnailItem {
   params: NormalizedThumbnailRequestParams
   cacheKey: string
   cachedBuf?: Buffer
+  coalescedJob?: CoalescedThumbnailJob
   resolve: (res: ThumbnailResult) => void
   reject: (err: unknown) => void
   priorityOrder: number
@@ -179,9 +206,25 @@ function normalizeRequestParams(params: ThumbnailRequestParams): NormalizedThumb
     expectedMtimeMs: params.expectedMtimeMs ?? null,
     expectedSha256: params.expectedSha256 ?? null,
     priority: params.priority,
+    consumerType: params.consumerType ?? 'ui',
     approvedRootsOverride: params.approvedRootsOverride,
     verifySourceBeforeCacheHit: params.verifySourceBeforeCacheHit
   }
+}
+
+function isPathInsideRoot(candidatePath: string, rootPath: string): boolean {
+  const normCandidate = process.platform === 'win32' ? candidatePath.toLowerCase() : candidatePath
+  const normRoot = process.platform === 'win32' ? rootPath.toLowerCase() : rootPath
+  return (
+    normCandidate === normRoot ||
+    normCandidate.startsWith(normRoot + '\\') ||
+    normCandidate.startsWith(normRoot + '/')
+  )
+}
+
+function isUnavailableErrno(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ENXIO'
 }
 
 export class ThumbnailCoordinator {
@@ -201,9 +244,11 @@ export class ThumbnailCoordinator {
   private workers: ActiveWorkerEntry[] = []
   private queue: QueuedItem[] = []
   private nextJobId = 1
+  private nextWaiterId = 1
   private isShuttingDown = false
-  private inProgressLocationIds = new Set<number>()
-  private cancelledLocationIds = new Set<number>()
+  private preFlightTokens = new Map<number, Set<PreFlightToken>>()
+  private coalescedThumbnailJobs = new Map<string, CoalescedThumbnailJob>()
+  private cachedCanonicalRoots: { key: string; roots: string[] } | null = null
 
   // Diagnostics counters
   private totalDecodes = 0
@@ -258,6 +303,10 @@ export class ThumbnailCoordinator {
 
   public getLiveWorkerCount(): number {
     return this.workers.length
+  }
+
+  public getQueuedJobCount(): number {
+    return this.queue.length
   }
 
   public async releaseOneIdleWorker(): Promise<boolean> {
@@ -339,55 +388,189 @@ export class ThumbnailCoordinator {
     }
   }
 
-  public cancelRequest(locationId: number): boolean {
-    // 1. Check queued thumbnail jobs only (never cancel background fingerprint or semantic indexing tasks when a thumbnail cell scrolls out of view)
-    const qIndex = this.queue.findIndex(
-      (q) =>
-        (q.action === 'decode' || q.action === 'validate_cache') &&
-        q.params.locationId === locationId
-    )
-    if (qIndex !== -1) {
-      const item = this.queue.splice(qIndex, 1)[0]
-      if (item) {
-        this.resolveCancelledItem(item, locationId)
-        return true
+  private getCanonicalApprovedRoots(roots: readonly string[]): string[] {
+    const key = roots.join('\0')
+    if (this.cachedCanonicalRoots && this.cachedCanonicalRoots.key === key) {
+      return this.cachedCanonicalRoots.roots
+    }
+    const resolvedRoots: string[] = []
+    let allResolved = true
+    for (const root of roots) {
+      try {
+        resolvedRoots.push(realpathSync(root))
+      } catch {
+        allResolved = false
+      }
+    }
+    if (allResolved) {
+      this.cachedCanonicalRoots = { key, roots: resolvedRoots }
+    }
+    return resolvedRoots
+  }
+
+  private isOfflinePathSafelyContained(sourcePath: string, roots: readonly string[]): boolean {
+    if (roots.length === 0) return true
+    const resolvedSource = resolve(sourcePath)
+    const matchingRoot = roots.find((r) => isPathInsideRoot(resolvedSource, resolve(r)))
+    if (!matchingRoot) return false
+
+    // Check any existing ancestor segments from the root down (or above an unplugged root) for symlink escapes.
+    const parsed = parse(resolvedSource)
+    const rel = relative(parsed.root, resolvedSource)
+    let cur = parsed.root
+    if (rel) {
+      for (const seg of rel.split(/[/\\]+/)) {
+        if (!seg) continue
+        cur = resolve(cur, seg)
+        try {
+          const st = lstatSync(cur)
+          if (st.isSymbolicLink()) {
+            return false
+          }
+        } catch (err) {
+          if (isUnavailableErrno(err)) {
+            break
+          }
+          return false
+        }
       }
     }
 
-    // 2. Check active worker thumbnail jobs only
-    const entry = this.workers.find(
-      (w) =>
-        w.locationId === locationId &&
-        !w.isTerminating &&
-        (w.item?.action === 'decode' || w.item?.action === 'validate_cache')
-    )
-    if (entry && entry.item) {
-      entry.isTerminating = true
-      if (entry.timeoutTimer) {
-        clearTimeout(entry.timeoutTimer)
-        entry.timeoutTimer = null
+    // If the matching root itself exists on disk, ensure the deepest existing ancestor resolves inside canonical root.
+    try {
+      const canonicalRoot = realpathSync(matchingRoot)
+      let probe = dirname(resolvedSource)
+      while (probe && probe !== parse(probe).root) {
+        try {
+          const canonicalProbe = realpathSync(probe)
+          return isPathInsideRoot(canonicalProbe, canonicalRoot)
+        } catch (err) {
+          if (!isUnavailableErrno(err)) return false
+          const parent = dirname(probe)
+          if (parent === probe) break
+          probe = parent
+        }
       }
-      const item = entry.item
-      entry.item = null
-      entry.jobId = null
-      entry.locationId = null
-
-      void entry.worker.terminate().finally(() => {
-        this.removeWorker(entry)
-        this.processNext()
-      })
-
-      this.resolveCancelledItem(item, locationId)
-      return true
+    } catch {
+      // Matching root itself is unplugged/offline; lexical + existing-ancestor symlink check passed.
     }
 
-    // 3. Check in-progress request pre-flight
-    if (this.inProgressLocationIds.has(locationId)) {
-      this.cancelledLocationIds.add(locationId)
-      return true
+    return true
+  }
+
+  private reprioritizeQueueItem(item: QueuedItem): void {
+    const idx = this.queue.indexOf(item)
+    if (idx === -1) return
+    this.queue.splice(idx, 1)
+    const insertIndex = this.queue.findIndex((q) => q.priorityOrder > item.priorityOrder)
+    if (insertIndex === -1) {
+      this.queue.push(item)
+    } else {
+      this.queue.splice(insertIndex, 0, item)
+    }
+  }
+
+  private settleCoalescedThumbnailJob(job: CoalescedThumbnailJob, result: ThumbnailResult): void {
+    if (job.settled) return
+    job.settled = true
+    this.coalescedThumbnailJobs.delete(job.coalesceKey)
+    const waiters = job.waiters
+    job.waiters = []
+    for (const waiter of waiters) {
+      waiter.resolve({ ...result, locationId: waiter.locationId })
+    }
+  }
+
+  public cancelRequest(locationId: number, options?: CancelThumbnailOptions): boolean {
+    const targetConsumerType = options?.consumerType
+    const queuedOnly = options?.queuedOnly === true
+    let cancelled = false
+
+    // 1. Check in-flight pre-flight tokens for this locationId
+    const preFlights = this.preFlightTokens.get(locationId)
+    if (preFlights) {
+      for (const token of preFlights) {
+        if (!targetConsumerType || token.consumerType === targetConsumerType) {
+          token.cancelled = true
+          cancelled = true
+        }
+      }
     }
 
-    return false
+    // 2. Check coalesced thumbnail jobs (queued or active)
+    for (const job of Array.from(this.coalescedThumbnailJobs.values())) {
+      const removedWaiters: ThumbnailWaiter[] = []
+      const remainingWaiters: ThumbnailWaiter[] = []
+      for (const w of job.waiters) {
+        if (
+          w.locationId === locationId &&
+          (!targetConsumerType || w.consumerType === targetConsumerType)
+        ) {
+          removedWaiters.push(w)
+        } else {
+          remainingWaiters.push(w)
+        }
+      }
+      if (removedWaiters.length === 0) continue
+
+      cancelled = true
+      job.waiters = remainingWaiters
+      for (const w of removedWaiters) {
+        w.resolve({
+          status: 'error',
+          locationId: w.locationId,
+          code: 'CANCELLED',
+          message: 'Thumbnail request was cancelled'
+        })
+      }
+
+      if (remainingWaiters.length > 0) {
+        // Another visible tile or background pass still needs this thumbnail: downgrade priority if needed, never cancel!
+        job.item.priorityOrder = Math.min(...remainingWaiters.map((w) => w.priorityOrder))
+        this.reprioritizeQueueItem(job.item)
+        continue
+      }
+
+      // No remaining waiters: remove from queue if still queued
+      const qIndex = this.queue.indexOf(job.item)
+      if (qIndex !== -1) {
+        this.queue.splice(qIndex, 1)
+        job.settled = true
+        this.coalescedThumbnailJobs.delete(job.coalesceKey)
+        continue
+      }
+
+      // Active in a worker: for scroll-away queuedOnly cancellation, let the worker finish and populate disk cache
+      if (queuedOnly) {
+        continue
+      }
+
+      const entry = this.workers.find(
+        (w) =>
+          !w.isTerminating &&
+          w.item === job.item &&
+          (w.item?.action === 'decode' || w.item?.action === 'validate_cache')
+      )
+      if (entry && entry.item) {
+        entry.isTerminating = true
+        if (entry.timeoutTimer) {
+          clearTimeout(entry.timeoutTimer)
+          entry.timeoutTimer = null
+        }
+        entry.item = null
+        entry.jobId = null
+        entry.locationId = null
+        job.settled = true
+        this.coalescedThumbnailJobs.delete(job.coalesceKey)
+
+        void entry.worker.terminate().finally(() => {
+          this.removeWorker(entry)
+          this.processNext()
+        })
+      }
+    }
+
+    return cancelled
   }
 
   public async cancelSemanticRequests(): Promise<void> {
@@ -519,62 +702,6 @@ export class ThumbnailCoordinator {
     )
   }
 
-  private resolveCancelledItem(item: QueuedItem, locationId: number): void {
-    if (item.action === 'decode' || item.action === 'validate_cache') {
-      item.resolve({
-        status: 'error',
-        locationId,
-        code: 'CANCELLED',
-        message: 'Thumbnail request was cancelled'
-      })
-    } else if (item.action === 'fingerprint') {
-      item.resolve({
-        status: 'error',
-        locationId,
-        code: 'CANCELLED',
-        message: 'Fingerprint request was cancelled'
-      })
-    } else if (item.action === 'semantic_embed') {
-      item.resolve({
-        status: 'error',
-        locationId,
-        code: 'CANCELLED',
-        message: 'Semantic embedding request was cancelled'
-      })
-    } else if (item.action === 'verify_source') {
-      item.resolve({
-        ok: false,
-        category: 'error',
-        errorCode: 'CANCELLED',
-        errorMessage: 'Source verification cancelled'
-      })
-    } else if (item.action === 'decode_original') {
-      item.resolve({
-        status: 'error',
-        locationId,
-        reason: 'Original photo request was cancelled'
-      })
-    } else if (item.action === 'verify_model') {
-      item.resolve({
-        ok: false,
-        error: 'Model verification cancelled'
-      })
-    } else if (item.action === 'extract_metadata') {
-      item.resolve({
-        status: 'error',
-        locationId,
-        code: 'CANCELLED',
-        message: 'Metadata extraction request was cancelled'
-      })
-    } else if (item.action === 'verify_metadata_source') {
-      item.resolve({
-        ok: false,
-        errorCode: 'CANCELLED',
-        errorMessage: 'Metadata source verification cancelled'
-      })
-    }
-  }
-
   public async requestThumbnail(rawParams: ThumbnailRequestParams): Promise<ThumbnailResult> {
     const params = normalizeRequestParams(rawParams)
     if (this.isShuttingDown) {
@@ -586,13 +713,108 @@ export class ThumbnailCoordinator {
       }
     }
 
-    this.inProgressLocationIds.add(params.locationId)
-    try {
-      return await this.executeRequestThumbnail(params)
-    } finally {
-      this.inProgressLocationIds.delete(params.locationId)
-      this.cancelledLocationIds.delete(params.locationId)
+    const token: PreFlightToken = {
+      waiterId: this.nextWaiterId++,
+      locationId: params.locationId,
+      consumerType: params.consumerType,
+      cancelled: false
     }
+    let set = this.preFlightTokens.get(params.locationId)
+    if (!set) {
+      set = new Set()
+      this.preFlightTokens.set(params.locationId, set)
+    }
+    set.add(token)
+
+    try {
+      return await this.executeRequestThumbnail(params, token)
+    } finally {
+      set.delete(token)
+      if (set.size === 0) {
+        this.preFlightTokens.delete(params.locationId)
+      }
+    }
+  }
+
+  public async prepareThumbnailIfNeeded(
+    rawParams: ThumbnailRequestParams
+  ): Promise<ThumbnailPrepareResult> {
+    const params = normalizeRequestParams({
+      ...rawParams,
+      priority: 'low',
+      consumerType: 'background'
+    })
+    if (this.isShuttingDown) {
+      return {
+        status: 'deferred',
+        code: 'SHUTTING_DOWN',
+        message: 'Thumbnail service is shutting down'
+      }
+    }
+
+    const cacheKey = this.cache.computeCacheKey({
+      locationId: params.locationId,
+      sourcePath: params.sourcePath,
+      sha256: params.expectedSha256,
+      byteSize: params.expectedByteSize,
+      mtimeMs: params.expectedMtimeMs
+    })
+
+    // Fast path: if source is online & unchanged and cache already holds a valid .thumb file, reuse without decoding!
+    if (!params.verifySourceBeforeCacheHit && process.env.PV_TEST_STUCK_VALIDATION !== '1') {
+      try {
+        const st = await fsPromises.lstat(params.sourcePath)
+        if (
+          !st.isSymbolicLink() &&
+          st.isFile() &&
+          st.size <= this.maxSourceSizeBytes &&
+          st.size === params.expectedByteSize &&
+          (params.expectedMtimeMs === null ||
+            Math.abs(st.mtimeMs - params.expectedMtimeMs) <= 1.0) &&
+          this.cache.has(cacheKey)
+        ) {
+          const cached = await this.cache.get(cacheKey)
+          if (cached && hasValidWebPStructure(cached, THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES)) {
+            return { status: 'ready', fromCache: true, cacheKey }
+          }
+        }
+      } catch {
+        // Fall through to full requestThumbnail for accurate error/unavailable classification
+      }
+    }
+
+    const res = await this.requestThumbnail(params)
+    if (res.status === 'ready') {
+      if (res.originalUnavailable) {
+        return {
+          status: 'unavailable',
+          code: 'FILE_UNAVAILABLE',
+          message: 'Original file is unavailable'
+        }
+      }
+      return { status: 'ready', fromCache: false, cacheKey }
+    }
+    if (res.status === 'unsupported') {
+      return { status: 'unsupported', reason: res.reason }
+    }
+    if (res.status === 'missing') {
+      return { status: 'unavailable', code: 'FILE_UNAVAILABLE', message: res.reason }
+    }
+    if (
+      res.code === 'QUEUE_FULL' ||
+      res.code === 'CANCELLED' ||
+      res.code === 'SHUTTING_DOWN' ||
+      res.code === 'ABORTED'
+    ) {
+      return { status: 'deferred', code: res.code, message: res.message }
+    }
+    if (
+      res.code === 'ACCESS_DENIED' ||
+      (res.code === 'READ_FAILED' && /ENOENT|no such file|unavailable/i.test(res.message))
+    ) {
+      return { status: 'unavailable', code: res.code, message: res.message }
+    }
+    return { status: 'failed', code: res.code, message: res.message }
   }
 
   public async computePerceptualHash(params: {
@@ -972,9 +1194,10 @@ export class ThumbnailCoordinator {
   }
 
   private async executeRequestThumbnail(
-    params: NormalizedThumbnailRequestParams
+    params: NormalizedThumbnailRequestParams,
+    preFlightToken: PreFlightToken
   ): Promise<ThumbnailResult> {
-    if (this.cancelledLocationIds.has(params.locationId)) {
+    if (preFlightToken.cancelled) {
       return {
         status: 'error',
         locationId: params.locationId,
@@ -983,82 +1206,151 @@ export class ThumbnailCoordinator {
       }
     }
 
-    // 1. Validate root containment if approved roots are configured
-    const roots = this.getApprovedRoots()
-    if (roots.length > 0) {
-      try {
-        const canonicalSource = realpathSync(params.sourcePath)
-        const isApproved = roots.some((root) => {
-          try {
-            const canonicalRoot = realpathSync(root)
-            return (
-              canonicalSource === canonicalRoot ||
-              canonicalSource.startsWith(canonicalRoot + '\\') ||
-              canonicalSource.startsWith(canonicalRoot + '/')
-            )
-          } catch {
-            return false
+    const roots = this.resolveEffectiveRoots(params.approvedRootsOverride)
+    let sourceOffline = false
+
+    // 1. Validate root containment and live source stability
+    if (params.verifySourceBeforeCacheHit) {
+      if (roots.length > 0) {
+        try {
+          const canonicalSource = await fsPromises.realpath(params.sourcePath)
+          const canonicalRoots = this.getCanonicalApprovedRoots(roots)
+          const isApproved = canonicalRoots.some((canonicalRoot) =>
+            isPathInsideRoot(canonicalSource, canonicalRoot)
+          )
+          if (!isApproved) {
+            return {
+              status: 'error',
+              locationId: params.locationId,
+              code: 'ACCESS_DENIED',
+              message: `Source path is outside approved roots: ${params.sourcePath}`
+            }
           }
-        })
-        if (!isApproved) {
+        } catch {
           return {
             status: 'error',
             locationId: params.locationId,
             code: 'ACCESS_DENIED',
-            message: `Source path is outside approved roots: ${params.sourcePath}`
+            message: `Source path cannot be verified: ${params.sourcePath}`
+          }
+        }
+      }
+
+      try {
+        const st = await fsPromises.stat(params.sourcePath)
+        if (st.size > this.maxSourceSizeBytes) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'OVERSIZED_SOURCE',
+            message: `Source file size (${st.size} bytes) exceeds limit (${this.maxSourceSizeBytes} bytes)`
+          }
+        }
+        if (params.expectedByteSize !== undefined && st.size !== params.expectedByteSize) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'SOURCE_MODIFIED',
+            message: `Source file size changed out-of-band: expected ${params.expectedByteSize}, found ${st.size}`
+          }
+        }
+        if (
+          params.expectedMtimeMs !== null &&
+          params.expectedMtimeMs !== undefined &&
+          Math.abs(st.mtimeMs - params.expectedMtimeMs) > 1.0
+        ) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'SOURCE_MODIFIED',
+            message: 'Source file modification time changed out-of-band'
           }
         }
       } catch {
         return {
           status: 'error',
           locationId: params.locationId,
-          code: 'ACCESS_DENIED',
-          message: `Source path cannot be verified: ${params.sourcePath}`
+          code: 'SOURCE_MODIFIED',
+          message: 'Source file is inaccessible or changed'
+        }
+      }
+    } else {
+      try {
+        const lst = await fsPromises.lstat(params.sourcePath)
+        if (lst.isSymbolicLink() || !lst.isFile()) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'NOT_A_REGULAR_FILE',
+            message: 'Source is not a regular file or is a symbolic link'
+          }
+        }
+        if (roots.length > 0) {
+          const canonicalSource = await fsPromises.realpath(params.sourcePath)
+          const canonicalRoots = this.getCanonicalApprovedRoots(roots)
+          const isApproved = canonicalRoots.some((canonicalRoot) =>
+            isPathInsideRoot(canonicalSource, canonicalRoot)
+          )
+          if (!isApproved) {
+            return {
+              status: 'error',
+              locationId: params.locationId,
+              code: 'ACCESS_DENIED',
+              message: `Source path is outside approved roots: ${params.sourcePath}`
+            }
+          }
+        }
+        if (lst.size > this.maxSourceSizeBytes) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'OVERSIZED_SOURCE',
+            message: `Source file size (${lst.size} bytes) exceeds limit (${this.maxSourceSizeBytes} bytes)`
+          }
+        }
+        if (params.expectedByteSize !== undefined && lst.size !== params.expectedByteSize) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'SOURCE_MODIFIED',
+            message: `Source file size changed out-of-band: expected ${params.expectedByteSize}, found ${lst.size}`
+          }
+        }
+        if (
+          params.expectedMtimeMs !== null &&
+          params.expectedMtimeMs !== undefined &&
+          Math.abs(lst.mtimeMs - params.expectedMtimeMs) > 1.0
+        ) {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'SOURCE_MODIFIED',
+            message: 'Source file modification time changed out-of-band'
+          }
+        }
+      } catch (err) {
+        if (isUnavailableErrno(err)) {
+          if (!this.isOfflinePathSafelyContained(params.sourcePath, roots)) {
+            return {
+              status: 'error',
+              locationId: params.locationId,
+              code: 'ACCESS_DENIED',
+              message: `Source path is outside approved roots: ${params.sourcePath}`
+            }
+          }
+          sourceOffline = true
+        } else {
+          return {
+            status: 'error',
+            locationId: params.locationId,
+            code: 'READ_FAILED',
+            message: err instanceof Error ? err.message : 'Source file is inaccessible'
+          }
         }
       }
     }
 
-    // 2. Check live source stability against expected revision
-    try {
-      const st = statSync(params.sourcePath)
-      if (st.size > this.maxSourceSizeBytes) {
-        return {
-          status: 'error',
-          locationId: params.locationId,
-          code: 'OVERSIZED_SOURCE',
-          message: `Source file size (${st.size} bytes) exceeds limit (${this.maxSourceSizeBytes} bytes)`
-        }
-      }
-      if (params.expectedByteSize !== undefined && st.size !== params.expectedByteSize) {
-        return {
-          status: 'error',
-          locationId: params.locationId,
-          code: 'SOURCE_MODIFIED',
-          message: `Source file size changed out-of-band: expected ${params.expectedByteSize}, found ${st.size}`
-        }
-      }
-      if (
-        params.expectedMtimeMs !== null &&
-        params.expectedMtimeMs !== undefined &&
-        Math.abs(st.mtimeMs - params.expectedMtimeMs) > 1.0
-      ) {
-        return {
-          status: 'error',
-          locationId: params.locationId,
-          code: 'SOURCE_MODIFIED',
-          message: 'Source file modification time changed out-of-band'
-        }
-      }
-    } catch {
-      return {
-        status: 'error',
-        locationId: params.locationId,
-        code: 'SOURCE_MODIFIED',
-        message: 'Source file is inaccessible or changed'
-      }
-    }
-
-    // 3. Compute cache key and check cache
+    // 2. Compute cache key and check cache
     const cacheKey = this.cache.computeCacheKey({
       locationId: params.locationId,
       sourcePath: params.sourcePath,
@@ -1077,11 +1369,7 @@ export class ThumbnailCoordinator {
       // Non-fatal if cache read fails, proceed to decode
     }
 
-    if (!candidateBuf) {
-      this.cacheMisses++
-    }
-
-    if (this.cancelledLocationIds.has(params.locationId)) {
+    if (preFlightToken.cancelled) {
       return {
         status: 'error',
         locationId: params.locationId,
@@ -1090,7 +1378,79 @@ export class ThumbnailCoordinator {
       }
     }
 
-    // 4. Enforce queue bounds
+    if (sourceOffline) {
+      if (candidateBuf) {
+        const dims = hasValidWebPStructure(candidateBuf, THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES)
+        if (dims) {
+          this.cacheHits++
+          return {
+            status: 'ready',
+            locationId: params.locationId,
+            dataUrl: `data:image/webp;base64,${candidateBuf.toString('base64')}`,
+            mimeType: 'image/webp',
+            width: dims.width,
+            height: dims.height,
+            originalUnavailable: true
+          }
+        }
+        this.cache.delete(cacheKey)
+      }
+      this.cacheMisses++
+      return {
+        status: 'missing',
+        locationId: params.locationId,
+        reason: 'Original file or source folder is unavailable'
+      }
+    }
+
+    // Fast path for ordinary valid cache hits without worker roundtrip
+    const requiresWorkerValidation =
+      params.verifySourceBeforeCacheHit === true || process.env.PV_TEST_STUCK_VALIDATION === '1'
+    if (candidateBuf && !requiresWorkerValidation) {
+      const dims = hasValidWebPStructure(candidateBuf, THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES)
+      if (dims) {
+        this.cacheHits++
+        return {
+          status: 'ready',
+          locationId: params.locationId,
+          dataUrl: `data:image/webp;base64,${candidateBuf.toString('base64')}`,
+          mimeType: 'image/webp',
+          width: dims.width,
+          height: dims.height
+        }
+      }
+      this.cache.delete(cacheKey)
+      candidateBuf = null
+    }
+
+    if (!candidateBuf) {
+      this.cacheMisses++
+    }
+
+    // 3. Priority ordering: high=0, normal=1, low=2
+    const priority = params.priority ?? 'normal'
+    const priorityOrder = priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
+    const coalesceKey = `${cacheKey}:${params.verifySourceBeforeCacheHit ? 'v' : 'n'}`
+
+    // 4. Coalesce onto an existing queued or active job for the same cacheKey
+    const existingJob = this.coalescedThumbnailJobs.get(coalesceKey)
+    if (existingJob && !existingJob.settled) {
+      return new Promise<ThumbnailResult>((resolveWaiter) => {
+        existingJob.waiters.push({
+          waiterId: preFlightToken.waiterId,
+          locationId: params.locationId,
+          consumerType: params.consumerType,
+          priorityOrder,
+          resolve: resolveWaiter
+        })
+        if (priorityOrder < existingJob.item.priorityOrder) {
+          existingJob.item.priorityOrder = priorityOrder
+          this.reprioritizeQueueItem(existingJob.item)
+        }
+      })
+    }
+
+    // 5. Enforce queue bounds
     if (this.queue.length >= this.maxQueuedJobs) {
       return {
         status: 'error',
@@ -1100,21 +1460,34 @@ export class ThumbnailCoordinator {
       }
     }
 
-    // 5. Priority ordering: high=0, normal=1, low=2
-    const priority = params.priority ?? 'normal'
-    const priorityOrder = priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
-
-    return new Promise<ThumbnailResult>((resolve, reject) => {
+    return new Promise<ThumbnailResult>((resolveWaiter, rejectWaiter) => {
       const item: QueuedThumbnailItem = {
         id: this.nextJobId++,
         action: candidateBuf ? 'validate_cache' : 'decode',
         params,
         cacheKey,
         cachedBuf: candidateBuf ?? undefined,
-        resolve,
-        reject,
+        resolve: resolveWaiter,
+        reject: rejectWaiter,
         priorityOrder
       }
+      const coalescedJob: CoalescedThumbnailJob = {
+        coalesceKey,
+        cacheKey,
+        item,
+        waiters: [
+          {
+            waiterId: preFlightToken.waiterId,
+            locationId: params.locationId,
+            consumerType: params.consumerType,
+            priorityOrder,
+            resolve: resolveWaiter
+          }
+        ],
+        settled: false
+      }
+      item.coalescedJob = coalescedJob
+      this.coalescedThumbnailJobs.set(coalesceKey, coalescedJob)
       this.enqueueItem(item)
     })
   }
@@ -1614,14 +1987,19 @@ export class ThumbnailCoordinator {
         this.cacheHits++
         const width = typeof msg.width === 'number' ? msg.width : 512
         const height = typeof msg.height === 'number' ? msg.height : 512
-        item.resolve({
+        const readyResult: ThumbnailResult = {
           status: 'ready',
           locationId: item.params.locationId,
           dataUrl: `data:image/webp;base64,${item.cachedBuf.toString('base64')}`,
           mimeType: 'image/webp',
           width,
           height
-        })
+        }
+        if (item.coalescedJob) {
+          this.settleCoalescedThumbnailJob(item.coalescedJob, readyResult)
+        } else {
+          item.resolve(readyResult)
+        }
         this.processNext()
         return
       } else if (msg.status === 'source_invalid') {
@@ -1632,7 +2010,7 @@ export class ThumbnailCoordinator {
         entry.jobId = null
         entry.locationId = null
 
-        item.resolve({
+        const invalidResult: ThumbnailResult = {
           status: 'error',
           locationId: item.params.locationId,
           code: typeof msg.code === 'string' ? msg.code : 'SOURCE_MODIFIED',
@@ -1640,7 +2018,12 @@ export class ThumbnailCoordinator {
             typeof msg.message === 'string'
               ? msg.message
               : 'Recovered vault payload verification failed'
-        })
+        }
+        if (item.coalescedJob) {
+          this.settleCoalescedThumbnailJob(item.coalescedJob, invalidResult)
+        } else {
+          item.resolve(invalidResult)
+        }
         this.processNext()
         return
       } else {
@@ -1717,30 +2100,45 @@ export class ThumbnailCoordinator {
           // If caching fails, non-fatal: still return ready thumbnail
         })
         .finally(() => {
-          item.resolve({
+          const readyResult: ThumbnailResult = {
             status: 'ready',
             locationId: item.params.locationId,
             dataUrl: `data:image/webp;base64,${buffer.toString('base64')}`,
             mimeType,
             width,
             height
-          })
+          }
+          if (item.coalescedJob) {
+            this.settleCoalescedThumbnailJob(item.coalescedJob, readyResult)
+          } else {
+            item.resolve(readyResult)
+          }
           this.processNext()
         })
     } else if (msg.status === 'unsupported') {
-      item.resolve({
+      const unsupportedResult: ThumbnailResult = {
         status: 'unsupported',
         locationId: item.params.locationId,
         reason: typeof msg.reason === 'string' ? msg.reason : 'Unsupported image format'
-      })
+      }
+      if (item.coalescedJob) {
+        this.settleCoalescedThumbnailJob(item.coalescedJob, unsupportedResult)
+      } else {
+        item.resolve(unsupportedResult)
+      }
       this.processNext()
     } else {
-      item.resolve({
+      const errResult: ThumbnailResult = {
         status: 'error',
         locationId: item.params.locationId,
         code: typeof msg.code === 'string' ? msg.code : 'DECODE_FAILED',
         message: typeof msg.message === 'string' ? msg.message : 'Decode failed'
-      })
+      }
+      if (item.coalescedJob) {
+        this.settleCoalescedThumbnailJob(item.coalescedJob, errResult)
+      } else {
+        item.resolve(errResult)
+      }
       this.processNext()
     }
   }
@@ -1809,12 +2207,17 @@ export class ThumbnailCoordinator {
 
   private resolveWorkerErrorItem(item: QueuedItem, code: string, message: string): void {
     if (item.action === 'decode' || item.action === 'validate_cache') {
-      item.resolve({
+      const errResult: ThumbnailResult = {
         status: 'error',
         locationId: item.params.locationId,
         code,
         message
-      })
+      }
+      if (item.coalescedJob) {
+        this.settleCoalescedThumbnailJob(item.coalescedJob, errResult)
+      } else {
+        item.resolve(errResult)
+      }
     } else if (item.action === 'fingerprint') {
       item.resolve({
         status: 'error',
@@ -1883,6 +2286,8 @@ export class ThumbnailCoordinator {
       this.resolveWorkerErrorItem(item, 'ABORTED', 'Thumbnail service shutdown')
     }
     this.queue = []
+    this.coalescedThumbnailJobs.clear()
+    this.preFlightTokens.clear()
 
     const terminations = this.workers.map(async (entry) => {
       entry.isTerminating = true

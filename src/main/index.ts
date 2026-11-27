@@ -8,7 +8,7 @@ import { setupSecurityPolicies } from './security'
 import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
 import { VaultImportCoordinator } from './services/vault'
-import { ThumbnailCoordinator } from './services/thumbnails'
+import { ThumbnailCoordinator, ThumbnailPrepCoordinator } from './services/thumbnails'
 import { SimilarityCoordinator } from './services/similarity'
 import { AnnotationJournal } from './services/annotations'
 import {
@@ -78,6 +78,9 @@ let catalog: CatalogDatabase | null = null
 let coordinator: ScanJobCoordinator | null = null
 let vaultCoordinator: VaultImportCoordinator | null = null
 let thumbnailCoordinator: ThumbnailCoordinator | null = null
+let thumbnailPrepCoordinator: ThumbnailPrepCoordinator | null = null
+let disposeScanThumbPrep: (() => void) | null = null
+let disposeImportThumbPrep: (() => void) | null = null
 let similarityCoordinator: SimilarityCoordinator | null = null
 let semanticModelManager: SemanticModelManager | null = null
 let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
@@ -204,6 +207,19 @@ if (!app.requestSingleInstanceLock()) {
         if (disposeAutoMetadataScheduler) {
           disposeAutoMetadataScheduler()
           disposeAutoMetadataScheduler = null
+        }
+        if (disposeScanThumbPrep) {
+          disposeScanThumbPrep()
+          disposeScanThumbPrep = null
+        }
+        if (disposeImportThumbPrep) {
+          disposeImportThumbPrep()
+          disposeImportThumbPrep = null
+        }
+        if (thumbnailPrepCoordinator) {
+          logStartup('shutting down thumbnail prep coordinator')
+          await thumbnailPrepCoordinator.shutdown()
+          logStartup('thumbnail prep coordinator shutdown done')
         }
         if (photoMetadataCoordinator) {
           logStartup('shutting down photo metadata coordinator')
@@ -432,6 +448,21 @@ if (!app.requestSingleInstanceLock()) {
       })
       disposeAutoMetadataScheduler = attachedMetaScheduler.dispose
 
+      thumbnailPrepCoordinator = new ThumbnailPrepCoordinator({
+        catalog,
+        thumbnailCoordinator,
+        shouldYieldToInteractiveSearch: () => semanticSearchCoordinator?.hasActiveSearch() ?? false,
+        log: logStartup
+      })
+      disposeScanThumbPrep = coordinator.onProgress((progress) => {
+        thumbnailPrepCoordinator?.onScanProgress(progress)
+      })
+      disposeImportThumbPrep = vaultCoordinator.onProgress((progress) => {
+        thumbnailPrepCoordinator?.onVaultImportProgress(progress)
+      })
+      thumbnailPrepCoordinator.initialize()
+      logStartup('thumbnailPrepCoordinator initialized')
+
       semanticSearchCoordinator = new SemanticSearchCoordinator({
         catalog,
         modelManager: semanticModelManager,
@@ -600,6 +631,7 @@ if (!app.requestSingleInstanceLock()) {
         coordinator,
         vaultCoordinator,
         thumbnailCoordinator,
+        thumbnailPrepCoordinator,
         similarityCoordinator,
         semanticModelManager,
         semanticIndexCoordinator,

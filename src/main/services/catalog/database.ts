@@ -7114,6 +7114,276 @@ export class CatalogDatabase {
       historicalObservations
     }
   }
+
+  public getThumbnailPrepSummary(
+    recipeVersion: string
+  ): import('./types').PhotoThumbnailPrepSummary {
+    this.assertOpen()
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          COUNT(*) AS total_photos,
+          COALESCE(SUM(CASE
+            WHEN ts.file_location_id IS NOT NULL
+              AND ts.recipe_version = ?
+              AND ts.discovery_observation_id = d.id
+              AND ts.observed_byte_size = d.byte_size
+              AND ((ts.observed_mtime_ms IS NULL AND d.filesystem_mtime_ms IS NULL) OR ts.observed_mtime_ms = d.filesystem_mtime_ms)
+              AND ((ts.content_sha256 IS NULL AND h.sha256 IS NULL) OR ts.content_sha256 = h.sha256)
+              AND ts.status = 'ready'
+            THEN 1 ELSE 0 END), 0) AS prepared_photos,
+          COALESCE(SUM(CASE
+            WHEN ts.file_location_id IS NOT NULL
+              AND ts.recipe_version = ?
+              AND ts.discovery_observation_id = d.id
+              AND ts.observed_byte_size = d.byte_size
+              AND ((ts.observed_mtime_ms IS NULL AND d.filesystem_mtime_ms IS NULL) OR ts.observed_mtime_ms = d.filesystem_mtime_ms)
+              AND ((ts.content_sha256 IS NULL AND h.sha256 IS NULL) OR ts.content_sha256 = h.sha256)
+              AND ts.status = 'unsupported'
+            THEN 1 ELSE 0 END), 0) AS unsupported_photos,
+          COALESCE(SUM(CASE
+            WHEN ts.file_location_id IS NOT NULL
+              AND ts.recipe_version = ?
+              AND ts.discovery_observation_id = d.id
+              AND ts.observed_byte_size = d.byte_size
+              AND ((ts.observed_mtime_ms IS NULL AND d.filesystem_mtime_ms IS NULL) OR ts.observed_mtime_ms = d.filesystem_mtime_ms)
+              AND ((ts.content_sha256 IS NULL AND h.sha256 IS NULL) OR ts.content_sha256 = h.sha256)
+              AND ts.status = 'unavailable'
+            THEN 1 ELSE 0 END), 0) AS unavailable_photos,
+          COALESCE(SUM(CASE
+            WHEN ts.file_location_id IS NOT NULL
+              AND ts.recipe_version = ?
+              AND ts.discovery_observation_id = d.id
+              AND ts.observed_byte_size = d.byte_size
+              AND ((ts.observed_mtime_ms IS NULL AND d.filesystem_mtime_ms IS NULL) OR ts.observed_mtime_ms = d.filesystem_mtime_ms)
+              AND ((ts.content_sha256 IS NULL AND h.sha256 IS NULL) OR ts.content_sha256 = h.sha256)
+              AND ts.status = 'failed'
+            THEN 1 ELSE 0 END), 0) AS failed_photos
+        FROM file_locations fl
+        JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        LEFT JOIN photo_thumbnail_state ts ON ts.file_location_id = fl.id
+        WHERE fl.category = 'photo';
+      `
+      )
+      .get(recipeVersion, recipeVersion, recipeVersion, recipeVersion) as {
+      total_photos: number
+      prepared_photos: number
+      unsupported_photos: number
+      unavailable_photos: number
+      failed_photos: number
+    }
+
+    const totalPhotos = row?.total_photos ?? 0
+    const preparedPhotos = row?.prepared_photos ?? 0
+    const unsupportedPhotos = row?.unsupported_photos ?? 0
+    const unavailablePhotos = row?.unavailable_photos ?? 0
+    const failedPhotos = row?.failed_photos ?? 0
+    const pendingPhotos = Math.max(
+      0,
+      totalPhotos - preparedPhotos - unsupportedPhotos - unavailablePhotos - failedPhotos
+    )
+    return {
+      totalPhotos,
+      preparedPhotos,
+      unsupportedPhotos,
+      unavailablePhotos,
+      failedPhotos,
+      pendingPhotos
+    }
+  }
+
+  public getNextPendingThumbnailPrepBatch(params: {
+    recipeVersion: string
+    limit: number
+    afterLocationId?: number
+  }): import('./types').PhotoThumbnailPrepCandidate[] {
+    this.assertOpen()
+    const limit = Math.max(1, Math.min(200, Math.floor(params.limit)))
+    const afterId = Math.max(0, Math.floor(params.afterLocationId ?? 0))
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          fl.id AS file_location_id,
+          fl.source_id AS source_id,
+          s.root_path AS source_root_path,
+          s.source_kind AS source_kind,
+          fl.original_path AS original_path,
+          d.id AS discovery_observation_id,
+          d.byte_size AS byte_size,
+          d.filesystem_mtime_ms AS filesystem_mtime_ms,
+          h.sha256 AS active_hash
+        FROM file_locations fl
+        JOIN sources s ON s.id = fl.source_id
+        JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        LEFT JOIN photo_thumbnail_state ts ON ts.file_location_id = fl.id
+        WHERE fl.category = 'photo'
+          AND fl.id > ?
+          AND (
+            ts.file_location_id IS NULL
+            OR ts.recipe_version != ?
+            OR ts.discovery_observation_id != d.id
+            OR ts.observed_byte_size != d.byte_size
+            OR NOT ((ts.observed_mtime_ms IS NULL AND d.filesystem_mtime_ms IS NULL) OR ts.observed_mtime_ms = d.filesystem_mtime_ms)
+            OR NOT ((ts.content_sha256 IS NULL AND h.sha256 IS NULL) OR ts.content_sha256 = h.sha256)
+          )
+        ORDER BY fl.id ASC
+        LIMIT ?;
+      `
+      )
+      .all(afterId, params.recipeVersion, limit) as Array<{
+      file_location_id: number
+      source_id: number
+      source_root_path: string
+      source_kind: 'user' | 'recovery_manifest'
+      original_path: string
+      discovery_observation_id: number
+      byte_size: number
+      filesystem_mtime_ms: number | null
+      active_hash: string | null
+    }>
+
+    return rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      sourceId: r.source_id,
+      sourceRootPath: r.source_root_path,
+      sourceKind: r.source_kind,
+      originalPath: r.original_path,
+      discoveryObservationId: r.discovery_observation_id,
+      byteSize: r.byte_size,
+      filesystemMtimeMs: r.filesystem_mtime_ms,
+      activeHash: r.active_hash
+    }))
+  }
+
+  public getReadyThumbnailStateRowsBatch(params: {
+    recipeVersion: string
+    limit: number
+    afterLocationId?: number
+  }): import('./types').PhotoThumbnailReadyStateRow[] {
+    this.assertOpen()
+    const limit = Math.max(1, Math.min(500, Math.floor(params.limit)))
+    const afterId = Math.max(0, Math.floor(params.afterLocationId ?? 0))
+    const rows = this.db
+      .prepare(
+        `
+        SELECT file_location_id, cache_key
+        FROM photo_thumbnail_state
+        WHERE recipe_version = ?
+          AND status = 'ready'
+          AND file_location_id > ?
+        ORDER BY file_location_id ASC
+        LIMIT ?;
+      `
+      )
+      .all(params.recipeVersion, afterId, limit) as Array<{
+      file_location_id: number
+      cache_key: string | null
+    }>
+
+    return rows.map((r) => ({
+      fileLocationId: r.file_location_id,
+      cacheKey: r.cache_key
+    }))
+  }
+
+  public getUnavailableThumbnailSourceRoots(recipeVersion: string): string[] {
+    this.assertOpen()
+    const rows = this.db
+      .prepare(
+        `
+        SELECT DISTINCT s.root_path AS root_path
+        FROM photo_thumbnail_state ts
+        JOIN file_locations fl ON fl.id = ts.file_location_id
+        JOIN sources s ON s.id = fl.source_id
+        WHERE ts.recipe_version = ?
+          AND ts.status = 'unavailable'
+          AND ts.error_code = 'ROOT_UNAVAILABLE'
+          AND s.source_kind = 'user';
+      `
+      )
+      .all(recipeVersion) as Array<{ root_path: string }>
+    return rows.map((r) => r.root_path)
+  }
+
+  public deletePhotoThumbnailStatesByIds(fileLocationIds: readonly number[]): number {
+    this.assertOpen()
+    if (fileLocationIds.length === 0) return 0
+    const placeholders = fileLocationIds.map(() => '?').join(',')
+    const res = this.db
+      .prepare(`DELETE FROM photo_thumbnail_state WHERE file_location_id IN (${placeholders});`)
+      .run(...fileLocationIds)
+    return Number(res.changes ?? 0)
+  }
+
+  public resetUnavailableThumbnailStatesForRoot(rootPath: string, recipeVersion: string): number {
+    this.assertOpen()
+    const res = this.db
+      .prepare(
+        `
+        DELETE FROM photo_thumbnail_state
+        WHERE recipe_version = ?
+          AND status = 'unavailable'
+          AND error_code = 'ROOT_UNAVAILABLE'
+          AND file_location_id IN (
+            SELECT fl.id
+            FROM file_locations fl
+            JOIN sources s ON s.id = fl.source_id
+            WHERE s.root_path = ?
+          );
+      `
+      )
+      .run(recipeVersion, rootPath)
+    return Number(res.changes ?? 0)
+  }
+
+  public upsertPhotoThumbnailState(input: import('./types').UpsertPhotoThumbnailStateInput): void {
+    this.assertOpen()
+    const now = input.updatedAtMs ?? Date.now()
+    this.db
+      .prepare(
+        `
+        INSERT INTO photo_thumbnail_state (
+          file_location_id, discovery_observation_id, content_sha256,
+          observed_byte_size, observed_mtime_ms, recipe_version, cache_key,
+          status, error_code, error_message, attempt_count, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(file_location_id) DO UPDATE SET
+          discovery_observation_id = excluded.discovery_observation_id,
+          content_sha256 = excluded.content_sha256,
+          observed_byte_size = excluded.observed_byte_size,
+          observed_mtime_ms = excluded.observed_mtime_ms,
+          recipe_version = excluded.recipe_version,
+          cache_key = excluded.cache_key,
+          status = excluded.status,
+          error_code = excluded.error_code,
+          error_message = excluded.error_message,
+          attempt_count = CASE
+            WHEN photo_thumbnail_state.discovery_observation_id = excluded.discovery_observation_id
+              AND photo_thumbnail_state.recipe_version = excluded.recipe_version
+            THEN photo_thumbnail_state.attempt_count + 1
+            ELSE 1
+          END,
+          updated_at_ms = excluded.updated_at_ms;
+      `
+      )
+      .run(
+        input.fileLocationId,
+        input.discoveryObservationId,
+        input.contentSha256,
+        input.observedByteSize,
+        input.observedMtimeMs,
+        input.recipeVersion,
+        input.cacheKey,
+        input.status,
+        input.errorCode ?? null,
+        input.errorMessage ?? null,
+        now
+      )
+  }
 }
 
 function hasControlChars(str: string): boolean {

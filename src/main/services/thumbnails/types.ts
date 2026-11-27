@@ -88,9 +88,41 @@ export interface ThumbnailRequestParams {
   readonly expectedMtimeMs?: number | null
   readonly expectedSha256?: string | null
   readonly priority?: 'high' | 'normal' | 'low'
+  readonly consumerType?: 'ui' | 'background'
   readonly approvedRootsOverride?: readonly string[]
   readonly verifySourceBeforeCacheHit?: boolean
 }
+
+export interface CancelThumbnailOptions {
+  readonly queuedOnly?: boolean
+  readonly consumerType?: 'ui' | 'background'
+}
+
+export type ThumbnailPrepareResult =
+  | {
+      readonly status: 'ready'
+      readonly fromCache: boolean
+      readonly cacheKey: string
+    }
+  | {
+      readonly status: 'unsupported'
+      readonly reason: string
+    }
+  | {
+      readonly status: 'unavailable'
+      readonly code: string
+      readonly message: string
+    }
+  | {
+      readonly status: 'failed'
+      readonly code: string
+      readonly message: string
+    }
+  | {
+      readonly status: 'deferred'
+      readonly code: string
+      readonly message: string
+    }
 
 export interface SemanticEmbedRequestParams {
   readonly locationId: number
