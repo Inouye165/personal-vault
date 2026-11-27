@@ -25,6 +25,7 @@ const failure = (error: unknown): BridgeState => ({
 export function useVaultApi(): {
   state: BridgeState
   notifyTab: (tab: NavigationTab) => Promise<void>
+  refreshStatus: () => Promise<void>
 } {
   const [state, setState] = useState<BridgeState>(() => {
     if (typeof window !== 'undefined' && !window.api) {
@@ -72,5 +73,16 @@ export function useVaultApi(): {
     }
   }, [])
 
-  return { state, notifyTab }
+  const refreshStatus = useCallback(async () => {
+    const api = window.api
+    if (!api) return
+    try {
+      const [appInfo, vaultStatus] = await Promise.all([api.getAppInfo(), api.getVaultStatus()])
+      setState({ phase: 'ready', appInfo, vaultStatus })
+    } catch (error) {
+      setState(failure(error))
+    }
+  }, [])
+
+  return { state, notifyTab, refreshStatus }
 }

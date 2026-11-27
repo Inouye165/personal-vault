@@ -1,8 +1,14 @@
 import { FolderLock } from 'lucide-react'
 import type { NavigationTab } from '../../../shared/validation/ipc-schemas'
 import { viewLabel } from '../views'
+import { ScanJobsPanel, type ScanJobsPanelProps } from './ScanJobsPanel'
 
-export function EmptyState({ currentTab }: { currentTab: NavigationTab }) {
+export interface EmptyStateProps {
+  readonly currentTab: NavigationTab
+  readonly scanJobsProps?: ScanJobsPanelProps
+}
+
+export function EmptyState({ currentTab, scanJobsProps }: EmptyStateProps) {
   return (
     <section className="empty-state-container" aria-labelledby="empty-state-heading">
       <div className="empty-state-card">
@@ -18,6 +24,15 @@ export function EmptyState({ currentTab }: { currentTab: NavigationTab }) {
         <p className="empty-note">
           Your original files are only ever read; they are never modified or deleted by cataloging.
         </p>
+
+        {scanJobsProps && (
+          <div className="empty-state-scan-section">
+            <ScanJobsPanel
+              {...scanJobsProps}
+              selectButtonLabel={currentTab === 'photos' ? 'Add photos' : undefined}
+            />
+          </div>
+        )}
       </div>
     </section>
   )

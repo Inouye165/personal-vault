@@ -10,7 +10,8 @@ export const VIEWS: readonly ViewDefinition[] = [
   { id: 'photos', label: 'Photos' },
   { id: 'documents', label: 'Documents' },
   { id: 'review', label: 'Review' },
-  { id: 'duplicates', label: 'Duplicates' }
+  { id: 'duplicates', label: 'Duplicates' },
+  { id: 'backup', label: 'Backup & Restore' }
 ]
 
 export function viewLabel(id: NavigationTab): string {

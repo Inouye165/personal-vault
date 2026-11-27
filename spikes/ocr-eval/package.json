@@ -1,0 +1,21 @@
+{
+  "name": "personal-vault-ocr-eval-spike",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./out/main/index.js",
+  "author": "Personal Vault Contributors",
+  "description": "Isolated Stage 7C feasibility spike for offline OCR and scanned-PDF rasterization",
+  "scripts": {
+    "fetch-model": "node fetch-ocr-model.mjs",
+    "build-spike": "node build-spike.mjs",
+    "build-unpacked": "node build-spike.mjs --unpack",
+    "verify:built": "node run-electron-ocr-spike.mjs --mode=built",
+    "verify:unpacked": "node run-electron-ocr-spike.mjs --mode=unpacked"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.1.1",
+    "pdfjs-dist": "6.5.438",
+    "sharp": "0.35.5",
+    "tesseract.js-core": "7.0.0"
+  }
+}

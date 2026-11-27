@@ -1,0 +1,127 @@
+/**
+ * Personal Vault — Catalog Persistence Domain Errors
+ */
+
+export class CatalogError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CatalogError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class UnsupportedSchemaVersionError extends CatalogError {
+  readonly currentVersion: number
+  readonly supportedVersion: number
+
+  constructor(currentVersion: number, supportedVersion: number) {
+    super(
+      `Database schema version ${currentVersion} is unsupported by this application (supported version: ${supportedVersion}). Please update Personal Vault.`
+    )
+    this.name = 'UnsupportedSchemaVersionError'
+    this.currentVersion = currentVersion
+    this.supportedVersion = supportedVersion
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class DatabaseClosedError extends CatalogError {
+  constructor(message = 'Database is closed and cannot perform operations.') {
+    super(message)
+    this.name = 'DatabaseClosedError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class SourceNotFoundError extends CatalogError {
+  readonly rootPath: string
+
+  constructor(rootPath: string) {
+    super(`Source root not found in catalog: ${rootPath}`)
+    this.name = 'SourceNotFoundError'
+    this.rootPath = rootPath
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class FileLocationNotFoundError extends CatalogError {
+  readonly filePath: string
+
+  constructor(filePath: string) {
+    super(`File location not found in catalog: ${filePath}`)
+    this.name = 'FileLocationNotFoundError'
+    this.filePath = filePath
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class MigrationError extends CatalogError {
+  readonly targetVersion: number
+
+  constructor(targetVersion: number, message: string) {
+    super(`Failed to apply schema migration ${targetVersion}: ${message}`)
+    this.name = 'MigrationError'
+    this.targetVersion = targetVersion
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class FileMetadataConflictError extends CatalogError {
+  readonly originalPath: string
+  readonly field: 'fileName' | 'extension' | 'category'
+  readonly recordedValue: string
+  readonly candidateValue: string
+
+  constructor(
+    originalPath: string,
+    field: 'fileName' | 'extension' | 'category',
+    recordedValue: string,
+    candidateValue: string
+  ) {
+    super(
+      `Conflicting ${field} for recorded path "${originalPath}": recorded "${recordedValue}", candidate "${candidateValue}"`
+    )
+    this.name = 'FileMetadataConflictError'
+    this.originalPath = originalPath
+    this.field = field
+    this.recordedValue = recordedValue
+    this.candidateValue = candidateValue
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class DuplicateReviewError extends CatalogError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DuplicateReviewError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class DuplicateGroupNotFoundError extends DuplicateReviewError {
+  constructor(sha256: string, byteSize: number) {
+    super(`Duplicate group not found for sha256 "${sha256}" and byte size ${byteSize}`)
+    this.name = 'DuplicateGroupNotFoundError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class StaleReviewError extends DuplicateReviewError {
+  constructor(
+    message = 'Stale review: the duplicate group has changed since it was loaded. Please refresh before saving.'
+  ) {
+    super(message)
+    this.name = 'StaleReviewError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+export class InvalidPreferredLocationError extends DuplicateReviewError {
+  constructor(preferredLocationId: number) {
+    super(
+      `Preferred location ${preferredLocationId} is not an active member of this duplicate group`
+    )
+    this.name = 'InvalidPreferredLocationError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}

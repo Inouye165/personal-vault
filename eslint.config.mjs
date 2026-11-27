@@ -5,7 +5,19 @@ import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
   {
-    ignores: ['out/**', 'dist/**', 'build/**', 'coverage/**', 'node_modules/**', '**/*.tsbuildinfo']
+    ignores: [
+      'out/**',
+      'dist/**',
+      'dist-*/**',
+      'build/**',
+      'coverage/**',
+      'node_modules/**',
+      '**/*.tsbuildinfo',
+      'spikes/**/node_modules/**',
+      'spikes/**/.model-cache/**',
+      'spikes/**/out/**',
+      'spikes/**/.dist-unpacked/**'
+    ]
   },
 
   // Recommended rules for every linted file (JS, MJS, TS, TSX).
@@ -26,6 +38,7 @@ export default tseslint.config(
       'tests/main/**/*.ts',
       'tests/preload/**/*.ts',
       'tests/shared/**/*.ts',
+      'spikes/**/*.ts',
       '*.config.ts'
     ],
     languageOptions: { globals: globals.node }
@@ -40,7 +53,7 @@ export default tseslint.config(
 
   // Node scripts. Smoke script also evaluates code inside the page, so it uses browser globals too.
   {
-    files: ['scripts/**/*.mjs', 'eslint.config.mjs'],
+    files: ['scripts/**/*.mjs', 'spikes/**/*.mjs', 'eslint.config.mjs'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } }
   }
 )

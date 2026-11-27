@@ -6,7 +6,26 @@ node_modules/
 # Build artifacts and outputs
 out/
 dist/
-build/
+dist-heic-verify/
+dist-model-verify/
+dist-search-ux-verify/
+dist-photos-ux-redesign/
+dist-stage-7a-verify/
+dist-stage-7b-verify/
+dist-stage-7c-foundation-verify/
+dist-stage-7c-persistence-verify/
+dist-stage-7c-ui-verify/
+dist-stage-7c-pdf-clip-verify/
+dist-stage-7d-foundation-verify/
+dist-stage-7d-persistence-verify/
+dist-stage-7d-search-verify/
+dist-stage-7e-foundation-verify/
+dist-stage-7e-persistence-verify/
+dist-stage-7e-ui-verify/
+dist-stage-7f-verify/
+build/*
+!build/icon.ico
+!build/installer.nsh
 coverage/
 *.tsbuildinfo
 
@@ -45,3 +64,33 @@ Thumbs.db
 !.vscode/extensions.json
 !.vscode/settings.json
 smoke-*.png
+
+# Stage 6A Semantic Evaluation Spike isolated caches and dependencies
+spikes/semantic-eval/node_modules/
+spikes/semantic-eval/package-lock.json
+spikes/semantic-eval/.model-cache/
+spikes/semantic-eval/.fixtures-temp/
+
+# Stage 6B Semantic Model binaries and staging caches
+*.onnx
+.model-cache/
+.model_staging_*/
+semantic-models/
+
+# Stage 7C OCR Model data and staging caches
+*.traineddata
+.ocr_model_staging_*/
+.ocr_model_backup_*/
+ocr-models/
+
+# Stage 7C OCR Feasibility Spike isolated caches, builds, and dependencies
+spikes/ocr-eval/node_modules/
+spikes/ocr-eval/package-lock.json
+spikes/ocr-eval/.model-cache/
+spikes/ocr-eval/.fixtures-temp/
+spikes/ocr-eval/out/
+spikes/ocr-eval/.dist-unpacked/
+
+# Stage 7D Document Semantic Evaluation Spike isolated caches
+spikes/doc-semantic-eval/.model-cache/
+spikes/doc-semantic-eval/.fixtures-temp/

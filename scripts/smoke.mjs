@@ -13,7 +13,7 @@
  * Only the process tree started by this script is terminated.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -72,7 +72,8 @@ function launchCommand(port, userDataDir) {
     }
     return { command: electronPath, argv: ['.', ...common] }
   }
-  const exe = join(root, 'dist', 'win-unpacked', 'Personal Vault.exe')
+  const unpackedDir = process.env.PV_UNPACKED_DIR || join(root, 'dist', 'win-unpacked')
+  const exe = join(unpackedDir, 'Personal Vault.exe')
   if (!existsSync(exe)) throw new Error(`${exe} is missing. Run \`npm run build:unpack\` first.`)
   return { command: exe, argv: common }
 }
@@ -180,13 +181,14 @@ let activeChild = null
 
 async function main() {
   const userDataDir = mkdtempSync(join(tmpdir(), 'pv-smoke-'))
+  const launchCwd = mode === 'unpacked' ? mkdtempSync(join(tmpdir(), 'pv-smoke-cwd-')) : root
   const port = await freePort()
   const { command, argv } = launchCommand(port, userDataDir)
   const events = []
   let stderr = ''
   let stdout = ''
   const child = spawn(command, argv, {
-    cwd: root,
+    cwd: launchCwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   })
@@ -227,7 +229,178 @@ async function main() {
     const bridge = await evaluate(cdp, BRIDGE_PROBE)
     if (!bridge.hasApi) fail('window.api is missing')
     else {
-      const expectMethods = ['getAppInfo', 'getVaultStatus', 'setTab']
+      const expectMethods = [
+        'addCollectionMember',
+        'cancelBackup',
+        'cancelDocSemanticModel',
+        'cancelDocumentClassification',
+        'cancelDocumentExtraction',
+        'cancelDocumentOcr',
+        'cancelDocumentSemanticIndexing',
+        'cancelDocumentSemanticSearch',
+        'cancelExport',
+        'cancelImport',
+        'cancelOcrModel',
+        'cancelPhotoMetadataExtraction',
+        'cancelPhotosSemanticSearch',
+        'cancelScan',
+        'cancelSemanticIndexing',
+        'cancelSemanticModelProvisioning',
+        'cancelSimilarityAnalysis',
+        'cancelThumbnail',
+        'cancelUnifiedSearch',
+        'checkForUpdates',
+        'classifySelectedDocuments',
+        'clearPhotoUserPlace',
+        'configureBackupDestination',
+        'connectGoogleDrive',
+        'createCollection',
+        'createGoogleDriveFolder',
+        'deferUpdate',
+        'deleteCameraLabel',
+        'deleteSavedEvent',
+        'deleteSavedPlace',
+        'disconnectGoogleDrive',
+        'dismissScanJob',
+        'dismissUpdateError',
+        'downloadDocSemanticModel',
+        'downloadOcrModel',
+        'downloadSemanticModel',
+        'extractSelectedDocuments',
+        'getActiveBackupJob',
+        'getActiveExportJob',
+        'getActiveImportJob',
+        'getActiveScanJob',
+        'getActiveVault',
+        'getAppInfo',
+        'getBackupJob',
+        'getDocSemanticModelStatus',
+        'getDocumentClassificationFacets',
+        'getDocumentClassificationProgress',
+        'getDocumentDetail',
+        'getDocumentExtensionFacets',
+        'getDocumentExtractionProgress',
+        'getDocumentOcrPreview',
+        'getDocumentOcrProgress',
+        'getDocumentOcrState',
+        'getDocumentPreview',
+        'getDocumentSemanticProgress',
+        'getDocumentsPage',
+        'getDuplicateGroupMembers',
+        'getDuplicateGroups',
+        'getExportJob',
+        'getExportJobItems',
+        'getGoogleDriveAuthStatus',
+        'getImportCandidates',
+        'getLatestImportJob',
+        'getLatestScanJob',
+        'getOcrModelStatus',
+        'getOriginalPhoto',
+        'getPhotoAnnotation',
+        'getPhotoMemberships',
+        'getPhotoMetadataAttentionItems',
+        'getPhotoMetadataDetail',
+        'getPhotoMetadataFacets',
+        'getPhotoMetadataProgress',
+        'getPhotosDiagnostics',
+        'getPhotosPage',
+        'getSemanticIndexJobItems',
+        'getSemanticIndexProgress',
+        'getSemanticModelStatus',
+        'getSimilarityPairs',
+        'getSimilarityProgress',
+        'getThumbnail',
+        'getThumbnailPrepProgress',
+        'getUpdateState',
+        'getVaultStatus',
+        'importDocSemanticModel',
+        'importOcrModel',
+        'importSemanticModelFromFolder',
+        'indexSelectedDocuments',
+        'initializeVault',
+        'installUpdateNow',
+        'listBackupDestinations',
+        'listBackupJobs',
+        'listCameraLabels',
+        'listCollections',
+        'listExportJobs',
+        'listGoogleDriveFolders',
+        'listRecoveryPoints',
+        'listSavedEvents',
+        'listSavedPlaces',
+        'ocrSelectedDocuments',
+        'onBackupProgress',
+        'onDocumentClassificationProgress',
+        'onDocumentExtractionProgress',
+        'onDocumentOcrProgress',
+        'onExportProgress',
+        'onImportProgress',
+        'onOcrModelStatus',
+        'onPhotoMetadataProgress',
+        'onScanProgress',
+        'onSemanticIndexProgress',
+        'onSemanticModelStatus',
+        'onThumbnailPrepProgress',
+        'onUpdateState',
+        'pauseBackup',
+        'pauseDocumentClassification',
+        'pauseDocumentExtraction',
+        'pauseDocumentOcr',
+        'pauseDocumentSemanticIndexing',
+        'pauseImport',
+        'pausePhotoMetadataExtraction',
+        'pauseScan',
+        'pauseSemanticIndexing',
+        'reconcileJournal',
+        'reconcileSimilarity',
+        'recoverCatalogFromVault',
+        'removeCollectionMember',
+        'renameCollection',
+        'resetDocumentClassificationOverride',
+        'restoreRecoveryPoint',
+        'resumeBackup',
+        'resumeDocumentClassification',
+        'resumeDocumentExtraction',
+        'resumeDocumentOcr',
+        'resumeDocumentSemanticIndexing',
+        'resumeImport',
+        'resumePhotoMetadataExtraction',
+        'resumeScan',
+        'resumeSemanticIndexing',
+        'resumeSimilarityAnalysis',
+        'searchDocumentsSemantic',
+        'searchPhotosMetadataAware',
+        'searchPhotosSemantic',
+        'searchUnifiedDocuments',
+        'searchUnifiedPhotos',
+        'selectBackupDirectory',
+        'selectExportDestination',
+        'selectRoots',
+        'selectVaultDirectory',
+        'setActiveVault',
+        'setDocumentClassificationOverride',
+        'setDuplicateReview',
+        'setPhotoAnnotation',
+        'setPhotoUserPlace',
+        'setSimilarityDecision',
+        'setTab',
+        'startBackup',
+        'startDocumentClassification',
+        'startDocumentExtraction',
+        'startDocumentOcr',
+        'startDocumentSemanticIndexing',
+        'startExport',
+        'startImport',
+        'startPhotoMetadataExtraction',
+        'startScan',
+        'startSemanticIndexing',
+        'startSimilarityAnalysis',
+        'upsertCameraLabel',
+        'upsertSavedEvent',
+        'upsertSavedPlace',
+        'verifyExportJob',
+        'verifyRecoveryPoint'
+      ]
       if (JSON.stringify(bridge.methods) !== JSON.stringify(expectMethods)) {
         fail(`window.api methods were ${JSON.stringify(bridge.methods)}`)
       }
@@ -260,7 +433,14 @@ async function main() {
       fail(`empty heading was ${dom.emptyHeading}`)
     if (
       JSON.stringify(dom.navigation) !==
-      JSON.stringify(['All Items', 'Photos', 'Documents', 'Review', 'Duplicates'])
+      JSON.stringify([
+        'All Items',
+        'Photos',
+        'Documents',
+        'Review',
+        'Duplicates',
+        'Backup & Restore'
+      ])
     ) {
       fail(`navigation was ${JSON.stringify(dom.navigation)}`)
     }
@@ -311,7 +491,22 @@ async function main() {
     cdp?.close()
     killTree(child)
     await Promise.race([exited, sleep(5000)])
-    rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    if (mode === 'unpacked') {
+      const leftover = readdirSync(launchCwd)
+      if (leftover.length > 0) {
+        failures.push(`Unpacked launch wrote into cwd (${launchCwd}): ${leftover.join(', ')}`)
+      }
+      try {
+        rmSync(launchCwd, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 })
+      } catch (cleanupErr) {
+        console.warn(`[smoke] warning: could not remove ${launchCwd}: ${cleanupErr.message}`)
+      }
+    }
+    try {
+      rmSync(userDataDir, { recursive: true, force: true, maxRetries: 15, retryDelay: 300 })
+    } catch (cleanupErr) {
+      console.warn(`[smoke] warning: could not remove ${userDataDir}: ${cleanupErr.message}`)
+    }
   }
 
   if (failures.length > 0) {

@@ -34,7 +34,7 @@ function devInlineScriptHashes(): Plugin {
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['exifreader'] })],
     resolve: {
       alias: {
         '@shared': resolve('src/shared')
@@ -43,7 +43,26 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve('src/main/index.ts')
+          index: resolve('src/main/index.ts'),
+          catalog: resolve('src/main/services/catalog/index.ts'),
+          jobs: resolve('src/main/services/jobs/index.ts'),
+          thumbnails: resolve('src/main/services/thumbnails/index.ts'),
+          thumbnail_worker: resolve('src/main/services/thumbnails/worker.ts'),
+          search_worker: resolve('src/main/services/semantic/search-worker.ts'),
+          documents: resolve('src/main/services/documents/index.ts'),
+          document_worker: resolve('src/main/services/documents/worker.ts'),
+          document_snapshot_worker: resolve('src/main/services/documents/snapshot-worker.ts'),
+          document_ocr: resolve('src/main/services/documents/ocr/index.ts'),
+          document_ocr_worker: resolve('src/main/services/documents/ocr/worker.ts'),
+          document_semantic: resolve('src/main/services/documents/semantic/index.ts'),
+          document_semantic_worker: resolve('src/main/services/documents/semantic/embed-worker.ts'),
+          doc_search_worker: resolve('src/main/services/documents/semantic/search-worker.ts'),
+          document_classify: resolve('src/main/services/documents/classification/index.ts'),
+          document_classify_coordinator: resolve(
+            'src/main/services/documents/classification/coordinator.ts'
+          ),
+          document_classify_worker: resolve('src/main/services/documents/classification/worker.ts'),
+          backup_snapshot_worker: resolve('src/main/services/backup/snapshot-worker.ts')
         }
       }
     }

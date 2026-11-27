@@ -9,6 +9,21 @@
 
 export type ItemKind = 'photo' | 'document'
 
+export type {
+  ClassificationConfidenceBand,
+  DocumentClassificationEvidence,
+  DocumentClassificationInput,
+  DocumentClassificationRange,
+  DocumentClassificationResult,
+  DocumentClassificationTextSource,
+  DocumentClutterOverride,
+  DocumentOriginLabel,
+  DocumentOriginStatus,
+  DocumentPurposeLabel,
+  DocumentPurposeStatus,
+  UncertaintyReason
+} from '../validation/document-schemas'
+
 export type DocumentPurpose =
   | 'personal'
   | 'software_project'
@@ -52,3 +67,6 @@ export interface SourceDirectory {
   readonly lastScanAt?: string | null
   readonly isReadOnly: true
 }
+
+export type PhotoRating = 1 | 2 | 3 | 4 | 5 | null
+export type PhotoFlag = 'none' | 'pick' | 'reject'
