@@ -31,6 +31,8 @@ export const IPC_CHANNELS = {
   PHOTOS_GET_ORIGINAL: 'photos:get-original',
   PHOTOS_CANCEL_THUMBNAIL: 'photos:cancel-thumbnail',
   PHOTOS_GET_DIAGNOSTICS: 'photos:get-diagnostics',
+  THUMBNAILS_PREP_GET_PROGRESS: 'thumbnails:prep-get-progress',
+  THUMBNAILS_PREP_PROGRESS_EVENT: 'thumbnails:prep-progress-event',
   PHOTOS_SET_ANNOTATION: 'photos:set-annotation',
   PHOTOS_GET_ANNOTATION: 'photos:get-annotation',
   COLLECTIONS_LIST: 'collections:list',

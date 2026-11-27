@@ -72,6 +72,8 @@ describe('preload bridge', () => {
         'getOriginalPhoto',
         'cancelThumbnail',
         'getPhotosDiagnostics',
+        'getThumbnailPrepProgress',
+        'onThumbnailPrepProgress',
         'setPhotoAnnotation',
         'getPhotoAnnotation',
         'listCollections',

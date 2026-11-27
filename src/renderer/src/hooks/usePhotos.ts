@@ -21,6 +21,7 @@ import type {
   SavedPlace,
   SearchClarificationOption,
   SearchClarificationPrompt,
+  ThumbnailPrepProgress,
   ThumbnailResult
 } from '../../../shared/validation/ipc-schemas'
 import type {
@@ -33,7 +34,7 @@ export const PHOTO_BOUNDS = {
   PAGE_SIZE: 50,
   MAX_METADATA_RECORDS: 2000,
   MAX_PAGES: 40, // 40 * 50 = 2000 records
-  MAX_THUMBNAIL_CACHE: 200,
+  MAX_THUMBNAIL_CACHE: 1000,
   MAX_MOUNTED_CELLS: 200
 } as const
 
@@ -105,6 +106,7 @@ interface InFlightThumbRequest {
   readonly requestId: number
   readonly generation: number
   readonly revision: string
+  readonly priority: 'high' | 'normal' | 'low'
 }
 
 export interface UsePhotosResult {
@@ -117,6 +119,7 @@ export interface UsePhotosResult {
   readonly selectedPhoto: PhotoItem | null
   readonly selectedId: number | null
   readonly thumbnails: ReadonlyMap<number, ThumbnailResult>
+  readonly thumbnailPrepProgress: ThumbnailPrepProgress | null
   readonly ratingFilter: PhotoRatingFilter
   readonly flagFilter: PhotoFlagFilter
   readonly collectionId: number | null
@@ -195,7 +198,7 @@ export interface UsePhotosResult {
   readonly ensureRangeLoaded: (startIndex: number, endIndex: number) => void
   readonly getPhoto: (index: number) => PhotoItem | undefined
   readonly requestThumbnail: (photo: PhotoItem, priority?: 'high' | 'normal' | 'low') => void
-  readonly cancelThumbnail: (locationId: number) => void
+  readonly cancelThumbnail: (locationId: number, options?: { queuedOnly?: boolean }) => void
 }
 
 function formatPhotoLoadError(rawMessage: string, isSearch: boolean): string {
@@ -236,6 +239,10 @@ export function usePhotos(): UsePhotosResult {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [thumbnails, setThumbnails] = useState<Map<number, ThumbnailResult>>(new Map())
   const thumbnailsRef = useRef(thumbnails)
+  const thumbnailRevisionsRef = useRef<Map<number, string>>(new Map())
+  const [thumbnailPrepProgress, setThumbnailPrepProgress] = useState<ThumbnailPrepProgress | null>(
+    null
+  )
 
   const pagesRef = useRef(pages)
   const totalCountRef = useRef(totalCount)
@@ -371,6 +378,29 @@ export function usePhotos(): UsePhotosResult {
   useEffect(() => {
     thumbnailsRef.current = thumbnails
   }, [thumbnails])
+
+  useEffect(() => {
+    let unmounted = false
+    if (window.api?.getThumbnailPrepProgress) {
+      void window.api
+        .getThumbnailPrepProgress()
+        .then((progress) => {
+          if (!unmounted && progress) {
+            setThumbnailPrepProgress(progress)
+          }
+        })
+        .catch(() => {})
+    }
+    const unsub = window.api?.onThumbnailPrepProgress?.((progress) => {
+      if (!unmounted) {
+        setThumbnailPrepProgress(progress)
+      }
+    })
+    return () => {
+      unmounted = true
+      unsub?.()
+    }
+  }, [])
 
   // Monotonic generation incremented on unmount, refresh, and filter change
   const generationRef = useRef<number>(1)
@@ -804,7 +834,6 @@ export function usePhotos(): UsePhotosResult {
       setPages(new Map())
       setTotalCount(0)
       setSearchScores(new Map())
-      setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(Boolean(searchQueryRef.current))
       setError(null)
@@ -847,7 +876,6 @@ export function usePhotos(): UsePhotosResult {
       setPages(new Map())
       setTotalCount(0)
       setSearchScores(new Map())
-      setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(Boolean(trimmed))
       setError(null)
@@ -891,7 +919,6 @@ export function usePhotos(): UsePhotosResult {
     inFlightThumbsRef.current.clear()
     setPages(new Map())
     setTotalCount(0)
-    setThumbnails(new Map())
     setIsLoading(true)
     setIsSearching(false)
     setError(null)
@@ -925,7 +952,6 @@ export function usePhotos(): UsePhotosResult {
       setPages(new Map())
       setTotalCount(0)
       setSearchScores(new Map())
-      setThumbnails(new Map())
       setIsLoading(true)
       setIsSearching(true)
       setError(null)
@@ -974,7 +1000,6 @@ export function usePhotos(): UsePhotosResult {
     setPages(new Map())
     setTotalCount(0)
     setSearchScores(new Map())
-    setThumbnails(new Map())
     setIsLoading(true)
     setIsSearching(true)
     setError(null)
@@ -1290,6 +1315,7 @@ export function usePhotos(): UsePhotosResult {
     pagePhotoIdsRef.current.clear()
     inFlightPagesRef.current.clear()
     inFlightThumbsRef.current.clear()
+    thumbnailRevisionsRef.current.clear()
     setPages(new Map())
     setTotalCount(0)
     setSearchScores(new Map())
@@ -1365,20 +1391,36 @@ export function usePhotos(): UsePhotosResult {
   const requestThumbnail = useCallback(
     (photo: PhotoItem, priority: 'high' | 'normal' | 'low' = 'normal') => {
       if (!window.api?.getThumbnail) return
-      if (thumbnailsRef.current.has(photo.id)) return
+      const revision = `${photo.id}:${photo.byteSize}:${photo.filesystemMtimeMs}:${photo.activeHash ?? ''}`
+      const existingThumb = thumbnailsRef.current.get(photo.id)
+      const existingRev = thumbnailRevisionsRef.current.get(photo.id)
+      if (
+        existingThumb &&
+        existingRev === revision &&
+        (existingThumb.status === 'ready' ||
+          existingThumb.status === 'unsupported' ||
+          existingThumb.status === 'missing')
+      ) {
+        return
+      }
 
       const currentGen = generationRef.current
       const existingReq = inFlightThumbsRef.current.get(photo.id)
-      if (existingReq && existingReq.generation === currentGen) {
+      if (
+        existingReq &&
+        existingReq.generation === currentGen &&
+        existingReq.revision === revision &&
+        !(priority === 'high' && existingReq.priority !== 'high')
+      ) {
         return
       }
 
       const requestId = ++requestSeqRef.current
-      const revision = `${photo.id}:${photo.byteSize}:${photo.filesystemMtimeMs}`
       inFlightThumbsRef.current.set(photo.id, {
         requestId,
         generation: currentGen,
-        revision
+        revision,
+        priority
       })
 
       void window.api
@@ -1409,12 +1451,16 @@ export function usePhotos(): UsePhotosResult {
             return
           }
 
+          thumbnailRevisionsRef.current.set(photo.id, revision)
           setThumbnails((prev) => {
             const next = new Map(prev)
-            if (next.size >= PHOTO_BOUNDS.MAX_THUMBNAIL_CACHE) {
+            if (next.has(photo.id)) {
+              next.delete(photo.id)
+            } else if (next.size >= PHOTO_BOUNDS.MAX_THUMBNAIL_CACHE) {
               const firstKey = next.keys().next().value
               if (firstKey !== undefined) {
                 next.delete(firstKey)
+                thumbnailRevisionsRef.current.delete(firstKey)
               }
             }
             next.set(photo.id, result)
@@ -1430,9 +1476,12 @@ export function usePhotos(): UsePhotosResult {
     []
   )
 
-  const cancelThumbnail = useCallback((locationId: number) => {
+  const cancelThumbnail = useCallback((locationId: number, options?: { queuedOnly?: boolean }) => {
     inFlightThumbsRef.current.delete(locationId)
-    void window.api?.cancelThumbnail?.({ locationId })
+    void window.api?.cancelThumbnail?.({
+      locationId,
+      ...(options?.queuedOnly !== undefined ? { queuedOnly: options.queuedOnly } : {})
+    })
   }, [])
 
   useEffect(() => {
@@ -1482,6 +1531,7 @@ export function usePhotos(): UsePhotosResult {
     selectedPhoto,
     selectedId,
     thumbnails,
+    thumbnailPrepProgress,
     ratingFilter,
     flagFilter,
     collectionId,

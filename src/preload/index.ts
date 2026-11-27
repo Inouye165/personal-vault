@@ -128,6 +128,7 @@ import {
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
+  ThumbnailPrepProgressSchema,
   SetPhotoAnnotationRequestSchema,
   SetPhotoAnnotationResponseSchema,
   GetPhotoAnnotationRequestSchema,
@@ -265,6 +266,7 @@ import {
   type CancelThumbnailRequest,
   type CancelThumbnailResponse,
   type PhotosDiagnosticsResponse,
+  type ThumbnailPrepProgress,
   type SetPhotoAnnotationRequest,
   type SetPhotoAnnotationResponse,
   type GetPhotoAnnotationRequest,
@@ -747,6 +749,30 @@ const api: VaultApi = {
       throw new Error(`Invalid getPhotosDiagnostics response from main: ${result.error}`)
     }
     return result.data
+  },
+
+  async getThumbnailPrepProgress(): Promise<ThumbnailPrepProgress> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.THUMBNAILS_PREP_GET_PROGRESS)
+    const result = validatePayload(ThumbnailPrepProgressSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getThumbnailPrepProgress response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onThumbnailPrepProgress(callback: (progress: ThumbnailPrepProgress) => void): () => void {
+    const listener = (_event: unknown, raw: unknown): void => {
+      const result = validatePayload(ThumbnailPrepProgressSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      } else {
+        console.error(`Invalid ThumbnailPrepProgress event payload from main: ${result.error}`)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.THUMBNAILS_PREP_PROGRESS_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.THUMBNAILS_PREP_PROGRESS_EVENT, listener)
+    }
   },
 
   async setPhotoAnnotation(

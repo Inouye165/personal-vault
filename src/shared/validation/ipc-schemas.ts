@@ -534,7 +534,8 @@ export const ThumbnailReadySchema = z.object({
     .max(2 * 1024 * 1024),
   mimeType: z.string().min(1),
   width: z.number().int().positive(),
-  height: z.number().int().positive()
+  height: z.number().int().positive(),
+  originalUnavailable: z.boolean().optional()
 })
 
 export const ThumbnailUnsupportedSchema = z.object({
@@ -613,7 +614,8 @@ export const OriginalPhotoResultSchema = z.discriminatedUnion('status', [
 export type OriginalPhotoResult = z.infer<typeof OriginalPhotoResultSchema>
 
 export const CancelThumbnailRequestSchema = z.object({
-  locationId: z.number().int().positive()
+  locationId: z.number().int().positive(),
+  queuedOnly: z.boolean().optional()
 })
 export type CancelThumbnailRequest = z.infer<typeof CancelThumbnailRequestSchema>
 
@@ -622,6 +624,17 @@ export const CancelThumbnailResponseSchema = z.object({
   locationId: z.number().int().positive()
 })
 export type CancelThumbnailResponse = z.infer<typeof CancelThumbnailResponseSchema>
+
+export const ThumbnailPrepProgressSchema = z.object({
+  status: z.enum(['idle', 'running', 'completed']),
+  totalPhotos: z.number().int().nonnegative(),
+  preparedPhotos: z.number().int().nonnegative(),
+  unsupportedPhotos: z.number().int().nonnegative(),
+  unavailablePhotos: z.number().int().nonnegative(),
+  failedPhotos: z.number().int().nonnegative(),
+  pendingPhotos: z.number().int().nonnegative()
+})
+export type ThumbnailPrepProgress = z.infer<typeof ThumbnailPrepProgressSchema>
 
 export const PhotosDiagnosticsResponseSchema = z.object({
   activeWorkers: z.number().int().nonnegative(),

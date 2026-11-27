@@ -65,11 +65,13 @@ import {
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
+  ThumbnailPrepProgressSchema,
   type GetPhotosPageResponse,
   type ThumbnailResult,
   type OriginalPhotoResult,
   type CancelThumbnailResponse,
   type PhotosDiagnosticsResponse,
+  type ThumbnailPrepProgress,
   SetPhotoAnnotationRequestSchema,
   SetPhotoAnnotationResponseSchema,
   GetPhotoAnnotationRequestSchema,
@@ -166,7 +168,7 @@ import {
   validateVaultSeparation,
   type VaultImportCoordinator
 } from '../services/vault'
-import type { ThumbnailCoordinator } from '../services/thumbnails'
+import type { ThumbnailCoordinator, ThumbnailPrepCoordinator } from '../services/thumbnails'
 import type { SimilarityCoordinator } from '../services/similarity'
 import type {
   SemanticModelManager,
@@ -201,6 +203,7 @@ export interface IpcHandlerOptions {
   readonly coordinator?: ScanJobCoordinator
   readonly vaultCoordinator?: VaultImportCoordinator
   readonly thumbnailCoordinator?: ThumbnailCoordinator
+  readonly thumbnailPrepCoordinator?: ThumbnailPrepCoordinator
   readonly similarityCoordinator?: SimilarityCoordinator
   readonly semanticModelManager?: SemanticModelManager
   readonly semanticIndexCoordinator?: SemanticIndexCoordinator
@@ -242,6 +245,7 @@ export function registerIpcHandlers({
   coordinator,
   vaultCoordinator,
   thumbnailCoordinator,
+  thumbnailPrepCoordinator,
   similarityCoordinator,
   semanticModelManager,
   semanticIndexCoordinator,
@@ -909,7 +913,7 @@ export function registerIpcHandlers({
       return validatedErr.data
     }
 
-    const res = await thumbnailCoordinator.requestThumbnail({
+    let res = await thumbnailCoordinator.requestThumbnail({
       locationId,
       sourcePath: resolved.filePath,
       expectedByteSize:
@@ -924,9 +928,33 @@ export function registerIpcHandlers({
             : resolved.expectedMtimeMs,
       expectedSha256: resolved.expectedSha256,
       priority,
+      consumerType: 'ui',
       approvedRootsOverride: resolved.mode === 'vault_copy' ? resolved.approvedRoots : undefined,
       verifySourceBeforeCacheHit: resolved.mode === 'vault_copy'
     })
+
+    if (res.status === 'missing' && resolved.mode === 'source') {
+      const vaultFallback = resolveReadableFileLocation(catalog, locationId, {
+        verifyPayloadHash: false,
+        allowVaultCopyFallbackForUnavailableSource: true
+      })
+      if (vaultFallback.ok && vaultFallback.mode === 'vault_copy') {
+        const vaultRes = await thumbnailCoordinator.requestThumbnail({
+          locationId,
+          sourcePath: vaultFallback.filePath,
+          expectedByteSize: vaultFallback.expectedByteSize,
+          expectedMtimeMs: vaultFallback.expectedMtimeMs,
+          expectedSha256: vaultFallback.expectedSha256,
+          priority,
+          consumerType: 'ui',
+          approvedRootsOverride: vaultFallback.approvedRoots,
+          verifySourceBeforeCacheHit: true
+        })
+        if (vaultRes.status === 'ready') {
+          res = { ...vaultRes, originalUnavailable: true }
+        }
+      }
+    }
 
     const validated = validatePayload(ThumbnailResultSchema, res)
     if (!validated.success) {
@@ -1001,7 +1029,10 @@ export function registerIpcHandlers({
     if (!thumbnailCoordinator) {
       return { success: false, locationId: parsed.data.locationId }
     }
-    const success = thumbnailCoordinator.cancelRequest(parsed.data.locationId)
+    const success = thumbnailCoordinator.cancelRequest(parsed.data.locationId, {
+      queuedOnly: parsed.data.queuedOnly,
+      consumerType: 'ui'
+    })
     const validated = validatePayload(CancelThumbnailResponseSchema, {
       success,
       locationId: parsed.data.locationId
@@ -1061,6 +1092,29 @@ export function registerIpcHandlers({
       throw new Error(`Invalid outgoing PhotosDiagnosticsResponse: ${validated.error}`)
     }
     return validated.data
+  })
+
+  handle(IPC_CHANNELS.THUMBNAILS_PREP_GET_PROGRESS, (): ThumbnailPrepProgress => {
+    const progress: ThumbnailPrepProgress = thumbnailPrepCoordinator
+      ? thumbnailPrepCoordinator.getProgress()
+      : {
+          status: 'idle',
+          totalPhotos: 0,
+          preparedPhotos: 0,
+          unsupportedPhotos: 0,
+          unavailablePhotos: 0,
+          failedPhotos: 0,
+          pendingPhotos: 0
+        }
+    const validated = validatePayload(ThumbnailPrepProgressSchema, progress)
+    if (!validated.success) {
+      throw new Error(`Invalid outgoing ThumbnailPrepProgress: ${validated.error}`)
+    }
+    return validated.data
+  })
+
+  handle(IPC_CHANNELS.THUMBNAILS_PREP_PROGRESS_EVENT, (): never => {
+    throw new Error('thumbnails:prep-progress-event is an event-only channel')
   })
 
   // --- Stage 5B: Photo Review & Collections Handlers ---
@@ -1968,6 +2022,22 @@ export function registerIpcHandlers({
         } else {
           console.error(
             `Invalid outgoing VaultImportProgress event payload in main: ${validated.error}`
+          )
+        }
+      }
+    })
+  }
+
+  if (thumbnailPrepCoordinator && getMainWindow) {
+    thumbnailPrepCoordinator.onProgress((progress) => {
+      const win = getMainWindow()
+      if (win && !win.isDestroyed()) {
+        const validated = validatePayload(ThumbnailPrepProgressSchema, progress)
+        if (validated.success) {
+          win.webContents.send(IPC_CHANNELS.THUMBNAILS_PREP_PROGRESS_EVENT, validated.data)
+        } else {
+          console.error(
+            `Invalid outgoing ThumbnailPrepProgress event payload in main: ${validated.error}`
           )
         }
       }
