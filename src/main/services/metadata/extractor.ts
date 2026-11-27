@@ -11,6 +11,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { extname } from 'node:path'
 import * as ExifReader from 'exifreader'
+import { identifyNonPhotoImage, unsupportedPhotoReason } from '../thumbnails/file-content'
 import sharp, { type Metadata as SharpMetadata } from 'sharp'
 import { resolveCaptureDate } from './date-policy'
 import { resolveGpsCoordinates } from './gps-policy'
@@ -859,6 +860,19 @@ export async function extractPhotoMetadataFromBuffer(params: {
   observedMtimeMs: number
 }): Promise<ExtractedPhotoMetadataResult> {
   const recordedExt = normalizeRecordedExtension(params.recordedExtension)
+  const recognizedNonPhoto = identifyNonPhotoImage(params.fileBuffer)
+  if (recognizedNonPhoto) {
+    return buildEmptyFailureResult({
+      extractionStatus: 'unsupported',
+      recordedExtension: recordedExt,
+      detectedFormat: null,
+      contentSha256: params.computedSha256,
+      observedByteSize: params.observedByteSize,
+      observedMtimeMs: params.observedMtimeMs,
+      errorCode: 'UNSUPPORTED_FILE_CONTENT',
+      errorMessage: unsupportedPhotoReason(recognizedNonPhoto)
+    })
+  }
   const detectedSig = detectContainerSignature(params.fileBuffer, recordedExt)
 
   if (!detectedSig) {

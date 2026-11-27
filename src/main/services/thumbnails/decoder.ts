@@ -11,6 +11,11 @@ import { extname, join, relative, isAbsolute } from 'node:path'
 import { createHash } from 'node:crypto'
 import sharp from 'sharp'
 import { THUMBNAIL_LIMITS } from './types'
+import {
+  identifyNonPhotoImage,
+  readPhotoshopThumbnail,
+  unsupportedPhotoReason
+} from './file-content'
 import { extractDHash64FromImageBuffer } from '../similarity/fingerprint'
 import { HeicDecodeError, openSharpFromImageBuffer } from './heic-decoder'
 import {
@@ -390,9 +395,19 @@ export async function decodeThumbnail(params: DecodeInputParams): Promise<Decode
     return verified
   }
 
+  const format = identifyNonPhotoImage(verified.fileBuffer)
+  const photoshopPreview =
+    format === 'Photoshop document' ? readPhotoshopThumbnail(verified.fileBuffer) : null
+  if (format && !photoshopPreview) {
+    return { status: 'unsupported', reason: unsupportedPhotoReason(format) }
+  }
+
   // Shared bounded decode (Sharp + libheif-js WASM for HEIC) and WebP resize
   try {
-    const { image } = await openSharpFromImageBuffer(verified.fileBuffer, maxInputPixels)
+    const { image } = await openSharpFromImageBuffer(
+      photoshopPreview ?? verified.fileBuffer,
+      maxInputPixels
+    )
 
     const pipeline = image.resize({
       width: maxDimension,
@@ -432,6 +447,8 @@ export async function decodeOriginalPhoto(params: DecodeInputParams): Promise<De
   if (verified.status !== 'success') {
     return verified
   }
+  const format = identifyNonPhotoImage(verified.fileBuffer)
+  if (format) return { status: 'unsupported', reason: unsupportedPhotoReason(format) }
 
   try {
     const { image } = await openSharpFromImageBuffer(verified.fileBuffer, maxInputPixels)
@@ -462,6 +479,8 @@ export async function decodeFingerprint(
   if (verified.status !== 'success') {
     return verified
   }
+  const format = identifyNonPhotoImage(verified.fileBuffer)
+  if (format) return { status: 'unsupported', reason: unsupportedPhotoReason(format) }
 
   try {
     const fp = await extractDHash64FromImageBuffer(verified.fileBuffer, maxInputPixels)
@@ -702,6 +721,8 @@ export async function decodeSemanticEmbedding(
   if (verified.status !== 'success') {
     return verified
   }
+  const format = identifyNonPhotoImage(verified.fileBuffer)
+  if (format) return { status: 'unsupported', reason: unsupportedPhotoReason(format) }
 
   const prep = await preprocessImageForClip(verified.fileBuffer, maxInputPixels)
   if (prep.status !== 'ready') {
