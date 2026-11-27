@@ -134,6 +134,7 @@ export class PhotoMetadataCoordinator {
 
   public async startExtraction(options?: {
     retryFailed?: boolean
+    retryUnavailable?: boolean
   }): Promise<PhotoMetadataExtractionProgress> {
     if (this.isShutdown) {
       throw new Error('Photo metadata coordinator is shut down')
@@ -147,7 +148,8 @@ export class PhotoMetadataCoordinator {
     try {
       const job = this.catalog.createPhotoMetadataJob({
         parserRecipeVersion: this.parserRecipeVersion,
-        retryFailed: Boolean(options?.retryFailed)
+        retryFailed: Boolean(options?.retryFailed),
+        retryUnavailable: Boolean(options?.retryUnavailable)
       })
 
       if (job.totalPhotos === 0 || job.status === 'completed') {

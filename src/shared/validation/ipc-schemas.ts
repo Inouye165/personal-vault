@@ -1271,7 +1271,8 @@ export type PhotoMetadataProgressResponse = z.infer<typeof PhotoMetadataProgress
 
 export const StartPhotoMetadataExtractionRequestSchema = z
   .object({
-    retryFailed: z.boolean().default(false)
+    retryFailed: z.boolean().default(false),
+    retryUnavailable: z.boolean().default(false)
   })
   .strict()
 export type StartPhotoMetadataExtractionRequest = z.input<
@@ -1406,6 +1407,18 @@ export const CameraLabelSchema = z.object({
 })
 export type CameraLabel = z.infer<typeof CameraLabelSchema>
 
+export const PhotoProtectionStatusSchema = z.object({
+  cataloged: z.boolean(),
+  hasVerifiedVaultCopy: z.boolean(),
+  vaultCopyVerifiedAtMs: z.number().int().nullable(),
+  vaultCopyRelativePath: z.string().nullable(),
+  hasVerifiedBackup: z.boolean(),
+  latestBackupVerifiedAtMs: z.number().int().nullable(),
+  latestBackupDestinationName: z.string().nullable(),
+  backupCoversVaultCopy: z.boolean()
+})
+export type PhotoProtectionStatus = z.infer<typeof PhotoProtectionStatusSchema>
+
 export const PhotoTechnicalMetadataDetailSchema = z.object({
   fileLocationId: z.number().int().positive(),
   currentRevision: z.string().min(1),
@@ -1415,7 +1428,8 @@ export const PhotoTechnicalMetadataDetailSchema = z.object({
   historicalMetadataCount: z.number().int().nonnegative(),
   currentMetadata: PhotoTechnicalMetadataSchema.nullable(),
   userPlace: PhotoUserPlaceSchema.nullable().optional(),
-  cameraLabel: CameraLabelSchema.nullable().optional()
+  cameraLabel: CameraLabelSchema.nullable().optional(),
+  protectionStatus: PhotoProtectionStatusSchema.optional()
 })
 export type PhotoTechnicalMetadataDetail = z.infer<typeof PhotoTechnicalMetadataDetailSchema>
 
@@ -1430,6 +1444,37 @@ export const GetPhotoMetadataDetailResponseSchema = z.object({
   detail: PhotoTechnicalMetadataDetailSchema.nullable()
 })
 export type GetPhotoMetadataDetailResponse = z.infer<typeof GetPhotoMetadataDetailResponseSchema>
+
+export const PhotoMetadataAttentionItemSchema = z.object({
+  fileLocationId: z.number().int().positive(),
+  originalPath: z.string().min(1),
+  fileName: z.string().min(1),
+  recordedExtension: z.string(),
+  extractionStatus: z.enum(['failed', 'unavailable', 'unsupported']),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  updatedAtMs: z.number().int().nonnegative()
+})
+export type PhotoMetadataAttentionItem = z.infer<typeof PhotoMetadataAttentionItemSchema>
+
+export const GetPhotoMetadataAttentionItemsRequestSchema = z
+  .object({
+    statuses: z.array(z.enum(['failed', 'unavailable', 'unsupported'])).optional(),
+    limit: z.number().int().min(1).max(200).default(50),
+    offset: z.number().int().min(0).default(0)
+  })
+  .strict()
+export type GetPhotoMetadataAttentionItemsRequest = z.input<
+  typeof GetPhotoMetadataAttentionItemsRequestSchema
+>
+
+export const GetPhotoMetadataAttentionItemsResponseSchema = z.object({
+  items: z.array(PhotoMetadataAttentionItemSchema),
+  totalCount: z.number().int().nonnegative()
+})
+export type GetPhotoMetadataAttentionItemsResponse = z.infer<
+  typeof GetPhotoMetadataAttentionItemsResponseSchema
+>
 
 export const PhotoMetadataFacetFieldSchema = z.enum([
   'camera',

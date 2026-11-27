@@ -162,6 +162,8 @@ import {
   GetPhotoMetadataDetailResponseSchema,
   GetPhotoMetadataFacetsRequestSchema,
   GetPhotoMetadataFacetsResponseSchema,
+  GetPhotoMetadataAttentionItemsRequestSchema,
+  GetPhotoMetadataAttentionItemsResponseSchema,
   SemanticSearchRequestSchema,
   SemanticSearchResponseSchema,
   SemanticSearchCancelRequestSchema,
@@ -300,6 +302,8 @@ import {
   type GetPhotoMetadataDetailResponse,
   type GetPhotoMetadataFacetsRequest,
   type GetPhotoMetadataFacetsResponse,
+  type GetPhotoMetadataAttentionItemsRequest,
+  type GetPhotoMetadataAttentionItemsResponse,
   type SemanticSearchRequest,
   type SemanticSearchResponse,
   type SemanticSearchCancelRequest,
@@ -1194,6 +1198,21 @@ const api: VaultApi = {
     const result = validatePayload(GetPhotoMetadataFacetsResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid getPhotoMetadataFacets response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getPhotoMetadataAttentionItems(
+    request: GetPhotoMetadataAttentionItemsRequest = {}
+  ): Promise<GetPhotoMetadataAttentionItemsResponse> {
+    const parsed = validatePayload(GetPhotoMetadataAttentionItemsRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid getPhotoMetadataAttentionItems request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.METADATA_GET_ATTENTION_ITEMS, parsed.data)
+    const result = validatePayload(GetPhotoMetadataAttentionItemsResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getPhotoMetadataAttentionItems response from main: ${result.error}`)
     }
     return result.data
   },

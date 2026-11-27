@@ -298,6 +298,7 @@ async function main() {
         'getOriginalPhoto',
         'getPhotoAnnotation',
         'getPhotoMemberships',
+        'getPhotoMetadataAttentionItems',
         'getPhotoMetadataDetail',
         'getPhotoMetadataFacets',
         'getPhotoMetadataProgress',

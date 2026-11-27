@@ -2506,6 +2506,72 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.photos-status-chip {
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-secondary, var(--bg-surface));
+  color: var(--text-secondary, var(--text-muted));
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.photos-status-chip:hover {
+  border-color: var(--border-strong, var(--accent));
+}
+
+.photos-status-chip.photos-status-warning {
+  color: var(--warning-text);
+  border-color: var(--warning-text);
+}
+
+.photo-protection-warning {
+  color: var(--warning-text);
+  font-weight: 500;
+}
+
+.attention-files-details {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+}
+
+.attention-files-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attention-files-body {
+  margin-top: 8px;
+}
+
+.attention-files-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.attention-files-ul {
+  margin: 0;
+  padding-left: 16px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.attention-file-row {
+  margin-bottom: 6px;
+}
+
+.attention-file-status {
+  color: var(--text-muted);
+}
+
 .details-preview-unavailable-note {
   margin: 4px 0 8px;
   color: var(--warning-text);

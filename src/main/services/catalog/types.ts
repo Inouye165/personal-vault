@@ -954,6 +954,7 @@ export interface CreatePhotoMetadataJobInput {
   readonly jobId?: string
   readonly parserRecipeVersion: string
   readonly retryFailed?: boolean
+  readonly retryUnavailable?: boolean
 }
 
 export interface PhotoMetadataJobItemRecord {
@@ -1049,6 +1050,28 @@ export interface CameraLabelRecord {
   readonly updatedAtMs: number
 }
 
+export interface PhotoProtectionStatusResult {
+  readonly cataloged: boolean
+  readonly hasVerifiedVaultCopy: boolean
+  readonly vaultCopyVerifiedAtMs: number | null
+  readonly vaultCopyRelativePath: string | null
+  readonly hasVerifiedBackup: boolean
+  readonly latestBackupVerifiedAtMs: number | null
+  readonly latestBackupDestinationName: string | null
+  readonly backupCoversVaultCopy: boolean
+}
+
+export interface PhotoMetadataAttentionItemRecord {
+  readonly fileLocationId: number
+  readonly originalPath: string
+  readonly fileName: string
+  readonly recordedExtension: string
+  readonly extractionStatus: 'failed' | 'unavailable' | 'unsupported'
+  readonly errorCode: string | null
+  readonly errorMessage: string | null
+  readonly updatedAtMs: number
+}
+
 export interface PhotoTechnicalMetadataDetailResult {
   readonly fileLocationId: number
   readonly currentRevision: string
@@ -1060,6 +1083,7 @@ export interface PhotoTechnicalMetadataDetailResult {
   readonly currentMetadata: PhotoTechnicalMetadataRecord | null
   readonly userPlace?: PhotoUserPlaceRecord | null
   readonly cameraLabel?: CameraLabelRecord | null
+  readonly protectionStatus?: PhotoProtectionStatusResult
 }
 
 // Stage 6D: Semantic Search

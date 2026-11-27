@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   PhotoFileTypeBasis,
   PhotoItem,
+  PhotoMetadataAttentionItem,
   PhotoMetadataFacetField,
   PhotoMetadataFacetItem,
   PhotoMetadataProgressResponse,
@@ -92,6 +93,9 @@ export function usePhotoMetadata({
   const [cameraFacet, setCameraFacet] = useState<FacetSliceState>(DEFAULT_FACET_SLICE)
   const [lensFacet, setLensFacet] = useState<FacetSliceState>(DEFAULT_FACET_SLICE)
   const [fileTypeFacet, setFileTypeFacet] = useState<FacetSliceState>(DEFAULT_FACET_SLICE)
+  const [attentionItems, setAttentionItems] = useState<readonly PhotoMetadataAttentionItem[]>([])
+  const [attentionTotalCount, setAttentionTotalCount] = useState(0)
+  const [isLoadingAttentionItems, setIsLoadingAttentionItems] = useState(false)
 
   const [refreshTick, setRefreshTick] = useState(0)
 
@@ -107,6 +111,7 @@ export function usePhotoMetadata({
   const cameraSeqRef = useRef(0)
   const lensSeqRef = useRef(0)
   const fileTypeSeqRef = useRef(0)
+  const attentionSeqRef = useRef(0)
 
   useEffect(() => {
     onExtractionSettledRef.current = onExtractionSettled
@@ -432,6 +437,25 @@ export function usePhotoMetadata({
     }
   }, [applyProgress])
 
+  const loadAttentionItems = useCallback(async () => {
+    const api = window.api
+    if (!api?.getPhotoMetadataAttentionItems) return
+    const seq = ++attentionSeqRef.current
+    setIsLoadingAttentionItems(true)
+    try {
+      const res = await api.getPhotoMetadataAttentionItems({ limit: 50, offset: 0 })
+      if (!isMountedRef.current || seq !== attentionSeqRef.current) return
+      setAttentionItems(res.items)
+      setAttentionTotalCount(res.totalCount)
+    } catch {
+      // ignore read failure
+    } finally {
+      if (isMountedRef.current && seq === attentionSeqRef.current) {
+        setIsLoadingAttentionItems(false)
+      }
+    }
+  }, [])
+
   return {
     progress,
     isBusy,
@@ -441,6 +465,10 @@ export function usePhotoMetadata({
     cameraFacet,
     lensFacet,
     fileTypeFacet,
+    attentionItems,
+    attentionTotalCount,
+    isLoadingAttentionItems,
+    loadAttentionItems,
     setCameraFacetSearch,
     setCameraFacetOffset,
     setLensFacetSearch,
