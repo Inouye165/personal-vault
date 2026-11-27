@@ -69,6 +69,7 @@ export const IPC_CHANNELS = {
   METADATA_PROGRESS_EVENT: 'metadata:progress-event',
   METADATA_GET_PHOTO_DETAIL: 'metadata:get-photo-detail',
   METADATA_GET_FACETS: 'metadata:get-facets',
+  METADATA_GET_ATTENTION_ITEMS: 'metadata:get-attention-items',
   SEMANTIC_SEARCH_PHOTOS: 'semantic:search-photos',
   SEMANTIC_SEARCH_CANCEL: 'semantic:search-cancel',
   DOCUMENTS_GET_PAGE: 'documents:get-page',

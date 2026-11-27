@@ -13,6 +13,7 @@ import type {
   CollectionItem,
   PhotoFileTypeBasis,
   PhotoFlagFilter,
+  PhotoMetadataAttentionItem,
   PhotoMetadataProgressResponse,
   PhotoRatingFilter,
   SavedEvent,
@@ -48,6 +49,10 @@ export interface PhotoMetadataFilterPanelProps {
   readonly onPauseExtraction: () => Promise<void>
   readonly onResumeExtraction: () => Promise<void>
   readonly onCancelExtraction: () => Promise<void>
+  readonly attentionItems?: readonly PhotoMetadataAttentionItem[]
+  readonly attentionTotalCount?: number
+  readonly isLoadingAttentionItems?: boolean
+  readonly onLoadAttentionItems?: () => Promise<void>
   readonly savedEvents?: readonly SavedEvent[]
   readonly savedPlaces?: readonly SavedPlace[]
   readonly onUpsertSavedEvent?: (input: {
@@ -109,6 +114,10 @@ export function PhotoMetadataFilterPanel({
   onPauseExtraction,
   onResumeExtraction,
   onCancelExtraction,
+  attentionItems = [],
+  attentionTotalCount = 0,
+  isLoadingAttentionItems = false,
+  onLoadAttentionItems,
   savedEvents = [],
   savedPlaces = [],
   onUpsertSavedEvent,
@@ -374,6 +383,78 @@ export function PhotoMetadataFilterPanel({
             {progress.lastError && <div>Extractor error: {progress.lastError}</div>}
           </div>
         </div>
+      )}
+
+      {coverage.failedCount + coverage.unavailableCount + coverage.unsupportedCount > 0 && (
+        <details
+          className="attention-files-details"
+          onToggle={(e) => {
+            if ((e.currentTarget as HTMLDetailsElement).open) {
+              void onLoadAttentionItems?.()
+            }
+          }}
+        >
+          <summary data-testid="metadata-attention-toggle">
+            Files needing attention (
+            {(
+              coverage.failedCount +
+              coverage.unavailableCount +
+              coverage.unsupportedCount
+            ).toLocaleString()}
+            )
+          </summary>
+          <div className="attention-files-body" data-testid="metadata-attention-list">
+            <div className="attention-files-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                disabled={isBusy || isRunning}
+                onClick={() => void onStartExtraction(true)}
+                data-testid="metadata-attention-retry-btn"
+              >
+                <RotateCcw size={12} />
+                <span>Retry failed &amp; unavailable</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                disabled={isLoadingAttentionItems}
+                onClick={() => void onLoadAttentionItems?.()}
+              >
+                <span>{isLoadingAttentionItems ? 'Loading…' : 'Refresh list'}</span>
+              </button>
+            </div>
+            {attentionItems.length > 0 ? (
+              <ul className="attention-files-ul">
+                {attentionItems.map((item) => (
+                  <li key={item.fileLocationId} className="attention-file-row">
+                    <div>
+                      <strong>{item.fileName}</strong>{' '}
+                      <span className="attention-file-status">({item.extractionStatus})</span>
+                    </div>
+                    <div className="sub-text path-text" title={item.originalPath}>
+                      {item.originalPath}
+                    </div>
+                    {item.errorMessage && (
+                      <div className="metadata-warning-inline">{item.errorMessage}</div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="sub-text">
+                {isLoadingAttentionItems
+                  ? 'Loading affected files…'
+                  : 'Expand or click Refresh list to inspect individual files.'}
+              </p>
+            )}
+            {attentionTotalCount > attentionItems.length && (
+              <p className="sub-text">
+                Showing {attentionItems.length} of {attentionTotalCount.toLocaleString()} files.
+              </p>
+            )}
+          </div>
+        </details>
       )}
 
       {/* Compact SQL Filter Grid */}

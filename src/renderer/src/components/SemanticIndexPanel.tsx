@@ -25,8 +25,11 @@ export function SemanticIndexPanel({ onClose }: SemanticIndexPanelProps): ReactE
   const {
     modelStatus,
     indexProgress,
+    jobItems,
+    itemsTotalCount,
     actionError,
     isBusy,
+    loadJobItems,
     downloadModel,
     importModelFromFolder,
     cancelModelProvisioning,
@@ -297,6 +300,59 @@ export function SemanticIndexPanel({ onClose }: SemanticIndexPanelProps): ReactE
                 </>
               )}
             </div>
+
+            {hasNonIndexedOutcomes && indexProgress.jobId && (
+              <details
+                className="attention-files-details"
+                onToggle={(e) => {
+                  if ((e.currentTarget as HTMLDetailsElement).open) {
+                    void loadJobItems(indexProgress.jobId, 1, undefined)
+                  }
+                }}
+              >
+                <summary data-testid="semantic-attention-toggle">
+                  Files needing attention (
+                  {(indexProgress.unsupportedPhotos + indexProgress.failedPhotos).toLocaleString()})
+                </summary>
+                <div className="attention-files-body" data-testid="semantic-attention-list">
+                  <div className="attention-files-actions">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-xs"
+                      disabled={isBusy || jobStatus === 'running'}
+                      onClick={() => void startIndexing()}
+                    >
+                      <RotateCcw size={12} />
+                      <span>Retry missing</span>
+                    </button>
+                  </div>
+                  {jobItems.filter((i) => i.status === 'failed' || i.status === 'unsupported')
+                    .length > 0 ? (
+                    <ul className="attention-files-ul">
+                      {jobItems
+                        .filter((i) => i.status === 'failed' || i.status === 'unsupported')
+                        .map((item) => (
+                          <li key={item.id} className="attention-file-row">
+                            <div>
+                              <strong className="path-text" title={item.originalPath}>
+                                {item.originalPath}
+                              </strong>{' '}
+                              <span className="attention-file-status">({item.status})</span>
+                            </div>
+                            {item.errorMessage && (
+                              <div className="metadata-warning-inline">{item.errorMessage}</div>
+                            )}
+                          </li>
+                        ))}
+                    </ul>
+                  ) : (
+                    <p className="sub-text">
+                      Showing {itemsTotalCount.toLocaleString()} indexed job items.
+                    </p>
+                  )}
+                </div>
+              </details>
+            )}
           </div>
         </div>
       </div>

@@ -134,6 +134,8 @@ import {
   GetPhotoMetadataDetailResponseSchema,
   GetPhotoMetadataFacetsRequestSchema,
   GetPhotoMetadataFacetsResponseSchema,
+  GetPhotoMetadataAttentionItemsRequestSchema,
+  GetPhotoMetadataAttentionItemsResponseSchema,
   MetadataAwarePhotoSearchRequestSchema,
   MetadataAwarePhotoSearchResponseSchema,
   SavedEventsListResponseSchema,
@@ -152,6 +154,7 @@ import {
   type PhotoMetadataProgressResponse,
   type GetPhotoMetadataDetailResponse,
   type GetPhotoMetadataFacetsResponse,
+  type GetPhotoMetadataAttentionItemsResponse,
   type MetadataAwarePhotoSearchResponse,
   type SavedEventsListResponse,
   type SavedEvent,
@@ -1788,6 +1791,34 @@ export function registerIpcHandlers({
     }
     return validated.data
   })
+
+  handle(
+    IPC_CHANNELS.METADATA_GET_ATTENTION_ITEMS,
+    (raw: unknown = {}): GetPhotoMetadataAttentionItemsResponse => {
+      const parsed = validatePayload(GetPhotoMetadataAttentionItemsRequestSchema, raw ?? {})
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming GetPhotoMetadataAttentionItemsRequest: ${parsed.error}`)
+      }
+      const recipe =
+        photoMetadataCoordinator?.getParserRecipeVersion() ?? METADATA_PARSER_RECIPE_VERSION
+      if (!catalog || catalog.isClosed()) {
+        return { items: [], totalCount: 0 }
+      }
+      const res = catalog.listPhotoMetadataAttentionItems({
+        parserRecipeVersion: recipe,
+        statuses: parsed.data.statuses,
+        limit: parsed.data.limit,
+        offset: parsed.data.offset
+      })
+      const validated = validatePayload(GetPhotoMetadataAttentionItemsResponseSchema, res)
+      if (!validated.success) {
+        throw new Error(
+          `Invalid outgoing GetPhotoMetadataAttentionItemsResponse: ${validated.error}`
+        )
+      }
+      return validated.data
+    }
+  )
 
   // --- Offline Metadata-Aware Photo Search & User-Assigned Metadata ---
 

@@ -117,6 +117,8 @@ import type {
   GetPhotoMetadataDetailResponse,
   GetPhotoMetadataFacetsRequest,
   GetPhotoMetadataFacetsResponse,
+  GetPhotoMetadataAttentionItemsRequest,
+  GetPhotoMetadataAttentionItemsResponse,
   SemanticSearchRequest,
   SemanticSearchResponse,
   SemanticSearchCancelRequest,
@@ -266,6 +268,9 @@ export interface VaultApi {
   getPhotoMetadataFacets: (
     request: GetPhotoMetadataFacetsRequest
   ) => Promise<GetPhotoMetadataFacetsResponse>
+  getPhotoMetadataAttentionItems: (
+    request?: GetPhotoMetadataAttentionItemsRequest
+  ) => Promise<GetPhotoMetadataAttentionItemsResponse>
   searchPhotosSemantic: (request: SemanticSearchRequest) => Promise<SemanticSearchResponse>
   cancelPhotosSemanticSearch: (
     request?: SemanticSearchCancelRequest

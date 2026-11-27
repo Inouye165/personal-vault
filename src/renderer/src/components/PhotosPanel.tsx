@@ -491,6 +491,10 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     cameraFacet,
     lensFacet,
     fileTypeFacet,
+    attentionItems: metadataAttentionItems,
+    attentionTotalCount: metadataAttentionTotalCount,
+    isLoadingAttentionItems: isLoadingMetadataAttentionItems,
+    loadAttentionItems: loadMetadataAttentionItems,
     setCameraFacetSearch,
     setCameraFacetOffset,
     setLensFacetSearch,
@@ -988,6 +992,83 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                     of {thumbnailPrepProgress.totalPhotos.toLocaleString()})
                   </span>
                 )}
+              {(() => {
+                const cov = metadataProgress?.coverage
+                const unreadMeta = (cov?.unprocessedCount ?? 0) + (cov?.staleCount ?? 0)
+                const attentionMeta =
+                  (cov?.failedCount ?? 0) +
+                  (cov?.unavailableCount ?? 0) +
+                  (cov?.unsupportedCount ?? 0)
+                if (
+                  metadataProgress?.status !== 'running' &&
+                  metadataProgress?.status !== 'paused' &&
+                  unreadMeta === 0 &&
+                  attentionMeta === 0
+                ) {
+                  return null
+                }
+                const metaLabel =
+                  metadataProgress.status === 'running'
+                    ? `Dates & locations: reading ${metadataProgress.processedPhotos.toLocaleString()} of ${metadataProgress.totalPhotos.toLocaleString()}`
+                    : metadataProgress.status === 'paused'
+                      ? `Dates & locations: paused (${metadataProgress.pendingPhotos.toLocaleString()} left)`
+                      : unreadMeta > 0
+                        ? `Dates & locations: ${unreadMeta.toLocaleString()} not read yet`
+                        : `Dates & locations: ${attentionMeta.toLocaleString()} need attention`
+                return (
+                  <button
+                    type="button"
+                    className={`photos-status-chip ${attentionMeta > 0 ? 'photos-status-warning' : ''}`}
+                    data-testid="photos-metadata-status"
+                    onClick={() => {
+                      setViewMode('grid')
+                      setShowMetadataPanel(true)
+                      setShowSemanticPanel(false)
+                    }}
+                    title="Inspect date and location extraction status"
+                  >
+                    {metaLabel}
+                  </button>
+                )
+              })()}
+              {semanticIndex.modelStatus.state === 'ready' &&
+                (() => {
+                  const sp = semanticIndex.indexProgress
+                  const unindexed = Math.max(0, sp.totalCatalogPhotos - sp.currentIndexedPhotos)
+                  const semAttention = sp.failedPhotos + sp.unsupportedPhotos
+                  if (
+                    sp.status !== 'running' &&
+                    sp.status !== 'paused' &&
+                    sp.status !== 'interrupted' &&
+                    unindexed === 0 &&
+                    semAttention === 0
+                  ) {
+                    return null
+                  }
+                  const semLabel =
+                    sp.status === 'running'
+                      ? `Visual search: indexing ${sp.processedPhotos.toLocaleString()} of ${sp.totalPhotos.toLocaleString()}`
+                      : sp.status === 'paused' || sp.status === 'interrupted'
+                        ? `Visual search: paused (${sp.pendingPhotos.toLocaleString()} left)`
+                        : semAttention > 0
+                          ? `Visual search: ${semAttention.toLocaleString()} need attention`
+                          : `Visual search: ${unindexed.toLocaleString()} not indexed yet`
+                  return (
+                    <button
+                      type="button"
+                      className={`photos-status-chip ${semAttention > 0 ? 'photos-status-warning' : ''}`}
+                      data-testid="photos-visual-status"
+                      onClick={() => {
+                        setViewMode('grid')
+                        setShowSemanticPanel(true)
+                        setShowMetadataPanel(false)
+                      }}
+                      title="Inspect local visual search indexing status"
+                    >
+                      {semLabel}
+                    </button>
+                  )
+                })()}
             </div>
 
             <div className="photos-toolbar-actions">
@@ -1219,6 +1300,10 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                 onPauseExtraction={pauseMetadataExtraction}
                 onResumeExtraction={resumeMetadataExtraction}
                 onCancelExtraction={cancelMetadataExtraction}
+                attentionItems={metadataAttentionItems}
+                attentionTotalCount={metadataAttentionTotalCount}
+                isLoadingAttentionItems={isLoadingMetadataAttentionItems}
+                onLoadAttentionItems={loadMetadataAttentionItems}
                 savedEvents={savedEvents}
                 savedPlaces={savedPlaces}
                 onUpsertSavedEvent={upsertSavedEvent}
@@ -1291,29 +1376,56 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
               </div>
             )}
 
-            {!isLoading && !error && totalCount === 0 && !clarification && !visualModelRequired && (
-              <div className="notice" role="status">
-                <ImageIcon size={24} />
-                <div className="notice-content">
-                  <strong>
-                    {searchQuery
-                      ? searchMode === 'metadata_only'
-                        ? `No matching photos found for "${searchQuery}"`
-                        : `No semantic matches found for "${searchQuery}"`
-                      : hasAnyActiveFilter
-                        ? 'No photographs match the current filter criteria'
-                        : 'No photographs discovered yet'}
-                  </strong>
-                  <p>
-                    {searchQuery
-                      ? 'Try different search terms or click Clear search to restore ordinary browsing.'
-                      : hasAnyActiveFilter
-                        ? 'Try selecting different filters or click Reset filters.'
-                        : 'Connect a source folder and run a scan to discover photographs.'}
-                  </p>
-                </div>
-              </div>
-            )}
+            {!isLoading &&
+              !error &&
+              totalCount === 0 &&
+              !clarification &&
+              !visualModelRequired &&
+              (() => {
+                const cov = metadataProgress?.coverage
+                const unreadMeta = (cov?.unprocessedCount ?? 0) + (cov?.staleCount ?? 0)
+                const visualUnindexed =
+                  semanticIndex.modelStatus.state === 'ready'
+                    ? Math.max(
+                        0,
+                        semanticIndex.indexProgress.totalCatalogPhotos -
+                          semanticIndex.indexProgress.currentIndexedPhotos
+                      )
+                    : 0
+                const hasUnfinishedMeta = (searchQuery || hasAnyActiveFilter) && unreadMeta > 0
+                const hasUnfinishedVisual =
+                  Boolean(searchQuery) && searchMode !== 'metadata_only' && visualUnindexed > 0
+
+                return (
+                  <div className="notice" role="status" data-testid="photos-empty-notice">
+                    <ImageIcon size={24} />
+                    <div className="notice-content">
+                      <strong>
+                        {searchQuery
+                          ? hasUnfinishedMeta || hasUnfinishedVisual
+                            ? `No matches yet for "${searchQuery}" — catalog catch-up is incomplete`
+                            : searchMode === 'metadata_only'
+                              ? `No matching photos found for "${searchQuery}"`
+                              : `No semantic matches found for "${searchQuery}"`
+                          : hasAnyActiveFilter
+                            ? hasUnfinishedMeta
+                              ? 'No matching photos yet — some photo dates and locations are not read yet'
+                              : 'No photographs match the current filter criteria'
+                            : 'No photographs discovered yet'}
+                      </strong>
+                      <p>
+                        {hasUnfinishedMeta || hasUnfinishedVisual
+                          ? `${unreadMeta > 0 ? `${unreadMeta.toLocaleString()} photos have not had dates/locations read yet. ` : ''}${hasUnfinishedVisual ? `${visualUnindexed.toLocaleString()} photos are not visually indexed yet.` : ''}`
+                          : searchQuery
+                            ? 'Try different search terms or click Clear search to restore ordinary browsing.'
+                            : hasAnyActiveFilter
+                              ? 'Try selecting different filters or click Reset filters.'
+                              : 'Connect a source folder and run a scan to discover photographs.'}
+                      </p>
+                    </div>
+                  </div>
+                )
+              })()}
 
             {/* Virtualized Grid & Search Results Container */}
             {totalCount > 0 && (
@@ -1870,6 +1982,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                   <dt>Capture Location (GPS)</dt>
                   <dd>
                     {(() => {
+                      const effStatus = selectedMetadataDetail?.effectiveStatus ?? 'unprocessed'
                       const gpsMeta = selectedMetadataDetail?.currentMetadata
                       if (
                         gpsMeta?.gpsStatus === 'present' &&
@@ -1889,7 +2002,23 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                       if (gpsMeta?.gpsStatus === 'invalid') {
                         return 'Unknown (invalid GPS tags)'
                       }
-                      return 'Unknown (no embedded GPS)'
+                      if (
+                        !selectedMetadataDetail ||
+                        effStatus === 'unprocessed' ||
+                        effStatus === 'stale'
+                      ) {
+                        return 'Location not read yet'
+                      }
+                      if (effStatus === 'unavailable') {
+                        return 'Original unavailable — location could not be read'
+                      }
+                      if (effStatus === 'failed') {
+                        return 'Could not read location'
+                      }
+                      if (effStatus === 'unsupported') {
+                        return 'Unsupported format — location could not be read'
+                      }
+                      return 'No embedded GPS'
                     })()}
                   </dd>
                 </dl>
@@ -2063,8 +2192,18 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                             <span className="metadata-warning-inline">
                               Invalid GPS ({meta.gpsParseError ?? 'malformed coordinates'})
                             </span>
+                          ) : effStatus === 'unprocessed' ||
+                            effStatus === 'stale' ||
+                            !selectedMetadataDetail ? (
+                            'Location not read yet'
+                          ) : effStatus === 'unavailable' ? (
+                            'Original unavailable — location could not be read'
+                          ) : effStatus === 'failed' ? (
+                            'Could not read location'
+                          ) : effStatus === 'unsupported' ? (
+                            'Unsupported format — location could not be read'
                           ) : (
-                            unknownFallback
+                            'No embedded GPS'
                           )}
                         </dd>
 
@@ -2232,6 +2371,65 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="details-section" data-testid="photo-protection-section">
+                <h4>Copy &amp; Backup Protection</h4>
+                {(() => {
+                  const prot = selectedMetadataDetail?.protectionStatus
+                  return (
+                    <dl className="details-list">
+                      <dt>Cataloged Original</dt>
+                      <dd>Tracked read-only in catalog (source file is never altered)</dd>
+
+                      <dt>Verified Vault Copy</dt>
+                      <dd>
+                        {prot?.hasVerifiedVaultCopy ? (
+                          <div className="metadata-provenance-stack">
+                            <span>Verified copy in vault</span>
+                            {prot.vaultCopyVerifiedAtMs && (
+                              <span className="sub-text">
+                                Verified {formatDate(prot.vaultCopyVerifiedAtMs)}
+                              </span>
+                            )}
+                            {prot.vaultCopyRelativePath && (
+                              <span className="sub-text path-text">
+                                {prot.vaultCopyRelativePath}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="photo-protection-warning">
+                            No verified vault copy yet
+                          </span>
+                        )}
+                      </dd>
+
+                      <dt>Verified Backup</dt>
+                      <dd>
+                        {prot?.hasVerifiedBackup ? (
+                          <div className="metadata-provenance-stack">
+                            <span>
+                              {prot.latestBackupDestinationName ?? 'Verified destination'}
+                            </span>
+                            {prot.latestBackupVerifiedAtMs && (
+                              <span className="sub-text">
+                                Verified {formatDate(prot.latestBackupVerifiedAtMs)}
+                                {prot.hasVerifiedVaultCopy
+                                  ? prot.backupCoversVaultCopy
+                                    ? ' · includes this vault copy'
+                                    : ' · vault copy created after last backup'
+                                  : ' · catalog snapshot only (no vault copy for this file)'}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="photo-protection-warning">No verified backup yet</span>
+                        )}
+                      </dd>
+                    </dl>
+                  )
+                })()}
               </div>
 
               <div className="details-section">

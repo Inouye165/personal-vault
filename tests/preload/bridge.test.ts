@@ -108,6 +108,7 @@ describe('preload bridge', () => {
         'resumePhotoMetadataExtraction',
         'cancelPhotoMetadataExtraction',
         'onPhotoMetadataProgress',
+        'getPhotoMetadataAttentionItems',
         'getPhotoMetadataDetail',
         'getPhotoMetadataFacets',
         'searchPhotosSemantic',

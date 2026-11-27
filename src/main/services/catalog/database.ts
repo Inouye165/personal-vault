@@ -114,6 +114,7 @@ import type {
   PhotoMetadataJobItemRecord,
   GetPhotoMetadataFacetsOptions,
   PhotoMetadataFacetsResult,
+  PhotoMetadataAttentionItemRecord,
   PhotoTechnicalMetadataDetailResult,
   SavedEventRecord,
   SavedPlaceRecord,
@@ -5858,6 +5859,7 @@ export class CatalogDatabase {
     const now = Date.now()
     const recipe = input.parserRecipeVersion || METADATA_PARSER_RECIPE_VERSION
     const retryFailed = Boolean(input.retryFailed)
+    const retryUnavailable = Boolean(input.retryUnavailable)
 
     this.db.exec('BEGIN IMMEDIATE TRANSACTION;')
     try {
@@ -5876,56 +5878,36 @@ export class CatalogDatabase {
 
       // Snapshot authorized photo scope using bounded cursor batches (500 rows per step)
       const batchSize = METADATA_LIMITS.JOB_SNAPSHOT_BATCH_SIZE
-      const selectBatchStmt = retryFailed
-        ? this.db.prepare(
-            `
-            SELECT
-              f.id AS file_location_id,
-              f.original_path,
-              f.extension,
-              d.id AS discovery_observation_id,
-              d.byte_size,
-              d.filesystem_mtime_ms
-            FROM file_locations f
-            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-            WHERE f.category = 'photo'
-              AND f.id > ?
-              AND NOT EXISTS (
-                SELECT 1 FROM photo_technical_metadata tm
-                WHERE tm.file_location_id = f.id
-                  AND tm.discovery_observation_id = d.id
-                  AND tm.is_current = 1
-                  AND tm.parser_recipe_version = ?
-                  AND tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported')
-              )
-            ORDER BY f.id ASC
-            LIMIT ?;
-          `
+      const skipStatusesSql = retryFailed
+        ? "AND tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported')"
+        : retryUnavailable
+          ? "AND tm.extraction_status IN ('extracted', 'no_metadata', 'unsupported', 'failed')"
+          : ''
+      const selectBatchStmt = this.db.prepare(
+        `
+        SELECT
+          f.id AS file_location_id,
+          f.original_path,
+          f.extension,
+          d.id AS discovery_observation_id,
+          d.byte_size,
+          d.filesystem_mtime_ms
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        WHERE f.category = 'photo'
+          AND f.id > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM photo_technical_metadata tm
+            WHERE tm.file_location_id = f.id
+              AND tm.discovery_observation_id = d.id
+              AND tm.is_current = 1
+              AND tm.parser_recipe_version = ?
+              ${skipStatusesSql}
           )
-        : this.db.prepare(
-            `
-            SELECT
-              f.id AS file_location_id,
-              f.original_path,
-              f.extension,
-              d.id AS discovery_observation_id,
-              d.byte_size,
-              d.filesystem_mtime_ms
-            FROM file_locations f
-            JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-            WHERE f.category = 'photo'
-              AND f.id > ?
-              AND NOT EXISTS (
-                SELECT 1 FROM photo_technical_metadata tm
-                WHERE tm.file_location_id = f.id
-                  AND tm.discovery_observation_id = d.id
-                  AND tm.is_current = 1
-                  AND tm.parser_recipe_version = ?
-              )
-            ORDER BY f.id ASC
-            LIMIT ?;
-          `
-          )
+        ORDER BY f.id ASC
+        LIMIT ?;
+      `
+      )
 
       const insertItemStmt = this.db.prepare(
         `
@@ -6545,6 +6527,53 @@ export class CatalogDatabase {
       ? this.userPhotoMetadataRepository.getCameraLabel(currentMetadata.cameraNormalized)
       : null
 
+    const vaultRow = this.db
+      .prepare(
+        `
+        SELECT vc.relative_path, vc.verified_at_ms, vc.created_at_ms
+        FROM discovery_observations d
+        JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        JOIN vaults v ON v.is_active = 1
+        JOIN vault_copies vc
+          ON vc.vault_id = v.vault_id
+         AND vc.sha256 = h.sha256
+         AND vc.byte_size = d.byte_size
+        WHERE d.file_location_id = ? AND d.is_current = 1
+        LIMIT 1;
+      `
+      )
+      .get(fileLocationId) as
+      { relative_path: string; verified_at_ms: number; created_at_ms: number } | undefined
+
+    const backupRow = this.db
+      .prepare(
+        `
+        SELECT bj.completed_at_ms, bj.started_at_ms, bd.name AS destination_name
+        FROM backup_jobs bj
+        JOIN backup_destinations bd ON bd.id = bj.destination_id
+        WHERE bj.status = 'completed'
+          AND bj.completed_at_ms IS NOT NULL
+        ORDER BY bj.completed_at_ms DESC, bj.created_at_ms DESC
+        LIMIT 1;
+      `
+      )
+      .get() as
+      | {
+          completed_at_ms: number
+          started_at_ms: number | null
+          destination_name: string
+        }
+      | undefined
+
+    const hasVerifiedVaultCopy = Boolean(vaultRow)
+    const hasVerifiedBackup = Boolean(backupRow)
+    const backupCoversVaultCopy = Boolean(
+      vaultRow &&
+      backupRow &&
+      ((backupRow.started_at_ms !== null && backupRow.started_at_ms >= vaultRow.created_at_ms) ||
+        backupRow.completed_at_ms >= vaultRow.verified_at_ms)
+    )
+
     return {
       fileLocationId,
       currentRevision,
@@ -6554,8 +6583,163 @@ export class CatalogDatabase {
       historicalMetadataCount,
       currentMetadata,
       userPlace,
-      cameraLabel
+      cameraLabel,
+      protectionStatus: {
+        cataloged: true,
+        hasVerifiedVaultCopy,
+        vaultCopyVerifiedAtMs: vaultRow?.verified_at_ms ?? null,
+        vaultCopyRelativePath: vaultRow?.relative_path ?? null,
+        hasVerifiedBackup,
+        latestBackupVerifiedAtMs: backupRow?.completed_at_ms ?? null,
+        latestBackupDestinationName: backupRow?.destination_name ?? null,
+        backupCoversVaultCopy
+      }
     }
+  }
+
+  public listPhotoMetadataAttentionItems(options?: {
+    parserRecipeVersion?: string
+    statuses?: readonly ('failed' | 'unavailable' | 'unsupported')[]
+    limit?: number
+    offset?: number
+  }): { items: PhotoMetadataAttentionItemRecord[]; totalCount: number } {
+    this.assertOpen()
+    const recipe = options?.parserRecipeVersion ?? METADATA_PARSER_RECIPE_VERSION
+    const statuses =
+      options?.statuses && options.statuses.length > 0
+        ? options.statuses
+        : (['failed', 'unavailable', 'unsupported'] as const)
+    const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 50)))
+    const offset = Math.max(0, Math.floor(options?.offset ?? 0))
+    const placeholders = statuses.map(() => '?').join(', ')
+
+    const countRow = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS cnt
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id
+         AND tm.discovery_observation_id = d.id
+         AND tm.parser_recipe_version = ?
+         AND tm.is_current = 1
+        WHERE f.category = 'photo'
+          AND tm.extraction_status IN (${placeholders});
+      `
+      )
+      .get(recipe, ...statuses) as { cnt: number } | undefined
+
+    const rows = this.db
+      .prepare(
+        `
+        SELECT f.id AS file_location_id,
+               f.original_path,
+               f.file_name,
+               tm.recorded_extension,
+               tm.extraction_status,
+               tm.error_code,
+               tm.error_message,
+               tm.created_at_ms
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id
+         AND tm.discovery_observation_id = d.id
+         AND tm.parser_recipe_version = ?
+         AND tm.is_current = 1
+        WHERE f.category = 'photo'
+          AND tm.extraction_status IN (${placeholders})
+        ORDER BY f.id ASC
+        LIMIT ? OFFSET ?;
+      `
+      )
+      .all(recipe, ...statuses, limit, offset) as Array<Record<string, unknown>>
+
+    return {
+      items: rows.map((r) => ({
+        fileLocationId: Number(r.file_location_id),
+        originalPath: String(r.original_path),
+        fileName: String(r.file_name),
+        recordedExtension: String(r.recorded_extension ?? ''),
+        extractionStatus: String(r.extraction_status) as 'failed' | 'unavailable' | 'unsupported',
+        errorCode:
+          r.error_code !== null && r.error_code !== undefined ? String(r.error_code) : null,
+        errorMessage:
+          r.error_message !== null && r.error_message !== undefined
+            ? String(r.error_message)
+            : null,
+        updatedAtMs: Number(r.created_at_ms)
+      })),
+      totalCount: Number(countRow?.cnt ?? 0)
+    }
+  }
+
+  public getSemanticCatchUpPendingCount(params: {
+    modelId: string
+    modelCommit: string
+    modelManifestSha256: string
+    preprocessingVersion: string
+    includePreviousFailures?: boolean
+  }): number {
+    this.assertOpen()
+    const manifestSha = params.modelManifestSha256.toLowerCase()
+    const skipFailedClause = params.includePreviousFailures
+      ? `AND NOT EXISTS (
+          SELECT 1 FROM semantic_index_job_items ji
+          JOIN semantic_index_jobs j ON j.id = ji.job_id
+          WHERE ji.file_location_id = f.id
+            AND ji.discovery_observation_id = d.id
+            AND j.model_id = ?
+            AND j.model_commit = ?
+            AND LOWER(j.model_manifest_sha256) = ?
+            AND j.preprocessing_version = ?
+            AND ji.status = 'unsupported'
+        )`
+      : `AND NOT EXISTS (
+          SELECT 1 FROM semantic_index_job_items ji
+          JOIN semantic_index_jobs j ON j.id = ji.job_id
+          WHERE ji.file_location_id = f.id
+            AND ji.discovery_observation_id = d.id
+            AND j.model_id = ?
+            AND j.model_commit = ?
+            AND LOWER(j.model_manifest_sha256) = ?
+            AND j.preprocessing_version = ?
+            AND ji.status IN ('unsupported', 'failed')
+        )`
+
+    const row = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS cnt
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        WHERE f.category = 'photo'
+          AND NOT EXISTS (
+            SELECT 1 FROM photo_semantic_embeddings e
+            WHERE e.file_location_id = f.id
+              AND e.discovery_observation_id = d.id
+              AND e.is_current = 1
+              AND e.model_id = ?
+              AND e.model_commit = ?
+              AND LOWER(e.model_manifest_sha256) = ?
+              AND e.preprocessing_version = ?
+          )
+          ${skipFailedClause};
+      `
+      )
+      .get(
+        params.modelId,
+        params.modelCommit,
+        manifestSha,
+        params.preprocessingVersion,
+        params.modelId,
+        params.modelCommit,
+        manifestSha,
+        params.preprocessingVersion
+      ) as { cnt: number } | undefined
+
+    return Number(row?.cnt ?? 0)
   }
 
   public listSavedEvents(): SavedEventRecord[] {

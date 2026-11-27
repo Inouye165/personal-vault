@@ -12,6 +12,7 @@ import { ThumbnailCoordinator, ThumbnailPrepCoordinator } from './services/thumb
 import { SimilarityCoordinator } from './services/similarity'
 import { AnnotationJournal } from './services/annotations'
 import {
+  attachAutoSemanticIndexScheduler,
   SemanticModelManager,
   SemanticIndexCoordinator,
   SemanticSearchCoordinator,
@@ -87,6 +88,7 @@ let semanticIndexCoordinator: SemanticIndexCoordinator | null = null
 let semanticSearchCoordinator: SemanticSearchCoordinator | null = null
 let photoMetadataCoordinator: PhotoMetadataCoordinator | null = null
 let disposeAutoMetadataScheduler: (() => void) | null = null
+let disposeAutoSemanticScheduler: (() => void) | null = null
 let documentExtractionCoordinator: DocumentExtractionCoordinator | null = null
 let ocrModelManager: OcrModelManager | null = null
 let documentOcrCoordinator: DocumentOcrCoordinator | null = null
@@ -207,6 +209,10 @@ if (!app.requestSingleInstanceLock()) {
         if (disposeAutoMetadataScheduler) {
           disposeAutoMetadataScheduler()
           disposeAutoMetadataScheduler = null
+        }
+        if (disposeAutoSemanticScheduler) {
+          disposeAutoSemanticScheduler()
+          disposeAutoSemanticScheduler = null
         }
         if (disposeScanThumbPrep) {
           disposeScanThumbPrep()
@@ -441,12 +447,27 @@ if (!app.requestSingleInstanceLock()) {
 
       const attachedMetaScheduler = attachAutoMetadataExtractionScheduler({
         scanCoordinator: coordinator,
+        vaultImportCoordinator: vaultCoordinator,
         photoMetadataCoordinator,
         isCatalogClosed: () => !catalog || catalog.isClosed(),
         isDisabled: () => process.env.PV_DISABLE_AUTO_METADATA === '1',
         log: logStartup
       })
       disposeAutoMetadataScheduler = attachedMetaScheduler.dispose
+      attachedMetaScheduler.scheduler.initialize()
+
+      const attachedSemanticScheduler = attachAutoSemanticIndexScheduler({
+        catalog,
+        scanCoordinator: coordinator,
+        vaultImportCoordinator: vaultCoordinator,
+        semanticIndexCoordinator,
+        semanticModelManager,
+        isCatalogClosed: () => !catalog || catalog.isClosed(),
+        isDisabled: () => process.env.PV_DISABLE_AUTO_SEMANTIC_INDEX === '1',
+        log: logStartup
+      })
+      disposeAutoSemanticScheduler = attachedSemanticScheduler.dispose
+      attachedSemanticScheduler.scheduler.initialize()
 
       thumbnailPrepCoordinator = new ThumbnailPrepCoordinator({
         catalog,
