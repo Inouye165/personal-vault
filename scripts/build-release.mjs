@@ -24,6 +24,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import JSON5 from 'json5'
 import { verifyReleaseBundle } from './verify-release-bundle.mjs'
 
 const __dirname = resolve(fileURLToPath(import.meta.url), '..')
@@ -211,19 +212,23 @@ export async function buildReleaseBundle(args) {
   const ebOutDir = join(workDir, 'eb-out')
   const tempConfigPath = join(workDir, 'electron-builder-release.json')
 
+  const baseConfig = JSON5.parse(readFileSync(join(rootDir, 'electron-builder.json5'), 'utf8'))
   const builderOverride = {
-    extends: 'file:electron-builder.json5',
+    ...baseConfig,
     appId: cfg.appId,
     productName: cfg.productName,
     extraMetadata: {
+      ...(baseConfig.extraMetadata ?? {}),
       name: cfg.packageName,
       version: cfg.version
     },
     directories: {
+      ...(baseConfig.directories ?? {}),
       output: ebOutDir,
       buildResources: 'build'
     },
     win: {
+      ...(baseConfig.win ?? {}),
       icon: 'build/icon.ico',
       target: [
         {
@@ -233,6 +238,7 @@ export async function buildReleaseBundle(args) {
       ]
     },
     nsis: {
+      ...(baseConfig.nsis ?? {}),
       artifactName: cfg.artifactName,
       shortcutName: cfg.shortcutName,
       createDesktopShortcut: cfg.createShortcuts,
