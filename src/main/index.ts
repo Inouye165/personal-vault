@@ -1,9 +1,14 @@
-import { app, BrowserWindow, protocol, safeStorage } from 'electron'
+import { app, BrowserWindow, dialog, protocol, safeStorage } from 'electron'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc/handlers'
 import { createSenderValidator } from './ipc/sender'
 import { resolveAppLocation, secureWebContents } from './navigation'
+import {
+  focusExistingWindowOnSecondInstance,
+  handleFatalStartupError,
+  shouldShowStartupErrorDialog
+} from './startup-lifecycle'
 import { setupSecurityPolicies } from './security'
 import { CatalogDatabase } from './services/catalog'
 import { ScanJobCoordinator } from './services/jobs'
@@ -59,9 +64,13 @@ protocol.registerSchemesAsPrivileged([
   }
 ])
 
+function getStartupLogPath(): string {
+  return join(app.getPath('userData'), 'startup.log')
+}
+
 function logStartup(message: string): void {
   try {
-    const logPath = join(app.getPath('userData'), 'startup.log')
+    const logPath = getStartupLogPath()
     appendFileSync(
       logPath,
       `[${new Date().toISOString()}] [PID:${process.pid}] ${message}\n`,
@@ -339,11 +348,7 @@ if (!app.requestSingleInstanceLock()) {
   }
 
   app.on('second-instance', () => {
-    logStartup('second-instance event received -> focusing existing window')
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-    }
+    focusExistingWindowOnSecondInstance(mainWindow, logStartup)
   })
 
   void app
@@ -744,13 +749,16 @@ if (!app.requestSingleInstanceLock()) {
       })
     })
     .catch((err) => {
-      logStartup(
-        `Fatal error during application startup: ${err instanceof Error ? err.stack : String(err)}`
-      )
-      console.error('Fatal error during application startup:', err)
-      if (err instanceof RestoreIncompleteError) {
-        app.exit(1)
-      }
+      void handleFatalStartupError(err, {
+        appVersion: app.getVersion(),
+        logPath: getStartupLogPath(),
+        showDialog: shouldShowStartupErrorDialog({ env: process.env, argv: process.argv }),
+        logStartup,
+        showErrorBox: (title, content) => dialog.showErrorBox(title, content),
+        exit: (code) => app.exit(code),
+        shutdownServices: () => shutdownServicesForQuit(),
+        releaseSingleInstanceLock: () => app.releaseSingleInstanceLock()
+      })
     })
 
   app.on('before-quit', (event) => {
