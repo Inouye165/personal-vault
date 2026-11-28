@@ -25,6 +25,8 @@ export const DEFAULT_PHOTO_EXTENSIONS: readonly string[] = [
   '.pef'
 ]
 
+export const DEFAULT_VIDEO_EXTENSIONS: readonly string[] = ['.mp4', '.mov', '.m4v', '.webm']
+
 export const DEFAULT_DOCUMENT_EXTENSIONS: readonly string[] = [
   '.pdf',
   '.txt',
@@ -120,6 +122,7 @@ export const DEFAULT_SOFTWARE_CLUTTER_FILE_NAMES: readonly string[] = [
 
 export interface DiscoveryPolicyConfig {
   readonly photoExtensions?: readonly string[]
+  readonly videoExtensions?: readonly string[]
   readonly documentExtensions?: readonly string[]
   readonly excludedPaths?: readonly string[]
   readonly excludedDirectoryNames?: readonly string[]
@@ -131,6 +134,7 @@ export interface DiscoveryPolicyConfig {
 
 export interface ResolvedDiscoveryPolicy {
   readonly photoExtensions: ReadonlySet<string>
+  readonly videoExtensions: ReadonlySet<string>
   readonly documentExtensions: ReadonlySet<string>
   readonly excludedPaths: ReadonlySet<string>
   readonly excludedDirectoryNames: ReadonlySet<string>
@@ -155,6 +159,9 @@ export function resolveDiscoveryPolicy(
 ): ResolvedDiscoveryPolicy {
   const photoExtensions = new Set(
     (config.photoExtensions ?? DEFAULT_PHOTO_EXTENSIONS).map(normalizeExtension)
+  )
+  const videoExtensions = new Set(
+    (config.videoExtensions ?? DEFAULT_VIDEO_EXTENSIONS).map(normalizeExtension)
   )
   const documentExtensions = new Set(
     (config.documentExtensions ?? DEFAULT_DOCUMENT_EXTENSIONS).map(normalizeExtension)
@@ -183,6 +190,7 @@ export function resolveDiscoveryPolicy(
 
   return {
     photoExtensions,
+    videoExtensions,
     documentExtensions,
     excludedPaths,
     excludedDirectoryNames,
@@ -292,6 +300,7 @@ export type FileDecision =
   | {
       readonly action: 'include'
       readonly candidateKind: ItemKind
+      readonly initialMediaKind: 'photo' | 'video' | 'document'
       readonly extension: string
     }
   | {
@@ -335,6 +344,16 @@ export function evaluateFileEntry(fileName: string, policy: ResolvedDiscoveryPol
     return {
       action: 'include',
       candidateKind: 'photo',
+      initialMediaKind: 'photo',
+      extension
+    }
+  }
+
+  if (policy.videoExtensions.has(extension)) {
+    return {
+      action: 'include',
+      candidateKind: 'photo',
+      initialMediaKind: 'video',
       extension
     }
   }
@@ -343,6 +362,7 @@ export function evaluateFileEntry(fileName: string, policy: ResolvedDiscoveryPol
     return {
       action: 'include',
       candidateKind: 'document',
+      initialMediaKind: 'document',
       extension
     }
   }

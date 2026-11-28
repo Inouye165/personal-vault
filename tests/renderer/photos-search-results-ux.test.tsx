@@ -242,9 +242,9 @@ describe('Photos search results hierarchy and Copy text UX', () => {
     expect(document.querySelector('.badge-similarity-score')).toBeNull()
     expect(screen.queryByText(/31% match/i)).not.toBeInTheDocument()
 
-    // Selecting result #1 opens Photograph Details with similarity score and Open original
+    // Selecting Details on result #1 opens Photograph Details with similarity score and Open original
     await act(async () => {
-      fireEvent.click(tiles[0]!)
+      fireEvent.click(within(tiles[0]!).getByRole('button', { name: /Details for/i }))
     })
 
     const scoreDetail = await screen.findByTestId('photo-search-similarity-detail')

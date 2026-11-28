@@ -903,6 +903,49 @@ export class ThumbnailCoordinator {
     })
   }
 
+  /**
+   * Returns a cached WebP preview when neither the original file nor a verified
+   * vault copy is currently accessible.
+   */
+  public async getCachedPreviewForOriginal(params: {
+    readonly locationId: number
+    readonly sourcePath: string
+    readonly expectedByteSize: number
+    readonly expectedMtimeMs: number | null
+    readonly expectedSha256?: string | null
+  }): Promise<{
+    readonly dataUrl: string
+    readonly mimeType: string
+    readonly width: number
+    readonly height: number
+  } | null> {
+    const cacheKey = this.cache.computeCacheKey({
+      locationId: params.locationId,
+      sourcePath: params.sourcePath,
+      sha256: params.expectedSha256 ?? null,
+      byteSize: params.expectedByteSize,
+      mtimeMs: params.expectedMtimeMs
+    })
+    try {
+      const cachedBuf = await this.cache.get(cacheKey)
+      if (!cachedBuf || cachedBuf.length === 0) {
+        return null
+      }
+      const dims = hasValidWebPStructure(cachedBuf, THUMBNAIL_LIMITS.MAX_THUMBNAIL_BYTES)
+      if (!dims) {
+        return null
+      }
+      return {
+        dataUrl: `data:image/webp;base64,${cachedBuf.toString('base64')}`,
+        mimeType: 'image/webp',
+        width: dims.width,
+        height: dims.height
+      }
+    } catch {
+      return null
+    }
+  }
+
   public async verifyModelDirectory(
     directoryPath: string,
     specs: readonly SemanticModelArtifactSpec[]
@@ -1689,7 +1732,7 @@ export class ThumbnailCoordinator {
           expectedByteSize: item.params.expectedByteSize,
           expectedMtimeMs: item.params.expectedMtimeMs,
           expectedSha256: item.params.expectedSha256,
-          approvedRoots: this.getApprovedRoots()
+          approvedRoots: this.resolveEffectiveRoots(item.params.approvedRootsOverride)
         }
       })
     } else if (item.action === 'verify_model') {
@@ -1804,7 +1847,8 @@ export class ThumbnailCoordinator {
           dataUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
           mimeType,
           width: Number(msg.width) || 1,
-          height: Number(msg.height) || 1
+          height: Number(msg.height) || 1,
+          sourceKind: 'original'
         })
       } else {
         const msgText =

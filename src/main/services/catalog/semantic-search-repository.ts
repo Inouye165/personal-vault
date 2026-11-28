@@ -104,13 +104,13 @@ export class SemanticSearchRepository {
         COUNT(*) AS total_filtered_photos,
         COALESCE(SUM(CASE WHEN se.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS candidate_count,
         COALESCE(SUM(CASE
-          WHEN se.id IS NULL AND EXISTS (
+          WHEN f.media_kind = 'photo' AND se.id IS NULL AND EXISTS (
             SELECT 1 FROM photo_semantic_embeddings h_se
             WHERE h_se.file_location_id = f.id
           ) THEN 1 ELSE 0 END
         ), 0) AS stale_count,
         COALESCE(SUM(CASE
-          WHEN se.id IS NULL AND NOT EXISTS (
+          WHEN f.media_kind = 'photo' AND se.id IS NULL AND NOT EXISTS (
             SELECT 1 FROM photo_semantic_embeddings h_se
             WHERE h_se.file_location_id = f.id
           ) THEN 1 ELSE 0 END

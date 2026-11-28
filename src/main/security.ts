@@ -2,7 +2,7 @@ import { session } from 'electron'
 import type { AppLocation } from './navigation'
 
 const CONTENT_SECURITY_POLICY =
-  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; media-src 'self' pv-media:; connect-src 'self'"
 
 export function setupSecurityPolicies(location: AppLocation): void {
   // Production loads the document from disk, where the <meta> policy in index.html applies.

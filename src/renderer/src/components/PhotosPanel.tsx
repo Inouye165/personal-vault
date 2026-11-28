@@ -30,7 +30,10 @@ import {
   Edit2,
   SlidersHorizontal,
   Cpu,
-  ArrowLeft
+  ArrowLeft,
+  Play,
+  Film,
+  ExternalLink
 } from 'lucide-react'
 import {
   usePhotos,
@@ -50,11 +53,18 @@ import { PhotoMetadataFilterPanel } from './PhotoMetadataFilterPanel'
 import { PhotosSearchBar } from './PhotosSearchBar'
 import { PhotoSelectedOcrSection } from './PhotoSelectedOcrSection'
 import {
+  MediaViewerModal,
+  formatContainerLabel,
+  formatMediaDuration,
+  hasMismatchedVideoExtension
+} from './MediaViewerModal'
+import {
   matchGpsToOfflinePlaces,
   resolveOfflinePlace
 } from '../../../shared/search/offline-gazetteer'
 import type {
-  OriginalPhotoResult,
+  MediaKindFilter,
+  OpenInDefaultPlayerResponse,
   PhotoItem,
   PhotoTechnicalMetadataDetail,
   ThumbnailResult
@@ -171,38 +181,53 @@ function formatEffectiveExtractionStatus(detail: PhotoTechnicalMetadataDetail | 
 
 interface PhotoCardCellProps {
   photo: PhotoItem
+  index: number
   thumb?: ThumbnailResult
   isSelected: boolean
   top: number
   left: number
   cellWidth: number
   cellHeight: number
-  onSelect: (id: number) => void
-  onKeyDown: (e: KeyboardEvent<HTMLDivElement>, photo: PhotoItem) => void
+  onOpenViewer: (index: number, photo: PhotoItem) => void
+  onSelectDetails: (id: number) => void
+  onKeyDown: (e: KeyboardEvent<HTMLElement>, photo: PhotoItem, index: number) => void
 }
 
 function PhotoCardCell({
   photo,
+  index,
   thumb,
   isSelected,
   top,
   left,
   cellWidth,
   cellHeight,
-  onSelect,
+  onOpenViewer,
+  onSelectDetails,
   onKeyDown
 }: PhotoCardCellProps): ReactElement {
+  const isVideo = photo.mediaKind === 'video'
+  const durationText = isVideo ? formatMediaDuration(photo.videoDurationMs) : null
+  const containerShort = isVideo
+    ? photo.videoContainer === 'quicktime'
+      ? 'MOV'
+      : photo.videoContainer === 'webm'
+        ? 'WEBM'
+        : 'MP4'
+    : null
+  const hasMismatch = isVideo && hasMismatchedVideoExtension(photo)
   const ratingDesc = photo.rating ? `${photo.rating} stars` : 'unrated'
   const flagDesc = photo.flag && photo.flag !== 'none' ? photo.flag : 'no flag'
   const offlineSuffix =
-    (thumb?.status === 'ready' && thumb.originalUnavailable) || thumb?.status === 'missing'
+    !isVideo &&
+    ((thumb?.status === 'ready' && thumb.originalUnavailable) || thumb?.status === 'missing')
       ? ', original unavailable'
       : ''
 
   return (
     <div
       id={`photo-cell-${photo.id}`}
-      className={`photo-card photo-cell ${isSelected ? 'selected' : ''}`}
+      className={`photo-card photo-cell ${isSelected ? 'selected' : ''} ${isVideo ? 'is-video' : ''}`}
       style={{
         position: 'absolute',
         top: `${top}px`,
@@ -210,15 +235,41 @@ function PhotoCardCell({
         width: `${cellWidth}px`,
         height: `${cellHeight}px`
       }}
-      role="button"
-      tabIndex={0}
-      aria-label={`${photo.fileName}, ${formatBytes(photo.byteSize)}, ${ratingDesc}, ${flagDesc}${offlineSuffix}`}
-      aria-pressed={isSelected}
-      onClick={() => onSelect(photo.id)}
-      onKeyDown={(e) => onKeyDown(e, photo)}
+      onKeyDown={(e) => onKeyDown(e, photo, index)}
     >
-      <div className="photo-thumbnail-container">
-        {thumb?.status === 'ready' ? (
+      <button
+        type="button"
+        id={`photo-open-${photo.id}`}
+        data-testid={`photo-open-btn-${photo.id}`}
+        className="photo-thumbnail-container photo-card-open-btn"
+        aria-label={`${isVideo ? 'Play video' : 'Open photograph'} ${photo.fileName}, ${formatBytes(photo.byteSize)}, ${ratingDesc}, ${flagDesc}${offlineSuffix}`}
+        onClick={() => onOpenViewer(index, photo)}
+      >
+        {isVideo ? (
+          <div className="video-card-tile" data-testid={`video-card-tile-${photo.id}`}>
+            <span className="video-play-circle" aria-hidden="true">
+              <Play size={22} />
+            </span>
+            <div className="video-tile-badges">
+              <span className="video-kind-badge">VIDEO</span>
+              {containerShort && <span className="video-container-badge">{containerShort}</span>}
+              {durationText && <span className="video-duration-badge">{durationText}</span>}
+            </div>
+            {photo.videoStructureError && (
+              <span className="thumbnail-status-badge" title={photo.videoStructureError}>
+                Unreadable video
+              </span>
+            )}
+            {!photo.videoStructureError && hasMismatch && (
+              <span
+                className="video-mismatch-badge"
+                title={`Content detected as ${formatContainerLabel(photo.videoContainer)}`}
+              >
+                Detected video ({containerShort})
+              </span>
+            )}
+          </div>
+        ) : thumb?.status === 'ready' ? (
           <>
             <img
               src={thumb.dataUrl}
@@ -259,7 +310,7 @@ function PhotoCardCell({
 
         {/* Compact Review Badges Overlay */}
         <div className="photo-badges-overlay">
-          {photo.rating !== null && (
+          {typeof photo.rating === 'number' && (
             <span className="badge-rating" title={`Rating: ${photo.rating} stars`}>
               ★ {photo.rating}
             </span>
@@ -270,12 +321,25 @@ function PhotoCardCell({
             </span>
           )}
         </div>
-      </div>
+      </button>
       <div className="photo-card-info">
-        <span className="photo-filename" title={photo.fileName}>
-          {photo.fileName}
-        </span>
-        <span className="photo-size">{formatBytes(photo.byteSize)}</span>
+        <div className="photo-card-meta-text">
+          <span className="photo-filename" title={photo.fileName}>
+            {photo.fileName}
+          </span>
+          <span className="photo-size">{formatBytes(photo.byteSize)}</span>
+        </div>
+        <button
+          type="button"
+          id={`photo-details-btn-${photo.id}`}
+          data-testid={`photo-details-btn-${photo.id}`}
+          className="btn btn-secondary btn-xs photo-card-details-btn"
+          aria-label={`Details for ${photo.fileName}`}
+          aria-pressed={isSelected}
+          onClick={() => onSelectDetails(photo.id)}
+        >
+          Details
+        </button>
       </div>
     </div>
   )
@@ -297,6 +361,9 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     selectedId,
     thumbnails,
     thumbnailPrepProgress,
+    mediaKindFilter,
+    photoCount,
+    videoCount,
     ratingFilter,
     flagFilter,
     collectionId,
@@ -331,6 +398,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     upsertCameraLabel,
     deleteCameraLabel,
     selectPhoto,
+    setMediaKindFilter,
     setRatingFilter,
     setFlagFilter,
     setCollectionId,
@@ -556,28 +624,23 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     setShowSemanticPanel(false)
   }, [])
 
-  const originalModalRef = useRef<HTMLDivElement>(null)
   const originalOpenBtnRef = useRef<HTMLButtonElement>(null)
-  const originalRequestGenRef = useRef(0)
-  const selectedPhotoIdRef = useRef<number | null>(selectedPhoto?.id ?? null)
+  const lastOpenedViewerIdRef = useRef<number | null>(null)
 
-  const INITIAL_ORIGINAL_VIEWER_STATE: {
+  const [viewerState, setViewerState] = useState<{
     open: boolean
+    index: number | null
     locationId: number | null
-    fileName: string
-    loading: boolean
-    result: OriginalPhotoResult | null
-    error: string | null
-  } = {
+    fallbackItem: PhotoItem | null
+    restoreTo: 'grid' | 'details'
+  }>({
     open: false,
+    index: null,
     locationId: null,
-    fileName: '',
-    loading: false,
-    result: null,
-    error: null
-  }
+    fallbackItem: null,
+    restoreTo: 'grid'
+  })
 
-  const [originalViewerState, setOriginalViewerState] = useState(INITIAL_ORIGINAL_VIEWER_STATE)
   const [prevOriginalSelectedId, setPrevOriginalSelectedId] = useState<number | null>(
     selectedPhoto?.id ?? null
   )
@@ -585,108 +648,146 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   if (prevOriginalSelectedId !== currentOriginalSelectedId) {
     setPrevOriginalSelectedId(currentOriginalSelectedId)
     if (
-      originalViewerState.locationId !== null &&
-      originalViewerState.locationId !== currentOriginalSelectedId &&
-      (originalViewerState.open ||
-        originalViewerState.loading ||
-        originalViewerState.result !== null ||
-        originalViewerState.error !== null)
+      viewerState.restoreTo === 'details' &&
+      viewerState.locationId !== null &&
+      viewerState.locationId !== currentOriginalSelectedId &&
+      viewerState.open
     ) {
-      setOriginalViewerState(INITIAL_ORIGINAL_VIEWER_STATE)
+      setViewerState({
+        open: false,
+        index: null,
+        locationId: null,
+        fallbackItem: null,
+        restoreTo: 'grid'
+      })
     }
   }
 
-  const closeOriginalViewer = useCallback(() => {
-    originalRequestGenRef.current += 1
-    setOriginalViewerState({
+  const closeMediaViewer = useCallback(() => {
+    setViewerState((prev) => ({
+      ...prev,
       open: false,
+      index: null,
       locationId: null,
-      fileName: '',
-      loading: false,
-      result: null,
-      error: null
+      fallbackItem: null
+    }))
+  }, [])
+
+  const openViewerFromGrid = useCallback((index: number, item: PhotoItem) => {
+    lastOpenedViewerIdRef.current = item.id
+    setViewerState({
+      open: true,
+      index,
+      locationId: item.id,
+      fallbackItem: item,
+      restoreTo: 'grid'
     })
   }, [])
 
-  useEffect(() => {
-    // Invalidate any in-flight original photo request when the selected photo changes or Details closes
-    selectedPhotoIdRef.current = selectedPhoto?.id ?? null
-    originalRequestGenRef.current += 1
-  }, [selectedPhoto?.id])
-
-  const handleOpenOriginal = useCallback(async () => {
+  const handleOpenOriginal = useCallback(() => {
     if (!selectedPhoto) return
-    const targetId = selectedPhoto.id
-    const targetName = selectedPhoto.fileName
-    selectedPhotoIdRef.current = targetId
-    const reqGen = ++originalRequestGenRef.current
-    setOriginalViewerState({
+    const loadedIndex = photos.findIndex((p) => p.id === selectedPhoto.id)
+    lastOpenedViewerIdRef.current = selectedPhoto.id
+    setViewerState({
       open: true,
-      locationId: targetId,
-      fileName: targetName,
-      loading: true,
-      result: null,
-      error: null
+      index: loadedIndex >= 0 ? loadedIndex : 0,
+      locationId: selectedPhoto.id,
+      fallbackItem: selectedPhoto,
+      restoreTo: 'details'
     })
+  }, [selectedPhoto, photos])
+
+  const handleViewerNavigate = useCallback(
+    (nextIndex: number) => {
+      const nextItem = getPhoto(nextIndex) ?? photos[nextIndex] ?? null
+      if (nextItem) {
+        lastOpenedViewerIdRef.current = nextItem.id
+      }
+      setViewerState((prev) => ({
+        ...prev,
+        index: nextIndex,
+        locationId: nextItem?.id ?? null,
+        fallbackItem: nextItem
+      }))
+    },
+    [getPhoto, photos]
+  )
+
+  const handleOpenDetailsFromViewer = useCallback(
+    (item: PhotoItem) => {
+      lastOpenedViewerIdRef.current = item.id
+      closeMediaViewer()
+      selectPhoto(item.id)
+    },
+    [closeMediaViewer, selectPhoto]
+  )
+
+  const [detailsDefaultPlayerState, setDetailsDefaultPlayerState] = useState<{
+    locationId: number | null
+    busy: boolean
+    feedback: OpenInDefaultPlayerResponse | null
+  }>({ locationId: null, busy: false, feedback: null })
+  const isCurrentDetailsPlayerState =
+    Boolean(selectedPhoto) && detailsDefaultPlayerState.locationId === selectedPhoto?.id
+  const detailsDefaultPlayerBusy = Boolean(
+    isCurrentDetailsPlayerState && detailsDefaultPlayerState.busy
+  )
+  const detailsDefaultPlayerFeedback = isCurrentDetailsPlayerState
+    ? detailsDefaultPlayerState.feedback
+    : null
+
+  const handleOpenDetailsDefaultPlayer = useCallback(async () => {
+    if (!selectedPhoto || !window.api?.openMediaInDefaultPlayer) return
+    const targetId = selectedPhoto.id
+    setDetailsDefaultPlayerState({ locationId: targetId, busy: true, feedback: null })
     try {
-      const res = await window.api.getOriginalPhoto({ locationId: targetId })
-      if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
-        return
-      }
-      if (res.status === 'ready') {
-        setOriginalViewerState({
-          open: true,
-          locationId: targetId,
-          fileName: targetName,
-          loading: false,
-          result: res,
-          error: null
-        })
-      } else {
-        setOriginalViewerState({
-          open: true,
-          locationId: targetId,
-          fileName: targetName,
-          loading: false,
-          result: res,
-          error: res.reason
-        })
-      }
+      const res = await window.api.openMediaInDefaultPlayer({ locationId: targetId })
+      setDetailsDefaultPlayerState((prev) =>
+        prev.locationId === targetId ? { locationId: targetId, busy: false, feedback: res } : prev
+      )
     } catch (err: unknown) {
-      if (originalRequestGenRef.current !== reqGen || selectedPhotoIdRef.current !== targetId) {
-        return
-      }
-      setOriginalViewerState({
-        open: true,
-        locationId: targetId,
-        fileName: targetName,
-        loading: false,
-        result: null,
-        error: err instanceof Error ? err.message : 'Failed to load original photograph'
-      })
+      setDetailsDefaultPlayerState((prev) =>
+        prev.locationId === targetId
+          ? {
+              locationId: targetId,
+              busy: false,
+              feedback: {
+                ok: false,
+                usedTemporaryCopy: false,
+                launchedFileName: null,
+                error: err instanceof Error ? err.message : 'Failed to open in default player'
+              }
+            }
+          : prev
+      )
     }
   }, [selectedPhoto])
 
   const restorePhotoFocus = useCallback(() => {
     const id = lastSelectedIdRef.current
     if (id === null) return null
-    return document.getElementById(`photo-cell-${id}`)
+    return (
+      document.getElementById(`photo-details-btn-${id}`) ??
+      document.getElementById(`photo-open-${id}`) ??
+      document.getElementById(`photo-cell-${id}`)
+    )
   }, [])
+
+  const restoreViewerFocus = useCallback(() => {
+    if (viewerState.restoreTo === 'details' && originalOpenBtnRef.current) {
+      return originalOpenBtnRef.current
+    }
+    const id = lastOpenedViewerIdRef.current
+    if (id === null) return null
+    return (
+      document.getElementById(`photo-open-${id}`) ?? document.getElementById(`photo-cell-${id}`)
+    )
+  }, [viewerState.restoreTo])
 
   const isFiltersDrawerOpen = showMetadataPanel && viewMode === 'grid'
   const isDetailsOpen = viewMode === 'grid' && Boolean(selectedPhoto)
-  const isOriginalModalOpen =
-    originalViewerState.open && originalViewerState.locationId === (selectedPhoto?.id ?? null)
-  const hasTopmostDrawer = isFiltersDrawerOpen || showSemanticPanel || isOriginalModalOpen
-
-  useFocusTrap({
-    isOpen: isOriginalModalOpen,
-    isModal: isOriginalModalOpen,
-    isActive: isOriginalModalOpen,
-    containerRef: originalModalRef,
-    onClose: closeOriginalViewer,
-    restoreFocusTo: () => originalOpenBtnRef.current
-  })
+  const isMediaViewerOpen = viewerState.open
+  const hasTopmostDrawer = isFiltersDrawerOpen || showSemanticPanel || isMediaViewerOpen
 
   useFocusTrap({
     isOpen: isFiltersDrawerOpen,
@@ -829,7 +930,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     // 1. Visible viewport tiles first (high priority)
     for (let i = visibleStart; i < visibleEnd; i++) {
       const photo = getPhoto(i)
-      if (photo) {
+      if (photo && photo.mediaKind !== 'video') {
         desiredIds.add(photo.id)
         requestThumbnail(photo, 'high')
       }
@@ -839,14 +940,14 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     if (scrollDirection === 'up') {
       for (let i = visibleStart - 1; i >= startIndex; i--) {
         const photo = getPhoto(i)
-        if (photo && !desiredIds.has(photo.id)) {
+        if (photo && photo.mediaKind !== 'video' && !desiredIds.has(photo.id)) {
           desiredIds.add(photo.id)
           requestThumbnail(photo, 'normal')
         }
       }
       for (let i = visibleEnd; i < endIndex; i++) {
         const photo = getPhoto(i)
-        if (photo && !desiredIds.has(photo.id)) {
+        if (photo && photo.mediaKind !== 'video' && !desiredIds.has(photo.id)) {
           desiredIds.add(photo.id)
           requestThumbnail(photo, 'normal')
         }
@@ -854,14 +955,14 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     } else {
       for (let i = visibleEnd; i < endIndex; i++) {
         const photo = getPhoto(i)
-        if (photo && !desiredIds.has(photo.id)) {
+        if (photo && photo.mediaKind !== 'video' && !desiredIds.has(photo.id)) {
           desiredIds.add(photo.id)
           requestThumbnail(photo, 'normal')
         }
       }
       for (let i = visibleStart - 1; i >= startIndex; i--) {
         const photo = getPhoto(i)
-        if (photo && !desiredIds.has(photo.id)) {
+        if (photo && photo.mediaKind !== 'video' && !desiredIds.has(photo.id)) {
           desiredIds.add(photo.id)
           requestThumbnail(photo, 'normal')
         }
@@ -904,26 +1005,33 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   }
 
   // Keyboard navigation within grid
-  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>, currentPhoto: PhotoItem) => {
-    const currentIndex = photos.findIndex((p) => p.id === currentPhoto.id)
-    if (currentIndex === -1) return
+  const handleKeyDown = (
+    e: KeyboardEvent<HTMLElement>,
+    currentPhoto: PhotoItem,
+    currentIndex: number
+  ) => {
+    if (isMediaViewerOpen) return
 
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'Enter') {
+      const target = e.target as HTMLElement | null
+      if (target?.classList?.contains('photo-card-details-btn')) {
+        return
+      }
       e.preventDefault()
-      selectPhoto(currentPhoto.id)
+      openViewerFromGrid(currentIndex, currentPhoto)
       return
     }
 
     let nextIndex: number
     switch (e.key) {
       case 'ArrowRight':
-        nextIndex = Math.min(photos.length - 1, currentIndex + 1)
+        nextIndex = Math.min(totalCount - 1, currentIndex + 1)
         break
       case 'ArrowLeft':
         nextIndex = Math.max(0, currentIndex - 1)
         break
       case 'ArrowDown':
-        nextIndex = Math.min(photos.length - 1, currentIndex + columns)
+        nextIndex = Math.min(totalCount - 1, currentIndex + columns)
         break
       case 'ArrowUp':
         nextIndex = Math.max(0, currentIndex - columns)
@@ -933,11 +1041,22 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
     }
 
     if (nextIndex !== -1 && nextIndex !== currentIndex) {
-      const nextPhoto = photos[nextIndex]
+      e.preventDefault()
+      ensureRangeLoaded(nextIndex, nextIndex + 1)
+      const nextPhoto = getPhoto(nextIndex)
+      if (containerRef.current) {
+        const nextRow = Math.floor(nextIndex / columns)
+        const itemTop = nextRow * rowHeight
+        const itemBottom = itemTop + cellHeight
+        const curScrollTop = containerRef.current.scrollTop
+        if (itemTop < curScrollTop) {
+          containerRef.current.scrollTop = itemTop
+        } else if (itemBottom > curScrollTop + containerHeight) {
+          containerRef.current.scrollTop = Math.max(0, itemBottom - containerHeight)
+        }
+      }
       if (nextPhoto) {
-        e.preventDefault()
-        selectPhoto(nextPhoto.id)
-        const targetEl = document.getElementById(`photo-cell-${nextPhoto.id}`)
+        const targetEl = document.getElementById(`photo-open-${nextPhoto.id}`)
         targetEl?.focus()
       }
     }
@@ -959,6 +1078,7 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
   const membershipCollectionIds = new Set(memberships.map((m) => m.collectionId))
   const activeMetadataFilterCount = countActiveMetadataFilters(metadataFilters)
   const reviewFilterCount =
+    (mediaKindFilter !== 'all' ? 1 : 0) +
     (ratingFilter !== 'all' ? 1 : 0) +
     (flagFilter !== 'all' ? 1 : 0) +
     (collectionId !== null ? 1 : 0)
@@ -973,8 +1093,14 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
           <div className="photos-header-row">
             <div className="photos-count-info">
               <h2>Photographs</h2>
-              <span className="count-badge">
-                {totalCount.toLocaleString()} {totalCount === 1 ? 'photo' : 'photos'}
+              <span className="count-badge" data-testid="photos-count-badge">
+                {mediaKindFilter === 'video'
+                  ? `${totalCount.toLocaleString()} ${totalCount === 1 ? 'video' : 'videos'}`
+                  : mediaKindFilter === 'photo'
+                    ? `${totalCount.toLocaleString()} ${totalCount === 1 ? 'photo' : 'photos'}`
+                    : videoCount > 0
+                      ? `${totalCount.toLocaleString()} items (${photoCount.toLocaleString()} photos · ${videoCount.toLocaleString()} videos)`
+                      : `${totalCount.toLocaleString()} ${totalCount === 1 ? 'photo' : 'photos'}`}
               </span>
               {thumbnailPrepProgress?.status === 'running' &&
                 thumbnailPrepProgress.pendingPhotos > 0 &&
@@ -1195,6 +1321,39 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
 
             {viewMode === 'grid' && (
               <div className="photos-filter-actions">
+                <div
+                  className="media-type-filter-group"
+                  role="group"
+                  aria-label="Media type filter"
+                >
+                  {(
+                    [
+                      { key: 'all', label: 'All media' },
+                      { key: 'photo', label: 'Photos' },
+                      { key: 'video', label: 'Videos' }
+                    ] as const
+                  ).map(({ key, label }) => {
+                    const countSuffix =
+                      key === 'video' && videoCount > 0
+                        ? ` (${videoCount.toLocaleString()})`
+                        : key === 'photo' && videoCount > 0
+                          ? ` (${photoCount.toLocaleString()})`
+                          : ''
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        data-testid={`media-filter-${key}`}
+                        className={`btn btn-sm ${mediaKindFilter === key ? 'btn-primary' : 'btn-secondary'}`}
+                        aria-pressed={mediaKindFilter === key}
+                        onClick={() => setMediaKindFilter(key as MediaKindFilter)}
+                      >
+                        {label}
+                        {countSuffix}
+                      </button>
+                    )
+                  })}
+                </div>
                 <button
                   ref={filtersToggleBtnRef}
                   id="photos-toggle-metadata-filters"
@@ -1488,13 +1647,15 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                       <PhotoCardCell
                         key={photo.id}
                         photo={photo}
+                        index={index}
                         thumb={thumb}
                         isSelected={isSelected}
                         top={top}
                         left={left}
                         cellWidth={cellWidth}
                         cellHeight={cellHeight}
-                        onSelect={selectPhoto}
+                        onOpenViewer={openViewerFromGrid}
+                        onSelectDetails={selectPhoto}
                         onKeyDown={handleKeyDown}
                       />
                     )
@@ -1544,33 +1705,52 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
 
             <div className="details-body">
               <div className="details-preview">
-                {(() => {
-                  const selectedThumb = thumbnails.get(selectedPhoto.id)
-                  if (selectedThumb?.status === 'ready') {
+                {selectedPhoto.mediaKind === 'video' ? (
+                  <div className="details-preview-placeholder details-video-preview">
+                    <Film size={40} aria-hidden="true" />
+                    <strong>{formatContainerLabel(selectedPhoto.videoContainer)} Video</strong>
+                    <span className="sub-text">
+                      {[
+                        selectedPhoto.videoCodec?.toUpperCase(),
+                        formatMediaDuration(selectedPhoto.videoDurationMs),
+                        selectedPhoto.videoWidthPx && selectedPhoto.videoHeightPx
+                          ? `${selectedPhoto.videoWidthPx} × ${selectedPhoto.videoHeightPx}`
+                          : null
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || 'Video file'}
+                    </span>
+                  </div>
+                ) : (
+                  (() => {
+                    const selectedThumb = thumbnails.get(selectedPhoto.id)
+                    if (selectedThumb?.status === 'ready') {
+                      return (
+                        <img
+                          src={selectedThumb.dataUrl}
+                          alt={selectedPhoto.fileName}
+                          className="details-preview-img"
+                        />
+                      )
+                    }
+                    if (selectedThumb?.status === 'missing') {
+                      return (
+                        <div className="details-preview-placeholder unavailable">
+                          <AlertTriangle size={36} />
+                          <span>Original unavailable</span>
+                        </div>
+                      )
+                    }
                     return (
-                      <img
-                        src={selectedThumb.dataUrl}
-                        alt={selectedPhoto.fileName}
-                        className="details-preview-img"
-                      />
-                    )
-                  }
-                  if (selectedThumb?.status === 'missing') {
-                    return (
-                      <div className="details-preview-placeholder unavailable">
-                        <AlertTriangle size={36} />
-                        <span>Original unavailable</span>
+                      <div className="details-preview-placeholder">
+                        <ImageIcon size={48} />
                       </div>
                     )
-                  }
-                  return (
-                    <div className="details-preview-placeholder">
-                      <ImageIcon size={48} />
-                    </div>
-                  )
-                })()}
+                  })()
+                )}
               </div>
-              {thumbnails.get(selectedPhoto.id)?.status === 'ready' &&
+              {selectedPhoto.mediaKind !== 'video' &&
+                thumbnails.get(selectedPhoto.id)?.status === 'ready' &&
                 (thumbnails.get(selectedPhoto.id) as Extract<ThumbnailResult, { status: 'ready' }>)
                   .originalUnavailable && (
                   <p className="sub-text details-preview-unavailable-note" role="status">
@@ -1583,11 +1763,85 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                   type="button"
                   className="btn btn-secondary btn-sm"
                   data-testid="photos-open-original-btn"
-                  onClick={() => void handleOpenOriginal()}
+                  onClick={handleOpenOriginal}
                 >
-                  Open original
+                  {selectedPhoto.mediaKind === 'video' ? 'Play video' : 'Open original'}
                 </button>
+                {selectedPhoto.mediaKind === 'video' && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    data-testid="details-open-default-player-btn"
+                    disabled={detailsDefaultPlayerBusy}
+                    onClick={() => void handleOpenDetailsDefaultPlayer()}
+                  >
+                    <ExternalLink size={14} aria-hidden="true" />
+                    <span>{detailsDefaultPlayerBusy ? 'Opening…' : 'Open in default player'}</span>
+                  </button>
+                )}
               </div>
+              {detailsDefaultPlayerFeedback && (
+                <p
+                  className={detailsDefaultPlayerFeedback.ok ? 'sub-text' : 'error-text'}
+                  role="status"
+                >
+                  {detailsDefaultPlayerFeedback.ok
+                    ? (detailsDefaultPlayerFeedback.message ??
+                      `Opened ${detailsDefaultPlayerFeedback.launchedFileName ?? selectedPhoto.fileName} in your default media player.`)
+                    : (detailsDefaultPlayerFeedback.error ?? 'Could not launch default player.')}
+                </p>
+              )}
+
+              {selectedPhoto.mediaKind === 'video' && (
+                <div className="details-section" data-testid="details-video-metadata-section">
+                  <h4>Video Stream &amp; Container</h4>
+                  <dl className="details-list">
+                    <dt>Detected Container</dt>
+                    <dd>{formatContainerLabel(selectedPhoto.videoContainer)}</dd>
+                    {selectedPhoto.videoCodec && (
+                      <>
+                        <dt>Video Codec</dt>
+                        <dd>{selectedPhoto.videoCodec.toUpperCase()}</dd>
+                      </>
+                    )}
+                    {selectedPhoto.audioCodec && (
+                      <>
+                        <dt>Audio Codec</dt>
+                        <dd>{selectedPhoto.audioCodec.toUpperCase()}</dd>
+                      </>
+                    )}
+                    {formatMediaDuration(selectedPhoto.videoDurationMs) && (
+                      <>
+                        <dt>Duration</dt>
+                        <dd>{formatMediaDuration(selectedPhoto.videoDurationMs)}</dd>
+                      </>
+                    )}
+                    {selectedPhoto.videoWidthPx && selectedPhoto.videoHeightPx && (
+                      <>
+                        <dt>Resolution</dt>
+                        <dd>
+                          {selectedPhoto.videoWidthPx} × {selectedPhoto.videoHeightPx}
+                        </dd>
+                      </>
+                    )}
+                    {hasMismatchedVideoExtension(selectedPhoto) && (
+                      <>
+                        <dt>Extension Notice</dt>
+                        <dd>
+                          File keeps original <code>{selectedPhoto.extension}</code> name; content
+                          identified as {formatContainerLabel(selectedPhoto.videoContainer)}.
+                        </dd>
+                      </>
+                    )}
+                    {selectedPhoto.videoStructureError && (
+                      <>
+                        <dt>Container Check</dt>
+                        <dd className="error-text">{selectedPhoto.videoStructureError}</dd>
+                      </>
+                    )}
+                  </dl>
+                </div>
+              )}
 
               {/* Stage 5B: Review & Organize Controls */}
               <div className="details-section review-section">
@@ -2465,68 +2719,21 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
         </>
       )}
 
-      {isOriginalModalOpen && (
-        <div
-          className="original-photo-backdrop"
-          role="presentation"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) closeOriginalViewer()
-          }}
-        >
-          <div
-            ref={originalModalRef}
-            className="original-photo-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Original photograph: ${originalViewerState.fileName}`}
-            data-testid="photos-original-modal"
-            tabIndex={-1}
-          >
-            <div className="original-photo-header">
-              <div className="original-photo-title">
-                <strong>{originalViewerState.fileName}</strong>
-                {originalViewerState.result?.status === 'ready' && (
-                  <span className="original-photo-dims" data-testid="photos-original-dims">
-                    {originalViewerState.result.width} × {originalViewerState.result.height}
-                  </span>
-                )}
-              </div>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                data-testid="photos-original-close-btn"
-                onClick={closeOriginalViewer}
-              >
-                Close
-              </button>
-            </div>
-            <div className="original-photo-body">
-              {originalViewerState.loading && (
-                <p className="original-photo-status" role="status">
-                  Loading full-resolution original…
-                </p>
-              )}
-              {!originalViewerState.loading && originalViewerState.error && (
-                <p
-                  className="original-photo-error error-text"
-                  data-testid="photos-original-error"
-                  role="alert"
-                >
-                  {originalViewerState.error}
-                </p>
-              )}
-              {!originalViewerState.loading && originalViewerState.result?.status === 'ready' && (
-                <img
-                  src={originalViewerState.result.dataUrl}
-                  alt={originalViewerState.fileName}
-                  className="original-photo-img"
-                  data-testid="photos-original-img"
-                />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <MediaViewerModal
+        open={isMediaViewerOpen}
+        items={photos}
+        getItemAtIndex={(index) =>
+          getPhoto(index) ??
+          (viewerState.index === index ? (viewerState.fallbackItem ?? undefined) : undefined)
+        }
+        totalCount={Math.max(totalCount, photos.length)}
+        currentIndex={viewerState.index}
+        onNavigate={handleViewerNavigate}
+        onClose={closeMediaViewer}
+        onOpenDetails={handleOpenDetailsFromViewer}
+        ensureRangeLoaded={ensureRangeLoaded}
+        restoreFocusTo={restoreViewerFocus}
+      />
     </div>
   )
 }

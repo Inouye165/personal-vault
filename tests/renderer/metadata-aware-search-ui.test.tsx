@@ -511,7 +511,9 @@ describe('Renderer Metadata-Aware Search, Clarifications & Provenance Separation
 
     // 4. Photo Details keeps File Facts, Embedded Technical Metadata (GPS + readable tags + parser limits), and User-Assigned Metadata separate
     await waitFor(() => expect(screen.getByText('yellowstone-restaurant.jpg')).toBeInTheDocument())
-    fireEvent.click(screen.getByText('yellowstone-restaurant.jpg'))
+    fireEvent.click(
+      screen.getByRole('button', { name: /Details for yellowstone-restaurant\.jpg/i })
+    )
 
     await waitFor(() => {
       expect(screen.getByTestId('photo-technical-metadata-section')).toHaveTextContent(

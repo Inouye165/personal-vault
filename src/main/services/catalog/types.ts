@@ -39,6 +39,27 @@ export interface SourceRecord {
   readonly updatedAtMs: number
 }
 
+export type MediaKind = 'photo' | 'video' | 'document'
+export type MediaKindFilter = 'all' | 'photo' | 'video'
+
+export interface VideoMediaMetadataInput {
+  readonly containerFormat: 'mp4' | 'quicktime' | 'webm'
+  readonly videoCodec: string | null
+  readonly audioCodec: string | null
+  readonly durationMs: number | null
+  readonly widthPx: number | null
+  readonly heightPx: number | null
+  readonly isPlayableStructure: boolean
+  readonly structureError: string | null
+  readonly inspectedAtMs: number
+}
+
+export interface VisualLibraryMediaCounts {
+  readonly totalCount: number
+  readonly photoCount: number
+  readonly videoCount: number
+}
+
 export interface CatalogFileRecord {
   readonly id: number
   readonly sourceId: number
@@ -47,6 +68,14 @@ export interface CatalogFileRecord {
   readonly fileName: string
   readonly extension: string
   readonly category: 'photo' | 'document'
+  readonly mediaKind?: 'photo' | 'video' | 'document'
+  readonly videoContainer?: 'mp4' | 'quicktime' | 'webm' | null
+  readonly videoCodec?: string | null
+  readonly audioCodec?: string | null
+  readonly videoDurationMs?: number | null
+  readonly videoWidthPx?: number | null
+  readonly videoHeightPx?: number | null
+  readonly videoStructureError?: string | null
   readonly discoveryObservationId: number
   readonly byteSize: number
   readonly filesystemBirthtimeMs: number | null
@@ -93,6 +122,8 @@ export interface DiscoveryCandidateInput {
   readonly mtimeMs: number | null
   readonly discoveredAtMs: number
   readonly category: 'photo' | 'document'
+  readonly mediaKind?: MediaKind
+  readonly videoMetadata?: VideoMediaMetadataInput | null
 }
 
 export interface RecordHashObservationInput {
@@ -125,6 +156,7 @@ export interface GpsBoundingBox {
 export interface QueryFileLocationsOptions extends PaginationOptions {
   readonly sourceId?: number
   readonly category?: 'photo' | 'document'
+  readonly mediaKindFilter?: MediaKindFilter
   readonly hasActiveHash?: boolean
   readonly sha256?: string
   readonly ratingFilter?: 'all' | 'unrated' | '1' | '2' | '3' | '4' | '5'

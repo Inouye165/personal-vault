@@ -137,7 +137,7 @@ describe('PhotosPanel Concurrency & Complete Collection Controls (Findings 4 & 5
     await waitFor(() => expect(screen.getByText('a.jpg')).toBeInTheDocument())
 
     // 1. Select photo A
-    fireEvent.click(screen.getByRole('button', { name: /a\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for a\.jpg/i }))
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /5 Stars/i })).toBeInTheDocument()
     )
@@ -147,7 +147,7 @@ describe('PhotosPanel Concurrency & Complete Collection Controls (Findings 4 & 5
     expect(screen.getByText(/Saving\.\.\./i)).toBeInTheDocument()
 
     // 3. Immediately switch selection to photo B before photo A's save resolves
-    fireEvent.click(screen.getByRole('button', { name: /b\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for b\.jpg/i }))
     await waitFor(() => expect(screen.getAllByText('b.jpg').length).toBeGreaterThanOrEqual(1))
 
     // Photo B's status must NOT be 'Saving...'
@@ -182,7 +182,7 @@ describe('PhotosPanel Concurrency & Complete Collection Controls (Findings 4 & 5
     await waitFor(() => expect(screen.getByText('a.jpg')).toBeInTheDocument())
 
     // Select photo A
-    fireEvent.click(screen.getByRole('button', { name: /a\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for a\.jpg/i }))
     await waitFor(() => expect(screen.getByText('Vacation')).toBeInTheDocument())
 
     // Must have accessible rename button for collection
@@ -211,7 +211,7 @@ describe('PhotosPanel Concurrency & Complete Collection Controls (Findings 4 & 5
     render(<PhotosPanel />)
     await waitFor(() => expect(screen.getByText('a.jpg')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: /a\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for a\.jpg/i }))
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /Add to Vacation/i })).toBeInTheDocument()
     )

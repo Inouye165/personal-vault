@@ -40,6 +40,7 @@ function buildSqlFilterOptions(
 
   return {
     category: 'photo',
+    mediaKindFilter: request.mediaKindFilter ?? 'all',
     parserRecipeVersion,
     ratingFilter: request.ratingFilter ?? 'all',
     flagFilter: request.flagFilter ?? 'all',
@@ -153,6 +154,7 @@ export class PhotoSearchCoordinator {
       request.includeUnknownDimensions ||
       (request.ratingFilter && request.ratingFilter !== 'all') ||
       (request.flagFilter && request.flagFilter !== 'all') ||
+      (request.mediaKindFilter && request.mediaKindFilter !== 'all') ||
       request.collectionId
     )
 
@@ -248,6 +250,7 @@ export class PhotoSearchCoordinator {
       offset,
       limit,
       minScore: request.minScore ?? 0.0,
+      mediaKindFilter: request.mediaKindFilter ?? 'all',
       ratingFilter: request.ratingFilter ?? 'all',
       flagFilter: request.flagFilter ?? 'all',
       collectionId: request.collectionId ?? null,

@@ -123,6 +123,7 @@ export class SimilarityCoordinator {
       // 1. Snapshot all current photos in catalog
       const firstPage = this.catalog.queryFileLocations({
         category: 'photo',
+        mediaKindFilter: 'photo',
         offset: 0,
         limit: 500
       })
@@ -133,6 +134,7 @@ export class SimilarityCoordinator {
       while (currentOffset < totalPhotosCount) {
         const res = this.catalog.queryFileLocations({
           category: 'photo',
+          mediaKindFilter: 'photo',
           offset: currentOffset,
           limit: 500
         })

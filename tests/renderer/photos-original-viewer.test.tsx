@@ -107,7 +107,7 @@ describe('Stage 8D: PhotosPanel Open original full-resolution viewer', () => {
     })
 
     // Selecting photo 1 opens Details but must NOT call getOriginalPhoto yet
-    fireEvent.click(screen.getByText('landscape.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for landscape.jpg' }))
     expect(getOriginalMock).not.toHaveBeenCalled()
 
     const openBtn = screen.getByTestId('photos-open-original-btn')
@@ -116,7 +116,7 @@ describe('Stage 8D: PhotosPanel Open original full-resolution viewer', () => {
     expect(screen.getByTestId('photos-original-modal')).toBeInTheDocument()
 
     // Rapidly switch to photo 2 before photo 1 resolves
-    fireEvent.click(screen.getByText('portrait.heic'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for portrait.heic' }))
     await waitFor(() => {
       expect(screen.queryByTestId('photos-original-modal')).not.toBeInTheDocument()
     })
@@ -163,14 +163,14 @@ describe('Stage 8D: PhotosPanel Open original full-resolution viewer', () => {
     })
 
     // 1. A -> B -> A while A is still loading
-    fireEvent.click(screen.getByText('landscape.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for landscape.jpg' }))
     fireEvent.click(screen.getByTestId('photos-open-original-btn'))
     expect(screen.getByTestId('photos-original-modal')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByText('portrait.heic'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for portrait.heic' }))
     expect(screen.queryByTestId('photos-original-modal')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByText('landscape.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for landscape.jpg' }))
     expect(screen.queryByTestId('photos-original-modal')).not.toBeInTheDocument()
 
     // Stale in-flight response for A resolves after returning to A -> must remain closed
@@ -191,11 +191,11 @@ describe('Stage 8D: PhotosPanel Open original full-resolution viewer', () => {
       expect(screen.getByTestId('photos-original-img')).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByText('portrait.heic'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for portrait.heic' }))
     expect(screen.queryByTestId('photos-original-modal')).not.toBeInTheDocument()
 
     // Returning to A must NOT reopen the previously loaded modal without another explicit click
-    fireEvent.click(screen.getByText('landscape.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Details for landscape.jpg' }))
     expect(screen.queryByTestId('photos-original-modal')).not.toBeInTheDocument()
 
     // 3. Open original on A again, then close Details -> modal closes and clears

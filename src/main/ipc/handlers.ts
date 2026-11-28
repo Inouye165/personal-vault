@@ -62,6 +62,11 @@ import {
   ThumbnailResultSchema,
   GetOriginalPhotoRequestSchema,
   OriginalPhotoResultSchema,
+  PrepareVideoPlaybackRequestSchema,
+  VideoPlaybackResultSchema,
+  RevokeVideoTokenRequestSchema,
+  OpenInDefaultPlayerRequestSchema,
+  OpenInDefaultPlayerResponseSchema,
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
@@ -69,6 +74,8 @@ import {
   type GetPhotosPageResponse,
   type ThumbnailResult,
   type OriginalPhotoResult,
+  type VideoPlaybackResult,
+  type OpenInDefaultPlayerResponse,
   type CancelThumbnailResponse,
   type PhotosDiagnosticsResponse,
   type ThumbnailPrepProgress,
@@ -191,6 +198,7 @@ import { UnifiedSearchCoordinator } from '../services/unified-search'
 import { PhotoSearchCoordinator } from '../services/search'
 import type { ExportCoordinator } from '../services/export/coordinator'
 import type { BackupCoordinator } from '../services/backup/coordinator'
+import type { VideoPlaybackCoordinator } from '../services/video'
 import type { GoogleDriveAuthService } from '../services/backup/google-drive-auth'
 import type { UpdateCoordinator } from '../services/updater'
 import { resolveReadableFileLocation } from '../services/backup/recovered-file-resolver'
@@ -223,6 +231,7 @@ export interface IpcHandlerOptions {
   readonly documentClassificationCoordinator?: DocumentClassificationCoordinator
   readonly exportCoordinator?: ExportCoordinator
   readonly backupCoordinator?: BackupCoordinator
+  readonly videoPlaybackCoordinator?: VideoPlaybackCoordinator
   readonly googleDriveAuth?: GoogleDriveAuthService
   readonly updateCoordinator?: UpdateCoordinator
   readonly userDataDir?: string
@@ -265,6 +274,7 @@ export function registerIpcHandlers({
   documentClassificationCoordinator,
   exportCoordinator,
   backupCoordinator,
+  videoPlaybackCoordinator,
   googleDriveAuth,
   updateCoordinator,
   userDataDir,
@@ -836,10 +846,8 @@ export function registerIpcHandlers({
     }
     const activeRecipe =
       photoMetadataCoordinator?.getParserRecipeVersion() ?? METADATA_PARSER_RECIPE_VERSION
-    const res = catalog.queryFileLocations({
-      category: 'photo',
-      offset: parsed.data.offset,
-      limit: parsed.data.limit,
+    const filterArgs = {
+      category: 'photo' as const,
       ratingFilter: parsed.data.ratingFilter,
       flagFilter: parsed.data.flagFilter,
       collectionId: parsed.data.collectionId,
@@ -862,8 +870,19 @@ export function registerIpcHandlers({
       fileTypeBasis: parsed.data.fileTypeBasis,
       fileTypeValue: parsed.data.fileTypeValue,
       onlyUnknownDetectedFormat: parsed.data.onlyUnknownDetectedFormat
+    }
+    const res = catalog.queryFileLocations({
+      ...filterArgs,
+      mediaKindFilter: parsed.data.mediaKindFilter,
+      offset: parsed.data.offset,
+      limit: parsed.data.limit
     })
-    const validated = validatePayload(GetPhotosPageResponseSchema, res)
+    const mediaCounts = catalog.getVisualLibraryMediaCounts(filterArgs)
+    const validated = validatePayload(GetPhotosPageResponseSchema, {
+      ...res,
+      photoCount: mediaCounts.photoCount,
+      videoCount: mediaCounts.videoCount
+    })
     if (!validated.success) {
       throw new Error(`Invalid outgoing GetPhotosPageResponse in main: ${validated.error}`)
     }
@@ -890,6 +909,14 @@ export function registerIpcHandlers({
         status: 'missing',
         locationId,
         reason: `Photograph location ID ${locationId} not found in catalog`
+      }
+    }
+
+    if (fileRecord.mediaKind === 'video') {
+      return {
+        status: 'unsupported',
+        locationId,
+        reason: 'Video items display a video tile instead of a photo thumbnail.'
       }
     }
 
@@ -997,32 +1024,159 @@ export function registerIpcHandlers({
       })
     }
 
-    const resolved = resolveReadableFileLocation(catalog, locationId, {
-      verifyPayloadHash: false
+    const tryCachedPreviewFallback = async (): Promise<OriginalPhotoResult | null> => {
+      const cached = await thumbnailCoordinator.getCachedPreviewForOriginal({
+        locationId,
+        sourcePath: fileRecord.originalPath,
+        expectedByteSize: fileRecord.byteSize,
+        expectedMtimeMs: fileRecord.filesystemMtimeMs,
+        expectedSha256: fileRecord.activeHash
+      })
+      if (!cached) return null
+      return {
+        status: 'ready',
+        locationId,
+        dataUrl: cached.dataUrl,
+        mimeType: cached.mimeType,
+        width: cached.width,
+        height: cached.height,
+        sourceKind: 'cached_preview',
+        notice:
+          'The original file is currently unavailable and no verified vault copy was found. Showing the smaller cached preview instead.'
+      }
+    }
+
+    let resolved = resolveReadableFileLocation(catalog, locationId, {
+      verifyPayloadHash: false,
+      allowVaultCopyFallbackForUnavailableSource: true
     })
     if (!resolved.ok) {
-      const failureStatus =
+      const isCorruptOrContained =
         resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
         resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
-          ? ('error' as const)
-          : ('missing' as const)
+      if (!isCorruptOrContained) {
+        const cachedFallback = await tryCachedPreviewFallback()
+        if (cachedFallback) {
+          return validateOriginalPhotoResult(cachedFallback)
+        }
+      }
       return validateOriginalPhotoResult({
-        status: failureStatus,
+        status: isCorruptOrContained ? 'error' : 'missing',
         locationId,
-        reason: resolved.errorMessage
+        reason: isCorruptOrContained
+          ? resolved.errorMessage
+          : 'The original file is currently unavailable and no verified vault copy or cached preview was found.'
       })
     }
 
-    const res = await thumbnailCoordinator.getOriginalPhoto({
+    let res = await thumbnailCoordinator.getOriginalPhoto({
       locationId,
       sourcePath: resolved.filePath,
       expectedByteSize: resolved.expectedByteSize,
       expectedMtimeMs: resolved.expectedMtimeMs,
-      expectedSha256: resolved.expectedSha256 ?? undefined
+      expectedSha256: resolved.expectedSha256 ?? undefined,
+      approvedRootsOverride: resolved.mode === 'vault_copy' ? resolved.approvedRoots : undefined
     })
+
+    if (res.status === 'missing' && resolved.mode === 'source') {
+      const vaultFallback = resolveReadableFileLocation(catalog, locationId, {
+        verifyPayloadHash: false,
+        allowVaultCopyFallbackForUnavailableSource: true
+      })
+      if (vaultFallback.ok && vaultFallback.mode === 'vault_copy') {
+        resolved = vaultFallback
+        res = await thumbnailCoordinator.getOriginalPhoto({
+          locationId,
+          sourcePath: vaultFallback.filePath,
+          expectedByteSize: vaultFallback.expectedByteSize,
+          expectedMtimeMs: vaultFallback.expectedMtimeMs,
+          expectedSha256: vaultFallback.expectedSha256 ?? undefined,
+          approvedRootsOverride: vaultFallback.approvedRoots
+        })
+      }
+    }
+
+    if (res.status === 'missing') {
+      const cachedFallback = await tryCachedPreviewFallback()
+      if (cachedFallback) {
+        return validateOriginalPhotoResult(cachedFallback)
+      }
+    }
+
+    if (res.status === 'ready') {
+      const sourceKind = resolved.mode === 'vault_copy' ? 'vault_copy' : 'original'
+      return validateOriginalPhotoResult({
+        ...res,
+        sourceKind,
+        ...(sourceKind === 'vault_copy'
+          ? {
+              notice:
+                'Showing your verified vault copy because the original source file is currently unavailable.'
+            }
+          : {})
+      })
+    }
 
     return validateOriginalPhotoResult(res)
   })
+
+  handle(IPC_CHANNELS.MEDIA_PREPARE_VIDEO, async (raw: unknown): Promise<VideoPlaybackResult> => {
+    const parsed = validatePayload(PrepareVideoPlaybackRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming PrepareVideoPlaybackRequest in main: ${parsed.error}`)
+    }
+    const { locationId } = parsed.data
+    const validateVideoResult = (res: VideoPlaybackResult): VideoPlaybackResult => {
+      const validated = validatePayload(VideoPlaybackResultSchema, res)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing VideoPlaybackResult in main: ${validated.error}`)
+      }
+      return validated.data
+    }
+    if (!videoPlaybackCoordinator) {
+      return validateVideoResult({
+        status: 'error',
+        locationId,
+        reason: 'Video playback service is unavailable',
+        canOpenInDefaultPlayer: false
+      })
+    }
+    const res = await videoPlaybackCoordinator.preparePlayback(locationId)
+    return validateVideoResult(res)
+  })
+
+  handle(IPC_CHANNELS.MEDIA_REVOKE_VIDEO_TOKEN, (raw: unknown): boolean => {
+    const parsed = validatePayload(RevokeVideoTokenRequestSchema, raw)
+    if (!parsed.success) {
+      throw new Error(`Invalid incoming RevokeVideoTokenRequest in main: ${parsed.error}`)
+    }
+    return videoPlaybackCoordinator
+      ? videoPlaybackCoordinator.revokeToken(parsed.data.token)
+      : false
+  })
+
+  handle(
+    IPC_CHANNELS.MEDIA_OPEN_IN_DEFAULT_PLAYER,
+    async (raw: unknown): Promise<OpenInDefaultPlayerResponse> => {
+      const parsed = validatePayload(OpenInDefaultPlayerRequestSchema, raw)
+      if (!parsed.success) {
+        throw new Error(`Invalid incoming OpenInDefaultPlayerRequest in main: ${parsed.error}`)
+      }
+      const res: OpenInDefaultPlayerResponse = videoPlaybackCoordinator
+        ? await videoPlaybackCoordinator.openInDefaultPlayer(parsed.data.locationId)
+        : {
+            ok: false,
+            usedTemporaryCopy: false,
+            launchedFileName: null,
+            error: 'Video playback service is unavailable'
+          }
+      const validated = validatePayload(OpenInDefaultPlayerResponseSchema, res)
+      if (!validated.success) {
+        throw new Error(`Invalid outgoing OpenInDefaultPlayerResponse in main: ${validated.error}`)
+      }
+      return validated.data
+    }
+  )
 
   handle(IPC_CHANNELS.PHOTOS_CANCEL_THUMBNAIL, (raw: unknown): CancelThumbnailResponse => {
     const parsed = validatePayload(CancelThumbnailRequestSchema, raw)
@@ -1118,6 +1272,10 @@ export function registerIpcHandlers({
 
   handle(IPC_CHANNELS.THUMBNAILS_PREP_PROGRESS_EVENT, (): never => {
     throw new Error('thumbnails:prep-progress-event is an event-only channel')
+  })
+
+  handle(IPC_CHANNELS.MEDIA_LIBRARY_UPDATED_EVENT, (): never => {
+    throw new Error('media:library-updated-event is an event-only channel')
   })
 
   // --- Stage 5B: Photo Review & Collections Handlers ---

@@ -192,7 +192,7 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
     })
 
     // Cell 101 has rating 4 and flag pick
-    const cell101 = screen.getByRole('button', { name: /sunset\.jpg/i })
+    const cell101 = document.getElementById('photo-cell-101')!
     expect(cell101).toHaveTextContent(/4/i)
     expect(cell101).toHaveTextContent(/pick/i)
   })
@@ -205,7 +205,7 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
     })
 
     // Select photo 101
-    fireEvent.click(screen.getByRole('button', { name: /sunset\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for sunset\.jpg/i }))
 
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Photograph Details/i })).toBeInTheDocument()
@@ -232,7 +232,7 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
       expect(screen.getByText('sunset.jpg')).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /sunset\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for sunset\.jpg/i }))
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Reject/i })).toBeInTheDocument()
@@ -258,7 +258,7 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
       expect(screen.getByText('sunset.jpg')).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /sunset\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for sunset\.jpg/i }))
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Remove from Vacation/i })).toBeInTheDocument()
@@ -324,7 +324,7 @@ describe('PhotosPanel Review & Collections UI (Stage 5B)', () => {
       expect(screen.getByText('sunset.jpg')).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /sunset\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for sunset\.jpg/i }))
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /5 Stars/i })).toBeInTheDocument()

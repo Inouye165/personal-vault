@@ -10,7 +10,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { MigrationError, UnsupportedSchemaVersionError } from './errors'
 
-export const CURRENT_SCHEMA_VERSION = 22
+export const CURRENT_SCHEMA_VERSION = 23
 
 export interface Migration {
   readonly version: number
@@ -1881,6 +1881,49 @@ export const MIGRATIONS: readonly Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_photo_thumb_state_status
           ON photo_thumbnail_state(status, recipe_version);
+      `)
+    }
+  },
+  {
+    version: 23,
+    name: 'media_kind_and_video_metadata',
+    up: (db: DatabaseSync) => {
+      const fileLocCols = getTableColumns(db, 'file_locations')
+      if (!fileLocCols.includes('media_kind')) {
+        db.exec(`
+          ALTER TABLE file_locations
+            ADD COLUMN media_kind TEXT NOT NULL DEFAULT 'photo'
+            CHECK (media_kind IN ('photo', 'video', 'document'));
+        `)
+      }
+      if (!fileLocCols.includes('media_kind_inspected_at_ms')) {
+        db.exec(`
+          ALTER TABLE file_locations
+            ADD COLUMN media_kind_inspected_at_ms INTEGER;
+        `)
+      }
+
+      db.exec(`
+        UPDATE file_locations
+        SET media_kind = 'document'
+        WHERE category = 'document' AND media_kind != 'document';
+
+        CREATE INDEX IF NOT EXISTS idx_file_locations_media_kind
+          ON file_locations(category, media_kind);
+
+        CREATE TABLE IF NOT EXISTS video_media_metadata (
+          file_location_id INTEGER PRIMARY KEY REFERENCES file_locations(id) ON DELETE CASCADE,
+          discovery_observation_id INTEGER NOT NULL REFERENCES discovery_observations(id) ON DELETE CASCADE,
+          container_format TEXT NOT NULL CHECK (container_format IN ('mp4', 'quicktime', 'webm')),
+          video_codec TEXT,
+          audio_codec TEXT,
+          duration_ms INTEGER,
+          width_px INTEGER,
+          height_px INTEGER,
+          is_playable_structure INTEGER NOT NULL DEFAULT 1 CHECK (is_playable_structure IN (0, 1)),
+          structure_error TEXT,
+          inspected_at_ms INTEGER NOT NULL
+        );
       `)
     }
   }

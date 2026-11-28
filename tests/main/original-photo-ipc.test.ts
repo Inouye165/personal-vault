@@ -103,7 +103,8 @@ describe('Stage 8D: photos:get-original IPC validation and error branches', () =
       getLocationReadResolutionContext: vi.fn(() => undefined)
     } as unknown as CatalogDatabase
     const mockThumb = {
-      getOriginalPhoto: vi.fn()
+      getOriginalPhoto: vi.fn(),
+      getCachedPreviewForOriginal: vi.fn().mockResolvedValue(null)
     } as unknown as ThumbnailCoordinator
 
     registerIpcHandlers({
@@ -116,5 +117,44 @@ describe('Stage 8D: photos:get-original IPC validation and error branches', () =
     expect(OriginalPhotoResultSchema.safeParse(res).success).toBe(true)
     expect((res as { status: string }).status).toBe('missing')
     expect(mockThumb.getOriginalPhoto).not.toHaveBeenCalled()
+  })
+
+  it('serves cached preview with explanation when original and vault copy are unavailable', async () => {
+    const mockCatalog = {
+      getFileLocationById: vi.fn(() => ({
+        id: 6,
+        sourceId: 1,
+        category: 'photo',
+        originalPath: 'C:\\Offline\\photo.jpg',
+        byteSize: 4096,
+        filesystemMtimeMs: 1700000000000,
+        activeHash: 'a'.repeat(64)
+      })),
+      getLocationReadResolutionContext: vi.fn(() => undefined)
+    } as unknown as CatalogDatabase
+    const mockThumb = {
+      getOriginalPhoto: vi.fn(),
+      getCachedPreviewForOriginal: vi.fn().mockResolvedValue({
+        dataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
+        mimeType: 'image/webp',
+        width: 512,
+        height: 384
+      })
+    } as unknown as ThumbnailCoordinator
+
+    registerIpcHandlers({
+      validateSender,
+      catalog: mockCatalog,
+      thumbnailCoordinator: mockThumb
+    })
+
+    const res = OriginalPhotoResultSchema.parse(
+      await invoke(IPC_CHANNELS.PHOTOS_GET_ORIGINAL, trusted, { locationId: 6 })
+    )
+    expect(res.status).toBe('ready')
+    if (res.status === 'ready') {
+      expect(res.sourceKind).toBe('cached_preview')
+      expect(res.notice).toMatch(/original file is currently unavailable/i)
+    }
   })
 })

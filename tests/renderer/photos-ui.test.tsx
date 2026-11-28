@@ -92,9 +92,9 @@ describe('PhotosPanel UI', () => {
       expect(mockGetThumbnail).toHaveBeenCalledWith(expect.objectContaining({ locationId: 101 }))
     })
 
-    // Click photo cell to inspect details
-    const cell = screen.getByRole('button', { name: /sunset\.jpg/i })
-    fireEvent.click(cell)
+    // Click Details button to inspect details
+    const detailsBtn = screen.getByRole('button', { name: /Details for sunset\.jpg/i })
+    fireEvent.click(detailsBtn)
 
     // Details panel should render factual metadata
     expect(screen.getAllByText(/sunset\.jpg/i).length).toBeGreaterThanOrEqual(1)

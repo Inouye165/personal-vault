@@ -80,6 +80,12 @@ import type {
   ThumbnailResult,
   GetOriginalPhotoRequest,
   OriginalPhotoResult,
+  PrepareVideoPlaybackRequest,
+  VideoPlaybackResult,
+  RevokeVideoTokenRequest,
+  OpenInDefaultPlayerRequest,
+  OpenInDefaultPlayerResponse,
+  MediaLibraryUpdatedEvent,
   CancelThumbnailRequest,
   CancelThumbnailResponse,
   PhotosDiagnosticsResponse,
@@ -212,6 +218,12 @@ export interface VaultApi {
   getPhotosPage: (request: GetPhotosPageRequest) => Promise<GetPhotosPageResponse>
   getThumbnail: (request: GetThumbnailRequest) => Promise<ThumbnailResult>
   getOriginalPhoto: (request: GetOriginalPhotoRequest) => Promise<OriginalPhotoResult>
+  prepareVideoPlayback: (request: PrepareVideoPlaybackRequest) => Promise<VideoPlaybackResult>
+  revokeVideoPlaybackToken: (request: RevokeVideoTokenRequest) => Promise<boolean>
+  openMediaInDefaultPlayer: (
+    request: OpenInDefaultPlayerRequest
+  ) => Promise<OpenInDefaultPlayerResponse>
+  onMediaLibraryUpdated: (callback: (event: MediaLibraryUpdatedEvent) => void) => () => void
   cancelThumbnail: (request: CancelThumbnailRequest) => Promise<CancelThumbnailResponse>
   getPhotosDiagnostics: () => Promise<PhotosDiagnosticsResponse>
   getThumbnailPrepProgress: () => Promise<ThumbnailPrepProgress>

@@ -35,6 +35,11 @@ export function buildPhotoFilterClauses(options: QueryFileLocationsOptions): Pho
     params.push(options.category)
   }
 
+  if (options.mediaKindFilter && options.mediaKindFilter !== 'all') {
+    conditions.push('f.media_kind = ?')
+    params.push(options.mediaKindFilter)
+  }
+
   if (typeof options.hasActiveHash === 'boolean') {
     if (options.hasActiveHash) {
       conditions.push('h.sha256 IS NOT NULL')

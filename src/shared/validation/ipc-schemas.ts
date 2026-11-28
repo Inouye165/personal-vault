@@ -417,6 +417,15 @@ export type VaultImportActionResponse = z.infer<typeof VaultImportActionResponse
 
 // --- Stage 5A: Photos & Thumbnails ---
 
+export const MediaKindSchema = z.enum(['photo', 'video', 'document'])
+export type MediaKindDto = z.infer<typeof MediaKindSchema>
+
+export const MediaKindFilterSchema = z.enum(['all', 'photo', 'video'])
+export type MediaKindFilter = z.infer<typeof MediaKindFilterSchema>
+
+export const VideoContainerSchema = z.enum(['mp4', 'quicktime', 'webm'])
+export type VideoContainerDto = z.infer<typeof VideoContainerSchema>
+
 export const PhotoItemSchema = z.object({
   id: z.number().int().positive(),
   sourceId: z.number().int().positive(),
@@ -424,6 +433,14 @@ export const PhotoItemSchema = z.object({
   fileName: z.string().min(1),
   extension: z.string().min(1),
   category: z.literal('photo'),
+  mediaKind: MediaKindSchema.optional(),
+  videoContainer: VideoContainerSchema.nullable().optional(),
+  videoCodec: z.string().nullable().optional(),
+  audioCodec: z.string().nullable().optional(),
+  videoDurationMs: z.number().int().nonnegative().nullable().optional(),
+  videoWidthPx: z.number().int().positive().nullable().optional(),
+  videoHeightPx: z.number().int().positive().nullable().optional(),
+  videoStructureError: z.string().nullable().optional(),
   discoveryObservationId: z.number().int().positive(),
   byteSize: z.number().int().nonnegative(),
   filesystemBirthtimeMs: z.number().nullable(),
@@ -483,6 +500,7 @@ export const GetPhotosPageRequestSchema = z
   .object({
     offset: z.number().int().nonnegative(),
     limit: z.number().int().positive().max(200),
+    mediaKindFilter: MediaKindFilterSchema.default('all'),
     ratingFilter: PhotoRatingFilterSchema.default('all'),
     flagFilter: PhotoFlagFilterSchema.default('all'),
     collectionId: z.number().int().positive().nullable().default(null),
@@ -511,6 +529,8 @@ export type GetPhotosPageRequest = z.input<typeof GetPhotosPageRequestSchema>
 export const GetPhotosPageResponseSchema = z.object({
   items: z.array(PhotoItemSchema),
   totalCount: z.number().int().nonnegative(),
+  photoCount: z.number().int().nonnegative().optional(),
+  videoCount: z.number().int().nonnegative().optional(),
   offset: z.number().int().nonnegative(),
   limit: z.number().int().positive(),
   hasMore: z.boolean()
@@ -570,6 +590,9 @@ export const GetOriginalPhotoRequestSchema = z.object({
 })
 export type GetOriginalPhotoRequest = z.infer<typeof GetOriginalPhotoRequestSchema>
 
+export const OriginalPhotoSourceKindSchema = z.enum(['original', 'vault_copy', 'cached_preview'])
+export type OriginalPhotoSourceKind = z.infer<typeof OriginalPhotoSourceKindSchema>
+
 export const OriginalPhotoReadySchema = z.object({
   status: z.literal('ready'),
   locationId: z.number().int().positive(),
@@ -579,7 +602,9 @@ export const OriginalPhotoReadySchema = z.object({
     .max(24 * 1024 * 1024),
   mimeType: z.string().min(1),
   width: z.number().int().positive(),
-  height: z.number().int().positive()
+  height: z.number().int().positive(),
+  sourceKind: OriginalPhotoSourceKindSchema.default('original'),
+  notice: z.string().optional()
 })
 
 export const OriginalPhotoFailureSchema = z.object({
@@ -612,6 +637,110 @@ export const OriginalPhotoResultSchema = z.discriminatedUnion('status', [
   })
 ])
 export type OriginalPhotoResult = z.infer<typeof OriginalPhotoResultSchema>
+
+export const PrepareVideoPlaybackRequestSchema = z
+  .object({
+    locationId: z.number().int().positive()
+  })
+  .strict()
+export type PrepareVideoPlaybackRequest = z.infer<typeof PrepareVideoPlaybackRequestSchema>
+
+export const VideoPlaybackReadySchema = z.object({
+  status: z.literal('ready'),
+  locationId: z.number().int().positive(),
+  token: z.string().regex(/^[0-9a-f]{48}$/),
+  streamUrl: z.string().regex(/^pv-media:\/\/video\/[0-9a-f]{48}$/),
+  mimeType: z.enum(['video/mp4', 'video/webm']),
+  container: VideoContainerSchema,
+  videoCodec: z.string().nullable(),
+  audioCodec: z.string().nullable(),
+  hasVideoTrack: z.boolean(),
+  durationMs: z.number().int().nonnegative().nullable(),
+  widthPx: z.number().int().positive().nullable(),
+  heightPx: z.number().int().positive().nullable(),
+  sourceKind: z.enum(['original', 'vault_copy']),
+  notice: z.string().optional(),
+  canOpenInDefaultPlayer: z.boolean()
+})
+
+export const VideoPlaybackFailureSchema = z.object({
+  status: z.enum(['missing', 'corrupt', 'unsupported', 'error']),
+  locationId: z.number().int().positive(),
+  reason: z.string().min(1),
+  container: VideoContainerSchema.nullable().optional(),
+  videoCodec: z.string().nullable().optional(),
+  audioCodec: z.string().nullable().optional(),
+  canOpenInDefaultPlayer: z.boolean().default(false)
+})
+
+export const VideoPlaybackResultSchema = z.discriminatedUnion('status', [
+  VideoPlaybackReadySchema,
+  z.object({
+    status: z.literal('missing'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1),
+    container: VideoContainerSchema.nullable().optional(),
+    videoCodec: z.string().nullable().optional(),
+    audioCodec: z.string().nullable().optional(),
+    canOpenInDefaultPlayer: z.boolean().default(false)
+  }),
+  z.object({
+    status: z.literal('corrupt'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1),
+    container: VideoContainerSchema.nullable().optional(),
+    videoCodec: z.string().nullable().optional(),
+    audioCodec: z.string().nullable().optional(),
+    canOpenInDefaultPlayer: z.boolean().default(false)
+  }),
+  z.object({
+    status: z.literal('unsupported'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1),
+    container: VideoContainerSchema.nullable().optional(),
+    videoCodec: z.string().nullable().optional(),
+    audioCodec: z.string().nullable().optional(),
+    canOpenInDefaultPlayer: z.boolean().default(false)
+  }),
+  z.object({
+    status: z.literal('error'),
+    locationId: z.number().int().positive(),
+    reason: z.string().min(1),
+    container: VideoContainerSchema.nullable().optional(),
+    videoCodec: z.string().nullable().optional(),
+    audioCodec: z.string().nullable().optional(),
+    canOpenInDefaultPlayer: z.boolean().default(false)
+  })
+])
+export type VideoPlaybackResult = z.infer<typeof VideoPlaybackResultSchema>
+
+export const RevokeVideoTokenRequestSchema = z
+  .object({
+    token: z.string().regex(/^[0-9a-f]{48}$/)
+  })
+  .strict()
+export type RevokeVideoTokenRequest = z.infer<typeof RevokeVideoTokenRequestSchema>
+
+export const OpenInDefaultPlayerRequestSchema = z
+  .object({
+    locationId: z.number().int().positive()
+  })
+  .strict()
+export type OpenInDefaultPlayerRequest = z.infer<typeof OpenInDefaultPlayerRequestSchema>
+
+export const OpenInDefaultPlayerResponseSchema = z.object({
+  ok: z.boolean(),
+  usedTemporaryCopy: z.boolean(),
+  launchedFileName: z.string().nullable(),
+  message: z.string().optional(),
+  error: z.string().optional()
+})
+export type OpenInDefaultPlayerResponse = z.infer<typeof OpenInDefaultPlayerResponseSchema>
+
+export const MediaLibraryUpdatedEventSchema = z.object({
+  reclassifiedCount: z.number().int().nonnegative()
+})
+export type MediaLibraryUpdatedEvent = z.infer<typeof MediaLibraryUpdatedEventSchema>
 
 export const CancelThumbnailRequestSchema = z.object({
   locationId: z.number().int().positive(),
@@ -1520,6 +1649,7 @@ export const SemanticSearchRequestSchema = z
     offset: z.number().int().nonnegative().default(0),
     limit: z.number().int().positive().max(100).default(50),
     minScore: z.number().min(-1.0).max(1.0).default(0.0),
+    mediaKindFilter: MediaKindFilterSchema.default('all'),
     ratingFilter: PhotoRatingFilterSchema.default('all'),
     flagFilter: PhotoFlagFilterSchema.default('all'),
     collectionId: z.number().int().positive().nullable().default(null),
@@ -1653,6 +1783,7 @@ export const MetadataAwarePhotoSearchRequestSchema = z
     offset: z.number().int().nonnegative().default(0),
     limit: z.number().int().positive().max(200).default(50),
     minScore: z.number().min(-1.0).max(1.0).default(0.0),
+    mediaKindFilter: MediaKindFilterSchema.default('all'),
     ratingFilter: PhotoRatingFilterSchema.default('all'),
     flagFilter: PhotoFlagFilterSchema.default('all'),
     collectionId: z.number().int().positive().nullable().default(null),
