@@ -191,6 +191,7 @@ describe('preload bridge', () => {
         'selectBackupDirectory',
         'configureBackupDestination',
         'listBackupDestinations',
+        'getBackupSummary',
         'startBackup',
         'pauseBackup',
         'resumeBackup',
@@ -588,5 +589,33 @@ describe('preload bridge', () => {
 
     electron.invoke.mockResolvedValueOnce({ accepted: true, state: { phase: 'bogus' } })
     await expect(api.installUpdateNow!()).rejects.toThrow(/invalid/i)
+  })
+
+  it('validates getBackupSummary responses in preload', async () => {
+    const api = await loadApi()
+
+    const validSummary = {
+      hasActiveVault: true,
+      activeVaultName: 'Personal Vault',
+      activeVaultPath: 'D:\\Vault',
+      vaultFileCount: 3,
+      vaultLogicalBytes: 4096,
+      catalogedFileCount: 4,
+      excludedScannedOnlyCount: 1,
+      catalogApproxBytes: 1024,
+      annotationsApproxBytes: 256,
+      estimatedTotalBytes: 5376,
+      isCatalogOnly: false
+    }
+    electron.invoke.mockResolvedValueOnce(validSummary)
+    await expect(
+      (api as unknown as { getBackupSummary: () => Promise<unknown> }).getBackupSummary()
+    ).resolves.toEqual(validSummary)
+    expect(electron.invoke).toHaveBeenCalledWith('backup:get-summary')
+
+    electron.invoke.mockResolvedValueOnce({ bad: true })
+    await expect(
+      (api as unknown as { getBackupSummary: () => Promise<unknown> }).getBackupSummary()
+    ).rejects.toThrow(/invalid/i)
   })
 })

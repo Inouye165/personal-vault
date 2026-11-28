@@ -17,7 +17,15 @@
 
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { accessSync, constants, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   BackupSnapshotCompleteMarkerV1Schema,
@@ -118,6 +126,20 @@ export interface StartBackupOptions {
 export interface BackupInitializeSummary {
   readonly interruptedCount: number
   readonly cleanedStagingDirs: readonly string[]
+}
+
+export interface BackupSummary {
+  readonly hasActiveVault: boolean
+  readonly activeVaultName: string | null
+  readonly activeVaultPath: string | null
+  readonly vaultFileCount: number
+  readonly vaultLogicalBytes: number
+  readonly catalogedFileCount: number
+  readonly excludedScannedOnlyCount: number
+  readonly catalogApproxBytes: number
+  readonly annotationsApproxBytes: number
+  readonly estimatedTotalBytes: number
+  readonly isCatalogOnly: boolean
 }
 
 type AbortIntent = 'pause' | 'cancel' | 'shutdown' | null
@@ -295,8 +317,28 @@ export class BackupCoordinator {
   // ---------------------------------------------------------------------------
 
   public configureDestination(input: ConfigureBackupDestinationInput): BackupDestinationRecord {
-    if (input.kind === 'local_fs' && !input.targetPath) {
-      throw new BackupContainmentError('Local backup destination requires a non-empty targetPath')
+    if (input.kind === 'local_fs' || input.kind === 'drive_for_desktop') {
+      const trimmedTarget = input.targetPath?.trim() ?? ''
+      if (!trimmedTarget) {
+        throw new BackupContainmentError('Local backup destination requires a non-empty targetPath')
+      }
+      const { sourceRoots, vaultRoots } = this.getSourceAndVaultRoots()
+      try {
+        validateBackupDestinationPath({
+          destinationDir: trimmedTarget,
+          sourceRoots,
+          vaultRoots,
+          userDataDir: this.userDataDir,
+          allowUnavailableDestination: true
+        })
+      } catch (err) {
+        if (err instanceof BackupContainmentError) {
+          throw err
+        }
+        if (classifyBackupDestinationFsError(err) !== 'destination_unavailable') {
+          throw err
+        }
+      }
     }
     const encryptionMode =
       input.encryptionMode ?? (input.kind === 'google_drive' ? 'aes-256-gcm-v1' : 'none')
@@ -308,6 +350,87 @@ export class BackupCoordinator {
       dailyBudgetBytes: input.dailyBudgetBytes,
       encryptionMode
     })
+  }
+
+  public getBackupSummary(): BackupSummary {
+    const db = this.catalog.getRawDb()
+    const vaultRow = db
+      .prepare(
+        'SELECT vault_id, vault_path, name FROM vaults WHERE is_active = 1 ORDER BY updated_at_ms DESC LIMIT 1'
+      )
+      .get() as { vault_id: string; vault_path: string; name: string } | undefined
+
+    let vaultFileCount = 0
+    let vaultLogicalBytes = 0
+    if (vaultRow) {
+      const vaultStats = db
+        .prepare(
+          'SELECT COUNT(*) AS cnt, COALESCE(SUM(byte_size), 0) AS total_bytes FROM vault_copies WHERE vault_id = ?'
+        )
+        .get(vaultRow.vault_id) as { cnt: number; total_bytes: number } | undefined
+      vaultFileCount = Number(vaultStats?.cnt ?? 0)
+      vaultLogicalBytes = Number(vaultStats?.total_bytes ?? 0)
+    }
+
+    const catalogedRow = db
+      .prepare(
+        `SELECT COUNT(*) AS cnt
+         FROM file_locations fl
+         JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1`
+      )
+      .get() as { cnt: number } | undefined
+    const catalogedFileCount = Number(catalogedRow?.cnt ?? 0)
+
+    let excludedScannedOnlyCount = catalogedFileCount
+    if (vaultRow) {
+      const excludedRow = db
+        .prepare(
+          `SELECT COUNT(*) AS cnt
+           FROM file_locations fl
+           JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
+           LEFT JOIN hash_observations h
+             ON h.discovery_observation_id = d.id
+            AND h.is_active = 1
+            AND h.observed_byte_size = d.byte_size
+           LEFT JOIN vault_copies vc
+             ON vc.vault_id = ?
+            AND vc.sha256 = h.sha256
+            AND vc.byte_size = d.byte_size
+           WHERE vc.id IS NULL`
+        )
+        .get(vaultRow.vault_id) as { cnt: number } | undefined
+      excludedScannedOnlyCount = Number(excludedRow?.cnt ?? 0)
+    }
+
+    const readFileSizeBestEffort = (filePath: string): number => {
+      try {
+        return existsSync(filePath) ? statSync(filePath).size : 0
+      } catch {
+        return 0
+      }
+    }
+
+    const catalogPath = this.catalog.getCatalogPath()
+    const catalogApproxBytes =
+      readFileSizeBestEffort(catalogPath) + readFileSizeBestEffort(`${catalogPath}-wal`)
+    const annotationsDir = join(this.userDataDir, 'annotations')
+    const annotationsApproxBytes =
+      readFileSizeBestEffort(join(annotationsDir, '.pv_annotations_owner')) +
+      readFileSizeBestEffort(join(annotationsDir, 'review-journal.jsonl'))
+
+    return {
+      hasActiveVault: Boolean(vaultRow),
+      activeVaultName: vaultRow?.name ?? null,
+      activeVaultPath: vaultRow?.vault_path ?? null,
+      vaultFileCount,
+      vaultLogicalBytes,
+      catalogedFileCount,
+      excludedScannedOnlyCount,
+      catalogApproxBytes,
+      annotationsApproxBytes,
+      estimatedTotalBytes: vaultLogicalBytes + catalogApproxBytes + annotationsApproxBytes,
+      isCatalogOnly: vaultFileCount === 0
+    }
   }
 
   public getDestination(id: string): BackupDestinationRecord | null {

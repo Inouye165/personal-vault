@@ -31,6 +31,7 @@ import {
   BackupSelectDirectoryRequestSchema,
   BackupSelectDirectoryResponseSchema,
   BackupStartRequestSchema,
+  BackupSummarySchema,
   BackupVerifyRecoveryPointRequestSchema,
   BackupVerifyRecoveryPointResponseSchema,
   type BackupConfigureDestinationRequest,
@@ -56,6 +57,7 @@ import {
   type BackupSelectDirectoryRequest,
   type BackupSelectDirectoryResponse,
   type BackupStartRequest,
+  type BackupSummaryDto,
   type BackupVerifyRecoveryPointRequest,
   type BackupVerifyRecoveryPointResponse
 } from '../shared/validation/backup-ipc-schemas.js'
@@ -2207,6 +2209,15 @@ const api: VaultApi = {
     const result = validatePayload(BackupListDestinationsResponseSchema, raw)
     if (!result.success) {
       throw new Error(`Invalid listBackupDestinations response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async getBackupSummary(): Promise<BackupSummaryDto> {
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.BACKUP_GET_SUMMARY)
+    const result = validatePayload(BackupSummarySchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid getBackupSummary response from main: ${result.error}`)
     }
     return result.data
   },
