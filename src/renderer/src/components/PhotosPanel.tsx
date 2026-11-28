@@ -179,6 +179,18 @@ function formatEffectiveExtractionStatus(detail: PhotoTechnicalMetadataDetail | 
   }
 }
 
+function formatThumbnailErrorLabel(code: string): string {
+  switch (code) {
+    case 'VAULT_COPY_MISSING':
+      return 'Vault copy missing'
+    case 'VAULT_COPY_CORRUPT':
+    case 'VAULT_CONTAINMENT_ERROR':
+      return 'Vault copy corrupt'
+    default:
+      return 'Preview unavailable'
+  }
+}
+
 interface PhotoCardCellProps {
   photo: PhotoItem
   index: number
@@ -218,11 +230,16 @@ function PhotoCardCell({
   const hasMismatch = isVideo && hasMismatchedVideoExtension(photo)
   const ratingDesc = photo.rating ? `${photo.rating} stars` : 'unrated'
   const flagDesc = photo.flag && photo.flag !== 'none' ? photo.flag : 'no flag'
-  const offlineSuffix =
-    !isVideo &&
-    ((thumb?.status === 'ready' && thumb.originalUnavailable) || thumb?.status === 'missing')
-      ? ', original unavailable'
-      : ''
+  const statusSuffix = !isVideo
+    ? thumb?.status === 'error' &&
+      (thumb.code === 'VAULT_COPY_MISSING' ||
+        thumb.code === 'VAULT_COPY_CORRUPT' ||
+        thumb.code === 'VAULT_CONTAINMENT_ERROR')
+      ? `, ${formatThumbnailErrorLabel(thumb.code).toLowerCase()}`
+      : (thumb?.status === 'ready' && thumb.originalUnavailable) || thumb?.status === 'missing'
+        ? ', original unavailable'
+        : ''
+    : ''
 
   return (
     <div
@@ -242,7 +259,7 @@ function PhotoCardCell({
         id={`photo-open-${photo.id}`}
         data-testid={`photo-open-btn-${photo.id}`}
         className="photo-thumbnail-container photo-card-open-btn"
-        aria-label={`${isVideo ? 'Play video' : 'Open photograph'} ${photo.fileName}, ${formatBytes(photo.byteSize)}, ${ratingDesc}, ${flagDesc}${offlineSuffix}`}
+        aria-label={`${isVideo ? 'Play video' : 'Open photograph'} ${photo.fileName}, ${formatBytes(photo.byteSize)}, ${ratingDesc}, ${flagDesc}${statusSuffix}`}
         onClick={() => onOpenViewer(index, photo)}
       >
         {isVideo ? (
@@ -280,7 +297,7 @@ function PhotoCardCell({
             {thumb.originalUnavailable && (
               <span
                 className="thumbnail-status-badge"
-                title="Showing cached preview because the original file is unavailable"
+                title="Cached preview only — original file is currently unavailable"
               >
                 Original unavailable
               </span>
@@ -299,7 +316,7 @@ function PhotoCardCell({
         ) : thumb?.status === 'error' ? (
           <div className="thumbnail-placeholder error" title={thumb.message}>
             <AlertTriangle size={32} />
-            <span className="placeholder-tag">Preview unavailable</span>
+            <span className="placeholder-tag">{formatThumbnailErrorLabel(thumb.code)}</span>
           </div>
         ) : (
           <div className="thumbnail-placeholder loading">
@@ -1741,6 +1758,17 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                         </div>
                       )
                     }
+                    if (selectedThumb?.status === 'error') {
+                      return (
+                        <div
+                          className="details-preview-placeholder error"
+                          title={selectedThumb.message}
+                        >
+                          <AlertTriangle size={36} />
+                          <span>{formatThumbnailErrorLabel(selectedThumb.code)}</span>
+                        </div>
+                      )
+                    }
                     return (
                       <div className="details-preview-placeholder">
                         <ImageIcon size={48} />
@@ -1755,6 +1783,19 @@ export function PhotosPanel({ scanJobs }: PhotosPanelProps = {}) {
                   .originalUnavailable && (
                   <p className="sub-text details-preview-unavailable-note" role="status">
                     Original unavailable — showing cached preview
+                  </p>
+                )}
+              {selectedPhoto.mediaKind !== 'video' &&
+                thumbnails.get(selectedPhoto.id)?.status === 'error' && (
+                  <p className="error-text details-preview-unavailable-note" role="alert">
+                    {
+                      (
+                        thumbnails.get(selectedPhoto.id) as Extract<
+                          ThumbnailResult,
+                          { status: 'error' }
+                        >
+                      ).message
+                    }
                   </p>
                 )}
               <div className="details-preview-actions">

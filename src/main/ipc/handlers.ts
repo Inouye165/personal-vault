@@ -927,19 +927,35 @@ export function registerIpcHandlers({
     })
     if (!resolved.ok) {
       const failureResult =
-        resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
-        resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
+        resolved.errorCode === 'VAULT_COPY_MISSING' && resolved.hasRecordedVaultCopy
           ? {
               status: 'error' as const,
               locationId,
-              code: resolved.errorCode,
-              message: resolved.errorMessage
+              code: 'VAULT_COPY_MISSING',
+              message:
+                'The recorded vault copy is missing from the active vault. Your original file path and metadata are preserved.'
             }
-          : {
-              status: 'missing' as const,
-              locationId,
-              reason: resolved.errorMessage
-            }
+          : resolved.errorCode === 'VAULT_COPY_CORRUPT'
+            ? {
+                status: 'error' as const,
+                locationId,
+                code: 'VAULT_COPY_CORRUPT',
+                message:
+                  'The recorded vault copy is corrupt and failed verification. Your original file path and metadata are preserved.'
+              }
+            : resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
+              ? {
+                  status: 'error' as const,
+                  locationId,
+                  code: 'VAULT_CONTAINMENT_ERROR',
+                  message:
+                    'The recorded vault copy failed vault safety verification. Your original file path and metadata are preserved.'
+                }
+              : {
+                  status: 'missing' as const,
+                  locationId,
+                  reason: resolved.errorMessage
+                }
       const validatedErr = validatePayload(ThumbnailResultSchema, failureResult)
       if (!validatedErr.success) {
         throw new Error(`Invalid outgoing ThumbnailResult in main: ${validatedErr.error}`)
@@ -967,7 +983,32 @@ export function registerIpcHandlers({
       verifySourceBeforeCacheHit: resolved.mode === 'vault_copy'
     })
 
-    const validated = validatePayload(ThumbnailResultSchema, res)
+    let finalRes: ThumbnailResult = res
+    if (
+      resolved.mode === 'vault_copy' &&
+      res.status === 'error' &&
+      res.code === 'SOURCE_MODIFIED'
+    ) {
+      finalRes = {
+        status: 'error',
+        locationId,
+        code: 'VAULT_COPY_CORRUPT',
+        message:
+          'The recorded vault copy failed integrity verification (SHA-256 mismatch) and appears corrupt. Your original file path and metadata are preserved.'
+      }
+    } else if (res.status === 'ready') {
+      finalRes = {
+        ...res,
+        sourceKind:
+          resolved.mode === 'vault_copy'
+            ? 'vault_copy'
+            : res.originalUnavailable
+              ? 'cached_preview'
+              : 'original'
+      }
+    }
+
+    const validated = validatePayload(ThumbnailResultSchema, finalRes)
     if (!validated.success) {
       throw new Error(`Invalid outgoing ThumbnailResult in main: ${validated.error}`)
     }
@@ -1023,7 +1064,7 @@ export function registerIpcHandlers({
         height: cached.height,
         sourceKind: 'cached_preview',
         notice:
-          'The original file is currently unavailable and no verified vault copy was found. Showing the smaller cached preview instead.'
+          'Cached preview only (not full size). The original file is currently unavailable and no verified vault copy was found. Showing the smaller cached preview instead.'
       }
     }
 
@@ -1033,20 +1074,32 @@ export function registerIpcHandlers({
       allowVaultCopyFallbackForUnavailableSource: true
     })
     if (!resolved.ok) {
+      const isRecordedVaultMissing =
+        resolved.errorCode === 'VAULT_COPY_MISSING' && resolved.hasRecordedVaultCopy
       const isCorruptOrContained =
         resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
         resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
-      if (!isCorruptOrContained) {
+      if (!isCorruptOrContained && !isRecordedVaultMissing) {
         const cachedFallback = await tryCachedPreviewFallback()
         if (cachedFallback) {
           return validateOriginalPhotoResult(cachedFallback)
         }
       }
+      if (isCorruptOrContained) {
+        return validateOriginalPhotoResult({
+          status: resolved.errorCode === 'VAULT_COPY_CORRUPT' ? 'corrupt' : 'error',
+          locationId,
+          reason:
+            resolved.errorCode === 'VAULT_COPY_CORRUPT'
+              ? 'The recorded vault copy is corrupt and failed verification. Your original file path and metadata are still preserved in the catalog.'
+              : 'The recorded vault copy failed vault safety verification. Your original file path and metadata are still preserved in the catalog.'
+        })
+      }
       return validateOriginalPhotoResult({
-        status: isCorruptOrContained ? 'error' : 'missing',
+        status: 'missing',
         locationId,
-        reason: isCorruptOrContained
-          ? resolved.errorMessage
+        reason: isRecordedVaultMissing
+          ? 'The recorded vault copy is missing from the active vault. Your original file path and metadata are still preserved in the catalog.'
           : 'The original file is currently unavailable and no verified vault copy or cached preview was found.'
       })
     }
@@ -1061,10 +1114,33 @@ export function registerIpcHandlers({
     })
 
     if (res.status === 'missing') {
+      if (resolved.mode === 'vault_copy') {
+        return validateOriginalPhotoResult({
+          status: 'missing',
+          locationId,
+          reason:
+            'The recorded vault copy is missing from the active vault. Your original file path and metadata are still preserved in the catalog.'
+        })
+      }
       const cachedFallback = await tryCachedPreviewFallback()
       if (cachedFallback) {
         return validateOriginalPhotoResult(cachedFallback)
       }
+    }
+
+    if (
+      resolved.mode === 'vault_copy' &&
+      res.status === 'error' &&
+      /Source content hash mismatch|Source size mismatch|Source modification time changed|modified during read/i.test(
+        res.reason
+      )
+    ) {
+      return validateOriginalPhotoResult({
+        status: 'corrupt',
+        locationId,
+        reason:
+          'The recorded vault copy failed integrity verification (SHA-256 mismatch) and appears corrupt. Your original file path and metadata are still preserved in the catalog.'
+      })
     }
 
     if (res.status === 'ready') {

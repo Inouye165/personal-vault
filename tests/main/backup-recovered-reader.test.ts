@@ -674,7 +674,95 @@ describe('Stage 8B Slice 2: Read-Only Access to Recovered Photos & Documents', (
       expect(corruptRes.ok).toBe(false)
       if (!corruptRes.ok) {
         expect(corruptRes.errorCode).toBe('VAULT_COPY_CORRUPT')
+        expect(corruptRes.hasRecordedVaultCopy).toBe(true)
       }
+    } finally {
+      catalog.close()
+    }
+  })
+
+  it('fails closed with VAULT_COPY_MISSING and hasRecordedVaultCopy=true when a recorded vault copy is missing on disk while preserving originalPath', () => {
+    const root = makeTempDir('pv-vault-missing-rec-')
+    const sourceDir = join(root, 'sources')
+    const vaultDir = join(root, 'vault')
+    mkdirSync(sourceDir, { recursive: true })
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Missing Copy Vault' })
+
+    const importedBytes = Buffer.from('Recorded vault photo payload bytes')
+    const importedPath = join(sourceDir, 'recorded.jpg')
+    writeFileSync(importedPath, importedBytes)
+    const importedStat = statSync(importedPath)
+    const importedSha = sha256Hex(importedBytes)
+
+    const catalog = CatalogDatabase.open({ catalogPath: join(root, 'catalog.db') })
+    try {
+      catalog.registerSource(sourceDir)
+      catalog.persistDiscoveryBatch(sourceDir, [
+        {
+          originalPath: importedPath,
+          fileName: 'recorded.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: importedBytes.length,
+          birthtimeMs: Math.round(importedStat.birthtimeMs),
+          mtimeMs: Math.round(importedStat.mtimeMs),
+          discoveredAtMs: Date.now()
+        }
+      ])
+      catalog.recordHashObservation({
+        originalPath: importedPath,
+        sha256: importedSha,
+        observedByteSize: importedBytes.length,
+        observedMtimeMs: Math.round(importedStat.mtimeMs),
+        hashedAtMs: Date.now()
+      })
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: vaultDir,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+      catalog.setActiveVault(vaultDir)
+
+      const relPayload = `files/${importedSha.slice(0, 2)}/${importedSha}/recorded.jpg`
+      const payloadDir = join(vaultDir, 'files', importedSha.slice(0, 2), importedSha)
+      mkdirSync(payloadDir, { recursive: true })
+      const vaultPayloadPath = join(vaultDir, relPayload)
+      writeFileSync(vaultPayloadPath, importedBytes)
+      catalog.recordVaultCopy({
+        vaultId: identity.vaultId,
+        sha256: importedSha,
+        byteSize: importedBytes.length,
+        relativePath: relPayload,
+        manifestRelativePath: `manifests/${importedSha.slice(0, 2)}/${importedSha}.json`,
+        verifiedAtMs: Date.now()
+      })
+
+      const importedLoc = catalog.getFileLocationByPath(importedPath)!
+      // Delete the recorded vault payload file from disk while original is still online
+      rmSync(vaultPayloadPath)
+
+      const onlineMissingRes = resolveReadableFileLocation(catalog, importedLoc.id, {
+        preferVaultCopy: true
+      })
+      expect(onlineMissingRes.ok).toBe(false)
+      if (!onlineMissingRes.ok) {
+        expect(onlineMissingRes.errorCode).toBe('VAULT_COPY_MISSING')
+        expect(onlineMissingRes.hasRecordedVaultCopy).toBe(true)
+      }
+
+      // Now also remove the original file from disk and test with allowVaultCopyFallbackForUnavailableSource
+      rmSync(importedPath)
+      const offlineMissingRes = resolveReadableFileLocation(catalog, importedLoc.id, {
+        preferVaultCopy: true,
+        allowVaultCopyFallbackForUnavailableSource: true
+      })
+      expect(offlineMissingRes.ok).toBe(false)
+      if (!offlineMissingRes.ok) {
+        expect(offlineMissingRes.errorCode).toBe('VAULT_COPY_MISSING')
+        expect(offlineMissingRes.hasRecordedVaultCopy).toBe(true)
+      }
+      expect(catalog.getFileLocationById(importedLoc.id)?.originalPath).toBe(importedPath)
     } finally {
       catalog.close()
     }

@@ -50,6 +50,7 @@ export type ResolvedFileReadFailure = {
     | 'VAULT_COPY_MISSING'
     | 'VAULT_COPY_CORRUPT'
   readonly errorMessage: string
+  readonly hasRecordedVaultCopy?: boolean
 }
 
 export type ResolvedFileReadResult = ResolvedFileReadSuccess | ResolvedFileReadFailure
@@ -137,7 +138,8 @@ function resolveVerifiedVaultCopyForLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_UNAVAILABLE',
-      errorMessage: 'No active vault is registered for vault copy access'
+      errorMessage: 'No active vault is registered for vault copy access',
+      hasRecordedVaultCopy: false
     }
   }
 
@@ -146,7 +148,8 @@ function resolveVerifiedVaultCopyForLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_COPY_MISSING',
-      errorMessage: `Location ${locationId} lacks a valid active SHA-256 hash`
+      errorMessage: `Location ${locationId} lacks a valid active SHA-256 hash`,
+      hasRecordedVaultCopy: false
     }
   }
 
@@ -157,7 +160,8 @@ function resolveVerifiedVaultCopyForLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_COPY_MISSING',
-      errorMessage: `No matching vault_copies record for sha256=${normalizedHash} byteSize=${ctx.byteSize}`
+      errorMessage: `No matching vault_copies record for sha256=${normalizedHash} byteSize=${ctx.byteSize}`,
+      hasRecordedVaultCopy: false
     }
   }
 
@@ -177,7 +181,8 @@ function resolveVerifiedVaultCopyForLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_CONTAINMENT_ERROR',
-      errorMessage: (err as Error).message
+      errorMessage: (err as Error).message,
+      hasRecordedVaultCopy: true
     }
   }
 
@@ -186,7 +191,8 @@ function resolveVerifiedVaultCopyForLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_COPY_MISSING',
-      errorMessage: `Verified vault copy is missing at "${vaultCopyPath}"`
+      errorMessage: `Verified vault copy is missing at "${vaultCopyPath}"`,
+      hasRecordedVaultCopy: true
     }
   }
 
@@ -197,7 +203,8 @@ function resolveVerifiedVaultCopyForLocation(
         ok: false,
         locationId,
         errorCode: 'VAULT_CONTAINMENT_ERROR',
-        errorMessage: `Vault copy "${vaultCopyPath}" is not a regular file`
+        errorMessage: `Vault copy "${vaultCopyPath}" is not a regular file`,
+        hasRecordedVaultCopy: true
       }
     }
     const contentDirReal = realpathSync(expectedContentDir)
@@ -208,7 +215,8 @@ function resolveVerifiedVaultCopyForLocation(
         ok: false,
         locationId,
         errorCode: 'VAULT_CONTAINMENT_ERROR',
-        errorMessage: `Vault copy "${copyReal}" escapes content directory "${contentDirReal}"`
+        errorMessage: `Vault copy "${copyReal}" escapes content directory "${contentDirReal}"`,
+        hasRecordedVaultCopy: true
       }
     }
 
@@ -218,7 +226,8 @@ function resolveVerifiedVaultCopyForLocation(
         ok: false,
         locationId,
         errorCode: 'VAULT_COPY_CORRUPT',
-        errorMessage: `Vault copy "${copyReal}" byte size ${st.size} does not match expected ${vaultCopy.byteSize}`
+        errorMessage: `Vault copy "${copyReal}" byte size ${st.size} does not match expected ${vaultCopy.byteSize}`,
+        hasRecordedVaultCopy: true
       }
     }
 
@@ -229,7 +238,8 @@ function resolveVerifiedVaultCopyForLocation(
           ok: false,
           locationId,
           errorCode: 'VAULT_COPY_CORRUPT',
-          errorMessage: verified.reason
+          errorMessage: verified.reason,
+          hasRecordedVaultCopy: true
         }
       }
     }
@@ -250,7 +260,8 @@ function resolveVerifiedVaultCopyForLocation(
       ok: false,
       locationId,
       errorCode: 'VAULT_COPY_CORRUPT',
-      errorMessage: `Failed to verify vault copy "${vaultCopyPath}": ${(err as Error).message}`
+      errorMessage: `Failed to verify vault copy "${vaultCopyPath}": ${(err as Error).message}`,
+      hasRecordedVaultCopy: true
     }
   }
 }
@@ -276,7 +287,8 @@ export function resolveReadableFileLocation(
       if (
         vaultPreferred.ok ||
         vaultPreferred.errorCode === 'VAULT_COPY_CORRUPT' ||
-        vaultPreferred.errorCode === 'VAULT_CONTAINMENT_ERROR'
+        vaultPreferred.errorCode === 'VAULT_CONTAINMENT_ERROR' ||
+        (vaultPreferred.errorCode === 'VAULT_COPY_MISSING' && vaultPreferred.hasRecordedVaultCopy)
       ) {
         return vaultPreferred
       }
@@ -296,7 +308,8 @@ export function resolveReadableFileLocation(
       if (
         vaultFallback.ok ||
         vaultFallback.errorCode === 'VAULT_COPY_CORRUPT' ||
-        vaultFallback.errorCode === 'VAULT_CONTAINMENT_ERROR'
+        vaultFallback.errorCode === 'VAULT_CONTAINMENT_ERROR' ||
+        (vaultFallback.errorCode === 'VAULT_COPY_MISSING' && vaultFallback.hasRecordedVaultCopy)
       ) {
         return vaultFallback
       }

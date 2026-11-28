@@ -547,6 +547,7 @@ function MediaViewerItemContent({
           {!isVideo && readyPhoto && (
             <span className="original-photo-dims" data-testid="photos-original-dims">
               {readyPhoto.width} × {readyPhoto.height}
+              {readyPhoto.sourceKind === 'cached_preview' ? ' · Cached preview' : ''}
             </span>
           )}
           {isVideo && (
