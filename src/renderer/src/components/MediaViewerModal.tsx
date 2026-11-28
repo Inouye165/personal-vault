@@ -690,10 +690,7 @@ function MediaViewerItemContent({
           role="status"
         >
           <Info size={16} aria-hidden="true" />
-          <span>
-            {readyPhoto.notice ??
-              'Showing verified vault copy because the original source file is currently unavailable.'}
-          </span>
+          <span>{readyPhoto.notice ?? 'Showing your verified vault copy.'}</span>
         </div>
       )}
 
@@ -704,10 +701,7 @@ function MediaViewerItemContent({
           role="status"
         >
           <Info size={16} aria-hidden="true" />
-          <span>
-            {readyVideo.notice ??
-              'Playing verified vault copy because the original source file is currently unavailable.'}
-          </span>
+          <span>{readyVideo.notice ?? 'Playing your verified vault copy.'}</span>
         </div>
       )}
 

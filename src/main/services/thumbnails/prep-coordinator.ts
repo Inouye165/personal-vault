@@ -249,6 +249,23 @@ export class ThumbnailPrepCoordinator {
         afterId = row.fileLocationId
         if (!row.cacheKey || !cache.has(row.cacheKey)) {
           missingIds.push(row.fileLocationId)
+          continue
+        }
+        const resolved = resolveReadableFileLocation(this.catalog, row.fileLocationId, {
+          verifyPayloadHash: false,
+          preferVaultCopy: true
+        })
+        if (resolved.ok && resolved.mode === 'vault_copy') {
+          const expectedVaultKey = cache.computeCacheKey({
+            locationId: row.fileLocationId,
+            sourcePath: resolved.filePath,
+            sha256: resolved.expectedSha256,
+            byteSize: resolved.expectedByteSize,
+            mtimeMs: resolved.expectedMtimeMs
+          })
+          if (row.cacheKey !== expectedVaultKey) {
+            missingIds.push(row.fileLocationId)
+          }
         }
       }
       if (missingIds.length > 0) {
@@ -323,6 +340,7 @@ export class ThumbnailPrepCoordinator {
 
     const resolved = resolveReadableFileLocation(this.catalog, candidate.fileLocationId, {
       verifyPayloadHash: false,
+      preferVaultCopy: true,
       allowVaultCopyFallbackForUnavailableSource: true
     })
 

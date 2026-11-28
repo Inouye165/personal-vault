@@ -384,4 +384,87 @@ describe('video playback IPC, pv-media byte-range streaming, and default player 
     }
     expect(lstatSync(vaultFilePath).isFile()).toBe(true)
   })
+
+  it('prefers verified vault copy for playback and default player even while original is online, distinguishing online vs offline original notice', async () => {
+    const sourceDir = join(workDir, 'online-sources')
+    const vaultDir = join(workDir, 'online-vault')
+    mkdirSync(sourceDir, { recursive: true })
+    mkdirSync(vaultDir, { recursive: true })
+
+    const mp4Path = join(sourceDir, 'family.mp4')
+    const mp4Bytes = makeQuickTimeMovie('avc1')
+    writeFileSync(mp4Path, mp4Bytes)
+    const sha = sha256(mp4Path)
+
+    const vaultRel = `files/${sha.slice(0, 2)}/${sha}/family.mp4`
+    const vaultFilePath = join(vaultDir, vaultRel)
+    mkdirSync(join(vaultDir, 'files', sha.slice(0, 2), sha), { recursive: true })
+    copyFileSync(mp4Path, vaultFilePath)
+
+    catalog.persistDiscoveryBatch(sourceDir, [
+      {
+        originalPath: mp4Path,
+        fileName: 'family.mp4',
+        extension: '.mp4',
+        byteSize: mp4Bytes.length,
+        birthtimeMs: 1700000000000,
+        mtimeMs: 1700000000000,
+        discoveredAtMs: 1700000000000,
+        category: 'photo',
+        mediaKind: 'video'
+      }
+    ])
+    catalog.recordHashObservation({
+      originalPath: mp4Path,
+      sha256: sha,
+      observedByteSize: mp4Bytes.length,
+      observedMtimeMs: 1700000000000,
+      hashedAtMs: 1700000001000
+    })
+    catalog.registerVault({
+      vaultId: 'v-online',
+      vaultPath: vaultDir,
+      name: 'Vault',
+      createdAtMs: 1700000000000
+    })
+    catalog.setActiveVault(vaultDir)
+    catalog.recordVaultCopy({
+      vaultId: 'v-online',
+      sha256: sha,
+      byteSize: mp4Bytes.length,
+      relativePath: vaultRel,
+      manifestRelativePath: `manifests/${sha.slice(0, 2)}/${sha}.json`,
+      verifiedAtMs: 1700000002000
+    })
+
+    const locId = catalog.getFileLocationByPath(mp4Path)!.id
+    registerIpcHandlers({
+      validateSender,
+      catalog,
+      videoPlaybackCoordinator: videoCoordinator
+    })
+
+    // 1. Original STILL ONLINE -> plays from verified vault copy without claiming original is unavailable
+    const onlinePlay = VideoPlaybackResultSchema.parse(
+      await invoke(IPC_CHANNELS.MEDIA_PREPARE_VIDEO, trusted, { locationId: locId })
+    )
+    expect(onlinePlay.status).toBe('ready')
+    if (onlinePlay.status === 'ready') {
+      expect(onlinePlay.sourceKind).toBe('vault_copy')
+      expect(onlinePlay.notice).toBe('Playing your verified vault copy.')
+    }
+
+    // 2. Original goes offline -> still plays from verified vault copy and notes original unavailable
+    renameSync(sourceDir, join(workDir, 'online-sources.offline'))
+    const offlinePlay = VideoPlaybackResultSchema.parse(
+      await invoke(IPC_CHANNELS.MEDIA_PREPARE_VIDEO, trusted, { locationId: locId })
+    )
+    expect(offlinePlay.status).toBe('ready')
+    if (offlinePlay.status === 'ready') {
+      expect(offlinePlay.sourceKind).toBe('vault_copy')
+      expect(offlinePlay.notice).toBe(
+        'Playing your verified vault copy (original source file is currently unavailable).'
+      )
+    }
+  })
 })

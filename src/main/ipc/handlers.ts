@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { app, dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/contracts/channels'
 import {
@@ -920,7 +921,10 @@ export function registerIpcHandlers({
       }
     }
 
-    const resolved = resolveReadableFileLocation(catalog, locationId, { verifyPayloadHash: false })
+    const resolved = resolveReadableFileLocation(catalog, locationId, {
+      verifyPayloadHash: false,
+      preferVaultCopy: true
+    })
     if (!resolved.ok) {
       const failureResult =
         resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
@@ -943,7 +947,7 @@ export function registerIpcHandlers({
       return validatedErr.data
     }
 
-    let res = await thumbnailCoordinator.requestThumbnail({
+    const res = await thumbnailCoordinator.requestThumbnail({
       locationId,
       sourcePath: resolved.filePath,
       expectedByteSize:
@@ -962,29 +966,6 @@ export function registerIpcHandlers({
       approvedRootsOverride: resolved.mode === 'vault_copy' ? resolved.approvedRoots : undefined,
       verifySourceBeforeCacheHit: resolved.mode === 'vault_copy'
     })
-
-    if (res.status === 'missing' && resolved.mode === 'source') {
-      const vaultFallback = resolveReadableFileLocation(catalog, locationId, {
-        verifyPayloadHash: false,
-        allowVaultCopyFallbackForUnavailableSource: true
-      })
-      if (vaultFallback.ok && vaultFallback.mode === 'vault_copy') {
-        const vaultRes = await thumbnailCoordinator.requestThumbnail({
-          locationId,
-          sourcePath: vaultFallback.filePath,
-          expectedByteSize: vaultFallback.expectedByteSize,
-          expectedMtimeMs: vaultFallback.expectedMtimeMs,
-          expectedSha256: vaultFallback.expectedSha256,
-          priority,
-          consumerType: 'ui',
-          approvedRootsOverride: vaultFallback.approvedRoots,
-          verifySourceBeforeCacheHit: true
-        })
-        if (vaultRes.status === 'ready') {
-          res = { ...vaultRes, originalUnavailable: true }
-        }
-      }
-    }
 
     const validated = validatePayload(ThumbnailResultSchema, res)
     if (!validated.success) {
@@ -1046,8 +1027,9 @@ export function registerIpcHandlers({
       }
     }
 
-    let resolved = resolveReadableFileLocation(catalog, locationId, {
+    const resolved = resolveReadableFileLocation(catalog, locationId, {
       verifyPayloadHash: false,
+      preferVaultCopy: true,
       allowVaultCopyFallbackForUnavailableSource: true
     })
     if (!resolved.ok) {
@@ -1069,7 +1051,7 @@ export function registerIpcHandlers({
       })
     }
 
-    let res = await thumbnailCoordinator.getOriginalPhoto({
+    const res = await thumbnailCoordinator.getOriginalPhoto({
       locationId,
       sourcePath: resolved.filePath,
       expectedByteSize: resolved.expectedByteSize,
@@ -1077,24 +1059,6 @@ export function registerIpcHandlers({
       expectedSha256: resolved.expectedSha256 ?? undefined,
       approvedRootsOverride: resolved.mode === 'vault_copy' ? resolved.approvedRoots : undefined
     })
-
-    if (res.status === 'missing' && resolved.mode === 'source') {
-      const vaultFallback = resolveReadableFileLocation(catalog, locationId, {
-        verifyPayloadHash: false,
-        allowVaultCopyFallbackForUnavailableSource: true
-      })
-      if (vaultFallback.ok && vaultFallback.mode === 'vault_copy') {
-        resolved = vaultFallback
-        res = await thumbnailCoordinator.getOriginalPhoto({
-          locationId,
-          sourcePath: vaultFallback.filePath,
-          expectedByteSize: vaultFallback.expectedByteSize,
-          expectedMtimeMs: vaultFallback.expectedMtimeMs,
-          expectedSha256: vaultFallback.expectedSha256 ?? undefined,
-          approvedRootsOverride: vaultFallback.approvedRoots
-        })
-      }
-    }
 
     if (res.status === 'missing') {
       const cachedFallback = await tryCachedPreviewFallback()
@@ -1105,13 +1069,15 @@ export function registerIpcHandlers({
 
     if (res.status === 'ready') {
       const sourceKind = resolved.mode === 'vault_copy' ? 'vault_copy' : 'original'
+      const originalAvailable = sourceKind === 'vault_copy' && existsSync(resolved.originalPath)
       return validateOriginalPhotoResult({
         ...res,
         sourceKind,
         ...(sourceKind === 'vault_copy'
           ? {
-              notice:
-                'Showing your verified vault copy because the original source file is currently unavailable.'
+              notice: originalAvailable
+                ? 'Showing your verified vault copy.'
+                : 'Showing your verified vault copy (original source file is currently unavailable).'
             }
           : {})
       })

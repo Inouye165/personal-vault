@@ -112,6 +112,13 @@ export interface ResolveReadableFileOptions {
    * SHA-256 + byte size and resolves to that copy (or returns FILE_UNAVAILABLE).
    */
   readonly allowVaultCopyFallbackForUnavailableSource?: boolean
+  /**
+   * When `true` and `source_kind === 'user'`, prefers a verified active-vault
+   * copy matching the cataloged SHA-256 and byte size before falling back to
+   * `original_path` (e.g. scanned-only files). Fails closed if a matching
+   * vault copy fails containment or integrity checks.
+   */
+  readonly preferVaultCopy?: boolean
 }
 
 function resolveVerifiedVaultCopyForLocation(
@@ -264,9 +271,33 @@ export function resolveReadableFileLocation(
   }
 
   if (ctx.sourceKind === 'user') {
-    if (options?.allowVaultCopyFallbackForUnavailableSource && !existsSync(ctx.originalPath)) {
+    if (options?.preferVaultCopy) {
+      const vaultPreferred = resolveVerifiedVaultCopyForLocation(catalog, locationId, ctx, options)
+      if (
+        vaultPreferred.ok ||
+        vaultPreferred.errorCode === 'VAULT_COPY_CORRUPT' ||
+        vaultPreferred.errorCode === 'VAULT_CONTAINMENT_ERROR'
+      ) {
+        return vaultPreferred
+      }
+      if (options.allowVaultCopyFallbackForUnavailableSource && !existsSync(ctx.originalPath)) {
+        return {
+          ok: false,
+          locationId,
+          errorCode: 'FILE_UNAVAILABLE',
+          errorMessage: `Original file is unavailable at "${ctx.originalPath}" and no verified vault copy was found`
+        }
+      }
+    } else if (
+      options?.allowVaultCopyFallbackForUnavailableSource &&
+      !existsSync(ctx.originalPath)
+    ) {
       const vaultFallback = resolveVerifiedVaultCopyForLocation(catalog, locationId, ctx, options)
-      if (vaultFallback.ok || vaultFallback.errorCode === 'VAULT_COPY_CORRUPT') {
+      if (
+        vaultFallback.ok ||
+        vaultFallback.errorCode === 'VAULT_COPY_CORRUPT' ||
+        vaultFallback.errorCode === 'VAULT_CONTAINMENT_ERROR'
+      ) {
         return vaultFallback
       }
       return {

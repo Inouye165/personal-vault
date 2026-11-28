@@ -1,6 +1,10 @@
 // @vitest-environment node
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
+import sharp from 'sharp'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const registered = new Map<string, (...args: unknown[]) => unknown>()
@@ -14,12 +18,16 @@ vi.mock('electron', () => ({
 }))
 
 import { IPC_CHANNELS } from '../../src/shared/contracts/channels'
-import { OriginalPhotoResultSchema } from '../../src/shared/validation/ipc-schemas'
+import {
+  OriginalPhotoResultSchema,
+  ThumbnailResultSchema
+} from '../../src/shared/validation/ipc-schemas'
 import { registerIpcHandlers } from '../../src/main/ipc/handlers'
 import { createSenderValidator } from '../../src/main/ipc/sender'
 import { resolveAppLocation } from '../../src/main/navigation'
-import type { CatalogDatabase } from '../../src/main/services/catalog/database'
-import type { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
+import { CatalogDatabase } from '../../src/main/services/catalog/database'
+import { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
+import { initializeVault } from '../../src/main/services/vault/identity'
 
 const documentPath = resolve('app', 'out', 'renderer', 'index.html')
 const documentUrl = pathToFileURL(documentPath).href
@@ -155,6 +163,174 @@ describe('Stage 8D: photos:get-original IPC validation and error branches', () =
     if (res.status === 'ready') {
       expect(res.sourceKind).toBe('cached_preview')
       expect(res.notice).toMatch(/original file is currently unavailable/i)
+    }
+  })
+
+  it('prefers verified vault copy for thumbnails and full-size viewing when online and offline, while keeping scanned-only offline warning', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'pv-thumb-vault-ipc-'))
+    const sourceDir = join(workDir, 'sources')
+    const vaultDir = join(workDir, 'vault')
+    const cacheDir = join(workDir, 'thumbnails')
+    mkdirSync(sourceDir, { recursive: true })
+    mkdirSync(cacheDir, { recursive: true })
+
+    const importedBytes = await sharp({
+      create: { width: 64, height: 64, channels: 3, background: { r: 20, g: 110, b: 220 } }
+    })
+      .jpeg()
+      .toBuffer()
+    const scannedBytes = await sharp({
+      create: { width: 64, height: 64, channels: 3, background: { r: 220, g: 80, b: 40 } }
+    })
+      .jpeg()
+      .toBuffer()
+
+    const importedPath = join(sourceDir, 'imported.jpg')
+    const scannedPath = join(sourceDir, 'scanned.jpg')
+    writeFileSync(importedPath, importedBytes)
+    writeFileSync(scannedPath, scannedBytes)
+
+    const importedSha = createHash('sha256').update(importedBytes).digest('hex').toLowerCase()
+    const scannedSha = createHash('sha256').update(scannedBytes).digest('hex').toLowerCase()
+    const importedSt = statSync(importedPath)
+    const scannedSt = statSync(scannedPath)
+
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'IPC Vault' })
+    const catalog = CatalogDatabase.open({ catalogPath: join(workDir, 'catalog.db') })
+    const thumbCoord = new ThumbnailCoordinator({
+      cacheDir,
+      approvedRoots: () => catalog.getAllSourceRoots(),
+      vaultPath: () => catalog.getActiveVault()?.vaultPath ?? null,
+      maxActiveJobs: 2,
+      jobTimeoutMs: 5000
+    })
+
+    try {
+      catalog.registerSource(sourceDir)
+      catalog.persistDiscoveryBatch(sourceDir, [
+        {
+          originalPath: importedPath,
+          fileName: 'imported.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: importedBytes.length,
+          birthtimeMs: Math.round(importedSt.birthtimeMs),
+          mtimeMs: Math.round(importedSt.mtimeMs),
+          discoveredAtMs: Date.now()
+        },
+        {
+          originalPath: scannedPath,
+          fileName: 'scanned.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: scannedBytes.length,
+          birthtimeMs: Math.round(scannedSt.birthtimeMs),
+          mtimeMs: Math.round(scannedSt.mtimeMs),
+          discoveredAtMs: Date.now()
+        }
+      ])
+      catalog.recordHashObservation({
+        originalPath: importedPath,
+        sha256: importedSha,
+        observedByteSize: importedBytes.length,
+        observedMtimeMs: Math.round(importedSt.mtimeMs),
+        hashedAtMs: Date.now()
+      })
+      catalog.recordHashObservation({
+        originalPath: scannedPath,
+        sha256: scannedSha,
+        observedByteSize: scannedBytes.length,
+        observedMtimeMs: Math.round(scannedSt.mtimeMs),
+        hashedAtMs: Date.now()
+      })
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: vaultDir,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+      catalog.setActiveVault(vaultDir)
+
+      const relPayload = `files/${importedSha.slice(0, 2)}/${importedSha}/imported.jpg`
+      mkdirSync(join(vaultDir, 'files', importedSha.slice(0, 2), importedSha), { recursive: true })
+      writeFileSync(join(vaultDir, relPayload), importedBytes)
+      catalog.recordVaultCopy({
+        vaultId: identity.vaultId,
+        sha256: importedSha,
+        byteSize: importedBytes.length,
+        relativePath: relPayload,
+        manifestRelativePath: `manifests/${importedSha.slice(0, 2)}/${importedSha}.json`,
+        verifiedAtMs: Date.now()
+      })
+
+      const importedLoc = catalog.getFileLocationByPath(importedPath)!
+      const scannedLoc = catalog.getFileLocationByPath(scannedPath)!
+
+      registerIpcHandlers({
+        validateSender,
+        catalog,
+        thumbnailCoordinator: thumbCoord
+      })
+
+      // 1. With sources online: imported item opens from verified vault copy without unavailable wording
+      const onlineOrig = OriginalPhotoResultSchema.parse(
+        await invoke(IPC_CHANNELS.PHOTOS_GET_ORIGINAL, trusted, { locationId: importedLoc.id })
+      )
+      expect(onlineOrig.status).toBe('ready')
+      if (onlineOrig.status === 'ready') {
+        expect(onlineOrig.sourceKind).toBe('vault_copy')
+        expect(onlineOrig.notice).toBe('Showing your verified vault copy.')
+      }
+
+      const onlineThumb = ThumbnailResultSchema.parse(
+        await invoke(IPC_CHANNELS.PHOTOS_GET_THUMBNAIL, trusted, { locationId: importedLoc.id })
+      )
+      expect(onlineThumb.status).toBe('ready')
+      if (onlineThumb.status === 'ready') {
+        expect(onlineThumb.originalUnavailable).not.toBe(true)
+      }
+
+      // Warm scanned-only thumbnail too before unplugging
+      const scannedWarm = ThumbnailResultSchema.parse(
+        await invoke(IPC_CHANNELS.PHOTOS_GET_THUMBNAIL, trusted, { locationId: scannedLoc.id })
+      )
+      expect(scannedWarm.status).toBe('ready')
+
+      // 2. Remove both originals from disk -> imported photo STILL renders cleanly with no originalUnavailable badge
+      unlinkSync(importedPath)
+      unlinkSync(scannedPath)
+
+      const offlineThumbImported = ThumbnailResultSchema.parse(
+        await invoke(IPC_CHANNELS.PHOTOS_GET_THUMBNAIL, trusted, { locationId: importedLoc.id })
+      )
+      expect(offlineThumbImported.status).toBe('ready')
+      if (offlineThumbImported.status === 'ready') {
+        expect(offlineThumbImported.originalUnavailable).not.toBe(true)
+      }
+
+      const offlineOrigImported = OriginalPhotoResultSchema.parse(
+        await invoke(IPC_CHANNELS.PHOTOS_GET_ORIGINAL, trusted, { locationId: importedLoc.id })
+      )
+      expect(offlineOrigImported.status).toBe('ready')
+      if (offlineOrigImported.status === 'ready') {
+        expect(offlineOrigImported.sourceKind).toBe('vault_copy')
+        expect(offlineOrigImported.notice).toBe(
+          'Showing your verified vault copy (original source file is currently unavailable).'
+        )
+      }
+
+      // Scanned-only offline item honestly reports originalUnavailable on its cached thumbnail
+      const offlineThumbScanned = ThumbnailResultSchema.parse(
+        await invoke(IPC_CHANNELS.PHOTOS_GET_THUMBNAIL, trusted, { locationId: scannedLoc.id })
+      )
+      expect(offlineThumbScanned.status).toBe('ready')
+      if (offlineThumbScanned.status === 'ready') {
+        expect(offlineThumbScanned.originalUnavailable).toBe(true)
+      }
+    } finally {
+      await thumbCoord.shutdown()
+      catalog.close()
+      rmSync(workDir, { recursive: true, force: true })
     }
   })
 })

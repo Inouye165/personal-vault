@@ -529,4 +529,55 @@ describe('Full-size Photo Viewer, Video Playback, and Grid Interactions', () => 
       expect(screen.queryByTestId('video-open-default-player-btn')).not.toBeInTheDocument()
     })
   })
+
+  it('uses plain verified-vault-copy fallback notices without falsely claiming original is unavailable', async () => {
+    const photoVaultItem = makePhoto(21, 'in-vault.jpg')
+    const videoVaultItem = makeVideo(22, 'in-vault.mp4')
+    const mocks = installBaseApi([photoVaultItem, videoVaultItem])
+
+    mocks.getOriginalPhoto.mockResolvedValueOnce({
+      status: 'ready',
+      locationId: 21,
+      dataUrl: 'data:image/webp;base64,BBBB',
+      mimeType: 'image/webp',
+      width: 1200,
+      height: 800,
+      sourceKind: 'vault_copy'
+    })
+    mocks.prepareVideoPlayback.mockResolvedValueOnce({
+      status: 'ready',
+      locationId: 22,
+      token: TOKEN_1,
+      streamUrl: `pv-media://video/${TOKEN_1}`,
+      mimeType: 'video/mp4',
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      hasVideoTrack: true,
+      durationMs: 4200,
+      widthPx: 1920,
+      heightPx: 1080,
+      sourceKind: 'vault_copy',
+      canOpenInDefaultPlayer: true
+    })
+
+    render(<PhotosPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('in-vault.jpg')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId('photo-open-btn-21'))
+    await waitFor(() => {
+      const notice = screen.getByTestId('media-viewer-source-notice')
+      expect(notice).toHaveTextContent('Showing your verified vault copy.')
+      expect(notice).not.toHaveTextContent(/unavailable/i)
+    })
+
+    fireEvent.click(screen.getByTestId('media-viewer-next-btn'))
+    await waitFor(() => {
+      const notice = screen.getByTestId('media-viewer-source-notice')
+      expect(notice).toHaveTextContent('Playing your verified vault copy.')
+      expect(notice).not.toHaveTextContent(/unavailable/i)
+    })
+  })
 })
