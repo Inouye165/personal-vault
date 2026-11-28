@@ -10,6 +10,8 @@ import sharp from 'sharp'
 import { CatalogDatabase } from '../../src/main/services/catalog'
 import { ThumbnailCoordinator } from '../../src/main/services/thumbnails/coordinator'
 import { ThumbnailPrepCoordinator } from '../../src/main/services/thumbnails/prep-coordinator'
+import { VaultImportCoordinator } from '../../src/main/services/vault/coordinator'
+import { initializeVault } from '../../src/main/services/vault/identity'
 
 async function makeJpeg(
   width = 800,
@@ -293,6 +295,96 @@ describe('Thumbnail Coalescing, Unavailable Originals & Background Preparation',
     expect(importProg.status).toBe('completed')
     expect(importProg.preparedPhotos).toBe(1)
     expect(coordinator.getCache().has(cacheKey)).toBe(true)
+    await prep.shutdown()
+  })
+
+  it('re-prepares newly vault-imported photos under the vault-copy cache key so thumbnails stay ready without originalUnavailable when originals disconnect', async () => {
+    const prep = new ThumbnailPrepCoordinator({
+      catalog,
+      thumbnailCoordinator: coordinator,
+      startupDelayMs: 60000,
+      scanSettleDelayMs: 0
+    })
+
+    const vaultDir = join(tempDir, 'active-vault')
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Prep Vault' })
+    catalog.registerSource(sourceRoot)
+    catalog.registerVault({
+      vaultId: identity.vaultId,
+      vaultPath: vaultDir,
+      name: identity.vaultName,
+      createdAtMs: identity.createdAtMs
+    })
+    catalog.setActiveVault(vaultDir)
+
+    const jpgBuf = await makeJpeg(640, 480, { r: 80, g: 150, b: 220 })
+    const origPath = join(sourceRoot, 'vaulted_trip.jpg')
+    const locId = seedPhoto(catalog, sourceRoot, origPath, 'vaulted_trip.jpg', jpgBuf)
+
+    // 1. Scan completes before import -> background prep caches under source key
+    prep.onScanProgress({ jobId: 1, status: 'completed', phase: 'completed', hashedCount: 1 })
+    const scanProg = await prep.waitForCompletion()
+    expect(scanProg.preparedPhotos).toBe(1)
+
+    const locBeforeImport = catalog.getFileLocationById(locId)!
+    const sourceCacheKey = coordinator.getCache().computeCacheKey({
+      locationId: locBeforeImport.id,
+      sourcePath: locBeforeImport.originalPath,
+      sha256: locBeforeImport.activeHash,
+      byteSize: locBeforeImport.byteSize,
+      mtimeMs: locBeforeImport.filesystemMtimeMs
+    })
+    expect(coordinator.getCache().has(sourceCacheKey)).toBe(true)
+
+    // 2. Verified import into vault
+    const importCoord = new VaultImportCoordinator({ catalog })
+    await importCoord.startImport({
+      vaultId: identity.vaultId,
+      fileLocationIds: [locId]
+    })
+    const completedJob = await importCoord.waitForCompletion()
+    expect(completedJob.status).toBe('completed')
+
+    // 3. Import completion triggers vault-first prep reconciliation -> switches cacheKey to vault copy
+    prep.onVaultImportProgress({ status: 'completed' })
+    const postImportProg = await prep.waitForCompletion()
+    expect(postImportProg.status).toBe('completed')
+    expect(postImportProg.preparedPhotos).toBe(1)
+
+    const vaultCopy = catalog.getVaultCopy(
+      identity.vaultId,
+      locBeforeImport.activeHash!,
+      locBeforeImport.byteSize
+    )!
+    const vaultFilePath = join(vaultDir, vaultCopy.relativePath)
+    const vaultStat = statSync(vaultFilePath)
+    const vaultCacheKey = coordinator.getCache().computeCacheKey({
+      locationId: locId,
+      sourcePath: vaultFilePath,
+      sha256: vaultCopy.sha256,
+      byteSize: vaultCopy.byteSize,
+      mtimeMs: Number.isFinite(vaultStat.mtimeMs) ? vaultStat.mtimeMs : null
+    })
+    expect(vaultCacheKey).not.toBe(sourceCacheKey)
+    expect(coordinator.getCache().has(vaultCacheKey)).toBe(true)
+
+    // 4. Delete original source on disk -> vault-copy thumbnail request succeeds without originalUnavailable
+    unlinkSync(origPath)
+    const afterDisconnect = await coordinator.requestThumbnail({
+      locationId: locId,
+      sourcePath: vaultFilePath,
+      expectedByteSize: vaultCopy.byteSize,
+      expectedMtimeMs: Number.isFinite(vaultStat.mtimeMs) ? vaultStat.mtimeMs : null,
+      expectedSha256: vaultCopy.sha256,
+      approvedRootsOverride: [
+        join(vaultDir, 'files', vaultCopy.sha256.slice(0, 2), vaultCopy.sha256)
+      ],
+      verifySourceBeforeCacheHit: true
+    })
+    expect(afterDisconnect.status).toBe('ready')
+    if (afterDisconnect.status === 'ready') {
+      expect(afterDisconnect.originalUnavailable).not.toBe(true)
+    }
     await prep.shutdown()
   })
 })

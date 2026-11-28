@@ -553,4 +553,218 @@ describe('Stage 8B Slice 2: Read-Only Access to Recovered Photos & Documents', (
       catalog.close()
     }
   })
+
+  it('prefers verified vault copy for user-source files when preferVaultCopy is true, fails closed on corruption, and falls back to source when unimported', () => {
+    const root = makeTempDir('pv-vault-first-res-')
+    const sourceDir = join(root, 'sources')
+    const vaultDir = join(root, 'vault')
+    mkdirSync(sourceDir, { recursive: true })
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Vault First' })
+
+    const importedBytes = Buffer.from('Imported photo verified payload bytes')
+    const importedPath = join(sourceDir, 'imported.jpg')
+    writeFileSync(importedPath, importedBytes)
+    const importedStat = statSync(importedPath)
+    const importedSha = sha256Hex(importedBytes)
+
+    const scannedBytes = Buffer.from('Scanned only photo bytes')
+    const scannedPath = join(sourceDir, 'scanned-only.jpg')
+    writeFileSync(scannedPath, scannedBytes)
+    const scannedStat = statSync(scannedPath)
+    const scannedSha = sha256Hex(scannedBytes)
+
+    const catalog = CatalogDatabase.open({ catalogPath: join(root, 'catalog.db') })
+    try {
+      catalog.registerSource(sourceDir)
+      catalog.persistDiscoveryBatch(sourceDir, [
+        {
+          originalPath: importedPath,
+          fileName: 'imported.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: importedBytes.length,
+          birthtimeMs: Math.round(importedStat.birthtimeMs),
+          mtimeMs: Math.round(importedStat.mtimeMs),
+          discoveredAtMs: Date.now()
+        },
+        {
+          originalPath: scannedPath,
+          fileName: 'scanned-only.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: scannedBytes.length,
+          birthtimeMs: Math.round(scannedStat.birthtimeMs),
+          mtimeMs: Math.round(scannedStat.mtimeMs),
+          discoveredAtMs: Date.now()
+        }
+      ])
+      catalog.recordHashObservation({
+        originalPath: importedPath,
+        sha256: importedSha,
+        observedByteSize: importedBytes.length,
+        observedMtimeMs: Math.round(importedStat.mtimeMs),
+        hashedAtMs: Date.now()
+      })
+      catalog.recordHashObservation({
+        originalPath: scannedPath,
+        sha256: scannedSha,
+        observedByteSize: scannedBytes.length,
+        observedMtimeMs: Math.round(scannedStat.mtimeMs),
+        hashedAtMs: Date.now()
+      })
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: vaultDir,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+      catalog.setActiveVault(vaultDir)
+
+      const relPayload = `files/${importedSha.slice(0, 2)}/${importedSha}/imported.jpg`
+      const payloadDir = join(vaultDir, 'files', importedSha.slice(0, 2), importedSha)
+      mkdirSync(payloadDir, { recursive: true })
+      const vaultPayloadPath = join(vaultDir, relPayload)
+      writeFileSync(vaultPayloadPath, importedBytes)
+      catalog.recordVaultCopy({
+        vaultId: identity.vaultId,
+        sha256: importedSha,
+        byteSize: importedBytes.length,
+        relativePath: relPayload,
+        manifestRelativePath: `manifests/${importedSha.slice(0, 2)}/${importedSha}.json`,
+        verifiedAtMs: Date.now()
+      })
+
+      const importedLoc = catalog.getFileLocationByPath(importedPath)!
+      const scannedLoc = catalog.getFileLocationByPath(scannedPath)!
+
+      // Default (without preferVaultCopy) still resolves user-source to original path
+      const defaultRes = resolveReadableFileLocation(catalog, importedLoc.id)
+      expect(defaultRes.ok).toBe(true)
+      if (defaultRes.ok) {
+        expect(defaultRes.mode).toBe('source')
+        expect(defaultRes.filePath).toBe(importedPath)
+      }
+
+      // With preferVaultCopy: true and original STILL online -> resolves to verified vault copy
+      const vaultFirstRes = resolveReadableFileLocation(catalog, importedLoc.id, {
+        preferVaultCopy: true
+      })
+      expect(vaultFirstRes.ok).toBe(true)
+      if (vaultFirstRes.ok) {
+        expect(vaultFirstRes.mode).toBe('vault_copy')
+        expect(vaultFirstRes.filePath.toLowerCase()).toBe(vaultPayloadPath.toLowerCase())
+        expect(vaultFirstRes.originalPath).toBe(importedPath)
+      }
+
+      // Scanned-only item with preferVaultCopy: true -> falls back cleanly to source originalPath
+      const scannedRes = resolveReadableFileLocation(catalog, scannedLoc.id, {
+        preferVaultCopy: true
+      })
+      expect(scannedRes.ok).toBe(true)
+      if (scannedRes.ok) {
+        expect(scannedRes.mode).toBe('source')
+        expect(scannedRes.filePath).toBe(scannedPath)
+      }
+
+      // Tamper vault copy while original is still online -> preferVaultCopy MUST fail closed
+      writeFileSync(vaultPayloadPath, Buffer.from('TAMPERED VAULT BYTES WITH DIFF LEN!!'))
+      const corruptRes = resolveReadableFileLocation(catalog, importedLoc.id, {
+        preferVaultCopy: true
+      })
+      expect(corruptRes.ok).toBe(false)
+      if (!corruptRes.ok) {
+        expect(corruptRes.errorCode).toBe('VAULT_COPY_CORRUPT')
+        expect(corruptRes.hasRecordedVaultCopy).toBe(true)
+      }
+    } finally {
+      catalog.close()
+    }
+  })
+
+  it('fails closed with VAULT_COPY_MISSING and hasRecordedVaultCopy=true when a recorded vault copy is missing on disk while preserving originalPath', () => {
+    const root = makeTempDir('pv-vault-missing-rec-')
+    const sourceDir = join(root, 'sources')
+    const vaultDir = join(root, 'vault')
+    mkdirSync(sourceDir, { recursive: true })
+    const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Missing Copy Vault' })
+
+    const importedBytes = Buffer.from('Recorded vault photo payload bytes')
+    const importedPath = join(sourceDir, 'recorded.jpg')
+    writeFileSync(importedPath, importedBytes)
+    const importedStat = statSync(importedPath)
+    const importedSha = sha256Hex(importedBytes)
+
+    const catalog = CatalogDatabase.open({ catalogPath: join(root, 'catalog.db') })
+    try {
+      catalog.registerSource(sourceDir)
+      catalog.persistDiscoveryBatch(sourceDir, [
+        {
+          originalPath: importedPath,
+          fileName: 'recorded.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: importedBytes.length,
+          birthtimeMs: Math.round(importedStat.birthtimeMs),
+          mtimeMs: Math.round(importedStat.mtimeMs),
+          discoveredAtMs: Date.now()
+        }
+      ])
+      catalog.recordHashObservation({
+        originalPath: importedPath,
+        sha256: importedSha,
+        observedByteSize: importedBytes.length,
+        observedMtimeMs: Math.round(importedStat.mtimeMs),
+        hashedAtMs: Date.now()
+      })
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: vaultDir,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+      catalog.setActiveVault(vaultDir)
+
+      const relPayload = `files/${importedSha.slice(0, 2)}/${importedSha}/recorded.jpg`
+      const payloadDir = join(vaultDir, 'files', importedSha.slice(0, 2), importedSha)
+      mkdirSync(payloadDir, { recursive: true })
+      const vaultPayloadPath = join(vaultDir, relPayload)
+      writeFileSync(vaultPayloadPath, importedBytes)
+      catalog.recordVaultCopy({
+        vaultId: identity.vaultId,
+        sha256: importedSha,
+        byteSize: importedBytes.length,
+        relativePath: relPayload,
+        manifestRelativePath: `manifests/${importedSha.slice(0, 2)}/${importedSha}.json`,
+        verifiedAtMs: Date.now()
+      })
+
+      const importedLoc = catalog.getFileLocationByPath(importedPath)!
+      // Delete the recorded vault payload file from disk while original is still online
+      rmSync(vaultPayloadPath)
+
+      const onlineMissingRes = resolveReadableFileLocation(catalog, importedLoc.id, {
+        preferVaultCopy: true
+      })
+      expect(onlineMissingRes.ok).toBe(false)
+      if (!onlineMissingRes.ok) {
+        expect(onlineMissingRes.errorCode).toBe('VAULT_COPY_MISSING')
+        expect(onlineMissingRes.hasRecordedVaultCopy).toBe(true)
+      }
+
+      // Now also remove the original file from disk and test with allowVaultCopyFallbackForUnavailableSource
+      rmSync(importedPath)
+      const offlineMissingRes = resolveReadableFileLocation(catalog, importedLoc.id, {
+        preferVaultCopy: true,
+        allowVaultCopyFallbackForUnavailableSource: true
+      })
+      expect(offlineMissingRes.ok).toBe(false)
+      if (!offlineMissingRes.ok) {
+        expect(offlineMissingRes.errorCode).toBe('VAULT_COPY_MISSING')
+        expect(offlineMissingRes.hasRecordedVaultCopy).toBe(true)
+      }
+      expect(catalog.getFileLocationById(importedLoc.id)?.originalPath).toBe(importedPath)
+    } finally {
+      catalog.close()
+    }
+  })
 })

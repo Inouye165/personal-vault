@@ -202,6 +202,7 @@ export class VideoPlaybackCoordinator {
 
     const resolved = resolveReadableFileLocation(this.catalog, locationId, {
       verifyPayloadHash: false,
+      preferVaultCopy: true,
       allowVaultCopyFallbackForUnavailableSource: true
     })
 
@@ -359,8 +360,9 @@ export class VideoPlaybackCoordinator {
       sourceKind: resolved.mode === 'vault_copy' ? 'vault_copy' : 'original',
       ...(resolved.mode === 'vault_copy'
         ? {
-            notice:
-              'Playing from your verified vault copy because the original source file is currently unavailable.'
+            notice: existsSync(resolved.originalPath)
+              ? 'Playing your verified vault copy.'
+              : 'Playing your verified vault copy (original source file is currently unavailable).'
           }
         : {}),
       canOpenInDefaultPlayer: true
@@ -562,6 +564,7 @@ export class VideoPlaybackCoordinator {
 
     const resolved = resolveReadableFileLocation(this.catalog, locationId, {
       verifyPayloadHash: false,
+      preferVaultCopy: true,
       allowVaultCopyFallbackForUnavailableSource: true
     })
 

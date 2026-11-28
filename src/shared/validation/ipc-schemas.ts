@@ -545,6 +545,9 @@ export const GetThumbnailRequestSchema = z.object({
 })
 export type GetThumbnailRequest = z.infer<typeof GetThumbnailRequestSchema>
 
+export const OriginalPhotoSourceKindSchema = z.enum(['original', 'vault_copy', 'cached_preview'])
+export type OriginalPhotoSourceKind = z.infer<typeof OriginalPhotoSourceKindSchema>
+
 export const ThumbnailReadySchema = z.object({
   status: z.literal('ready'),
   locationId: z.number().int().positive(),
@@ -555,7 +558,8 @@ export const ThumbnailReadySchema = z.object({
   mimeType: z.string().min(1),
   width: z.number().int().positive(),
   height: z.number().int().positive(),
-  originalUnavailable: z.boolean().optional()
+  originalUnavailable: z.boolean().optional(),
+  sourceKind: OriginalPhotoSourceKindSchema.optional()
 })
 
 export const ThumbnailUnsupportedSchema = z.object({
@@ -589,9 +593,6 @@ export const GetOriginalPhotoRequestSchema = z.object({
   locationId: z.number().int().positive()
 })
 export type GetOriginalPhotoRequest = z.infer<typeof GetOriginalPhotoRequestSchema>
-
-export const OriginalPhotoSourceKindSchema = z.enum(['original', 'vault_copy', 'cached_preview'])
-export type OriginalPhotoSourceKind = z.infer<typeof OriginalPhotoSourceKindSchema>
 
 export const OriginalPhotoReadySchema = z.object({
   status: z.literal('ready'),

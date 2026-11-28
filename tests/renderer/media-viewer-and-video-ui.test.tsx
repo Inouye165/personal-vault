@@ -529,4 +529,133 @@ describe('Full-size Photo Viewer, Video Playback, and Grid Interactions', () => 
       expect(screen.queryByTestId('video-open-default-player-btn')).not.toBeInTheDocument()
     })
   })
+
+  it('uses plain verified-vault-copy fallback notices without falsely claiming original is unavailable', async () => {
+    const photoVaultItem = makePhoto(21, 'in-vault.jpg')
+    const videoVaultItem = makeVideo(22, 'in-vault.mp4')
+    const mocks = installBaseApi([photoVaultItem, videoVaultItem])
+
+    mocks.getOriginalPhoto.mockResolvedValueOnce({
+      status: 'ready',
+      locationId: 21,
+      dataUrl: 'data:image/webp;base64,BBBB',
+      mimeType: 'image/webp',
+      width: 1200,
+      height: 800,
+      sourceKind: 'vault_copy'
+    })
+    mocks.prepareVideoPlayback.mockResolvedValueOnce({
+      status: 'ready',
+      locationId: 22,
+      token: TOKEN_1,
+      streamUrl: `pv-media://video/${TOKEN_1}`,
+      mimeType: 'video/mp4',
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      hasVideoTrack: true,
+      durationMs: 4200,
+      widthPx: 1920,
+      heightPx: 1080,
+      sourceKind: 'vault_copy',
+      canOpenInDefaultPlayer: true
+    })
+
+    render(<PhotosPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('in-vault.jpg')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId('photo-open-btn-21'))
+    await waitFor(() => {
+      const notice = screen.getByTestId('media-viewer-source-notice')
+      expect(notice).toHaveTextContent('Showing your verified vault copy.')
+      expect(notice).not.toHaveTextContent(/unavailable/i)
+    })
+
+    fireEvent.click(screen.getByTestId('media-viewer-next-btn'))
+    await waitFor(() => {
+      const notice = screen.getByTestId('media-viewer-source-notice')
+      expect(notice).toHaveTextContent('Playing your verified vault copy.')
+      expect(notice).not.toHaveTextContent(/unavailable/i)
+    })
+  })
+
+  it('labels missing/corrupt vault copies clearly on grid cards & details, and labels cached previews in header and banner', async () => {
+    const missingVaultPhoto = makePhoto(31, 'missing-vault.jpg')
+    const corruptVaultPhoto = makePhoto(32, 'corrupt-vault.heic', { extension: '.heic' })
+    const cachedOnlyPhoto = makePhoto(33, 'cached-only.jpg')
+    const mocks = installBaseApi([missingVaultPhoto, corruptVaultPhoto, cachedOnlyPhoto])
+
+    mocks.getThumbnail.mockImplementation(async ({ locationId }) => {
+      if (locationId === 31) {
+        return {
+          status: 'error',
+          locationId: 31,
+          code: 'VAULT_COPY_MISSING',
+          message:
+            'The recorded vault copy is missing from the active vault. Your original file path and metadata are preserved.'
+        }
+      }
+      if (locationId === 32) {
+        return {
+          status: 'error',
+          locationId: 32,
+          code: 'VAULT_COPY_CORRUPT',
+          message:
+            'The recorded vault copy is corrupt and failed verification. Your original file path and metadata are preserved.'
+        }
+      }
+      return {
+        status: 'ready',
+        locationId,
+        dataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
+        mimeType: 'image/webp',
+        width: 300,
+        height: 200,
+        originalUnavailable: true,
+        sourceKind: 'cached_preview'
+      }
+    })
+
+    mocks.getOriginalPhoto.mockResolvedValueOnce({
+      status: 'ready',
+      locationId: 33,
+      dataUrl: 'data:image/webp;base64,AAAA',
+      mimeType: 'image/webp',
+      width: 300,
+      height: 200,
+      sourceKind: 'cached_preview',
+      notice:
+        'Cached preview only (not full size). The original file is currently unavailable and no verified vault copy was found.'
+    })
+
+    render(<PhotosPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('Vault copy missing')).toBeInTheDocument()
+      expect(screen.getByText('Vault copy corrupt')).toBeInTheDocument()
+      expect(screen.getByText('Original unavailable')).toBeInTheDocument()
+    })
+
+    // Details panel shows the clear vault-copy error explanation alongside preserved originalPath
+    fireEvent.click(screen.getByTestId('photo-details-btn-32'))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /photograph details/i })).toBeInTheDocument()
+      expect(
+        screen.getByText(/The recorded vault copy is corrupt and failed verification/i)
+      ).toBeInTheDocument()
+      expect(screen.getByText('C:\\Media\\corrupt-vault.heic')).toBeInTheDocument()
+    })
+
+    // Opening cached-preview-only photo labels both header dimensions and warning banner clearly
+    fireEvent.click(screen.getByTestId('photo-open-btn-33'))
+    await waitFor(() => {
+      expect(screen.getByTestId('photos-original-dims')).toHaveTextContent(
+        /300 × 200 · Cached preview/i
+      )
+      expect(screen.getByTestId('media-viewer-cached-notice')).toHaveTextContent(
+        /Cached preview only/i
+      )
+    })
+  })
 })

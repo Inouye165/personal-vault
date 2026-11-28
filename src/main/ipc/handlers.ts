@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { app, dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/contracts/channels'
 import {
@@ -920,22 +921,41 @@ export function registerIpcHandlers({
       }
     }
 
-    const resolved = resolveReadableFileLocation(catalog, locationId, { verifyPayloadHash: false })
+    const resolved = resolveReadableFileLocation(catalog, locationId, {
+      verifyPayloadHash: false,
+      preferVaultCopy: true
+    })
     if (!resolved.ok) {
       const failureResult =
-        resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
-        resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
+        resolved.errorCode === 'VAULT_COPY_MISSING' && resolved.hasRecordedVaultCopy
           ? {
               status: 'error' as const,
               locationId,
-              code: resolved.errorCode,
-              message: resolved.errorMessage
+              code: 'VAULT_COPY_MISSING',
+              message:
+                'The recorded vault copy is missing from the active vault. Your original file path and metadata are preserved.'
             }
-          : {
-              status: 'missing' as const,
-              locationId,
-              reason: resolved.errorMessage
-            }
+          : resolved.errorCode === 'VAULT_COPY_CORRUPT'
+            ? {
+                status: 'error' as const,
+                locationId,
+                code: 'VAULT_COPY_CORRUPT',
+                message:
+                  'The recorded vault copy is corrupt and failed verification. Your original file path and metadata are preserved.'
+              }
+            : resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
+              ? {
+                  status: 'error' as const,
+                  locationId,
+                  code: 'VAULT_CONTAINMENT_ERROR',
+                  message:
+                    'The recorded vault copy failed vault safety verification. Your original file path and metadata are preserved.'
+                }
+              : {
+                  status: 'missing' as const,
+                  locationId,
+                  reason: resolved.errorMessage
+                }
       const validatedErr = validatePayload(ThumbnailResultSchema, failureResult)
       if (!validatedErr.success) {
         throw new Error(`Invalid outgoing ThumbnailResult in main: ${validatedErr.error}`)
@@ -943,7 +963,7 @@ export function registerIpcHandlers({
       return validatedErr.data
     }
 
-    let res = await thumbnailCoordinator.requestThumbnail({
+    const res = await thumbnailCoordinator.requestThumbnail({
       locationId,
       sourcePath: resolved.filePath,
       expectedByteSize:
@@ -963,30 +983,32 @@ export function registerIpcHandlers({
       verifySourceBeforeCacheHit: resolved.mode === 'vault_copy'
     })
 
-    if (res.status === 'missing' && resolved.mode === 'source') {
-      const vaultFallback = resolveReadableFileLocation(catalog, locationId, {
-        verifyPayloadHash: false,
-        allowVaultCopyFallbackForUnavailableSource: true
-      })
-      if (vaultFallback.ok && vaultFallback.mode === 'vault_copy') {
-        const vaultRes = await thumbnailCoordinator.requestThumbnail({
-          locationId,
-          sourcePath: vaultFallback.filePath,
-          expectedByteSize: vaultFallback.expectedByteSize,
-          expectedMtimeMs: vaultFallback.expectedMtimeMs,
-          expectedSha256: vaultFallback.expectedSha256,
-          priority,
-          consumerType: 'ui',
-          approvedRootsOverride: vaultFallback.approvedRoots,
-          verifySourceBeforeCacheHit: true
-        })
-        if (vaultRes.status === 'ready') {
-          res = { ...vaultRes, originalUnavailable: true }
-        }
+    let finalRes: ThumbnailResult = res
+    if (
+      resolved.mode === 'vault_copy' &&
+      res.status === 'error' &&
+      res.code === 'SOURCE_MODIFIED'
+    ) {
+      finalRes = {
+        status: 'error',
+        locationId,
+        code: 'VAULT_COPY_CORRUPT',
+        message:
+          'The recorded vault copy failed integrity verification (SHA-256 mismatch) and appears corrupt. Your original file path and metadata are preserved.'
+      }
+    } else if (res.status === 'ready') {
+      finalRes = {
+        ...res,
+        sourceKind:
+          resolved.mode === 'vault_copy'
+            ? 'vault_copy'
+            : res.originalUnavailable
+              ? 'cached_preview'
+              : 'original'
       }
     }
 
-    const validated = validatePayload(ThumbnailResultSchema, res)
+    const validated = validatePayload(ThumbnailResultSchema, finalRes)
     if (!validated.success) {
       throw new Error(`Invalid outgoing ThumbnailResult in main: ${validated.error}`)
     }
@@ -1042,34 +1064,47 @@ export function registerIpcHandlers({
         height: cached.height,
         sourceKind: 'cached_preview',
         notice:
-          'The original file is currently unavailable and no verified vault copy was found. Showing the smaller cached preview instead.'
+          'Cached preview only (not full size). The original file is currently unavailable and no verified vault copy was found. Showing the smaller cached preview instead.'
       }
     }
 
-    let resolved = resolveReadableFileLocation(catalog, locationId, {
+    const resolved = resolveReadableFileLocation(catalog, locationId, {
       verifyPayloadHash: false,
+      preferVaultCopy: true,
       allowVaultCopyFallbackForUnavailableSource: true
     })
     if (!resolved.ok) {
+      const isRecordedVaultMissing =
+        resolved.errorCode === 'VAULT_COPY_MISSING' && resolved.hasRecordedVaultCopy
       const isCorruptOrContained =
         resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
         resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
-      if (!isCorruptOrContained) {
+      if (!isCorruptOrContained && !isRecordedVaultMissing) {
         const cachedFallback = await tryCachedPreviewFallback()
         if (cachedFallback) {
           return validateOriginalPhotoResult(cachedFallback)
         }
       }
+      if (isCorruptOrContained) {
+        return validateOriginalPhotoResult({
+          status: resolved.errorCode === 'VAULT_COPY_CORRUPT' ? 'corrupt' : 'error',
+          locationId,
+          reason:
+            resolved.errorCode === 'VAULT_COPY_CORRUPT'
+              ? 'The recorded vault copy is corrupt and failed verification. Your original file path and metadata are still preserved in the catalog.'
+              : 'The recorded vault copy failed vault safety verification. Your original file path and metadata are still preserved in the catalog.'
+        })
+      }
       return validateOriginalPhotoResult({
-        status: isCorruptOrContained ? 'error' : 'missing',
+        status: 'missing',
         locationId,
-        reason: isCorruptOrContained
-          ? resolved.errorMessage
+        reason: isRecordedVaultMissing
+          ? 'The recorded vault copy is missing from the active vault. Your original file path and metadata are still preserved in the catalog.'
           : 'The original file is currently unavailable and no verified vault copy or cached preview was found.'
       })
     }
 
-    let res = await thumbnailCoordinator.getOriginalPhoto({
+    const res = await thumbnailCoordinator.getOriginalPhoto({
       locationId,
       sourcePath: resolved.filePath,
       expectedByteSize: resolved.expectedByteSize,
@@ -1078,40 +1113,47 @@ export function registerIpcHandlers({
       approvedRootsOverride: resolved.mode === 'vault_copy' ? resolved.approvedRoots : undefined
     })
 
-    if (res.status === 'missing' && resolved.mode === 'source') {
-      const vaultFallback = resolveReadableFileLocation(catalog, locationId, {
-        verifyPayloadHash: false,
-        allowVaultCopyFallbackForUnavailableSource: true
-      })
-      if (vaultFallback.ok && vaultFallback.mode === 'vault_copy') {
-        resolved = vaultFallback
-        res = await thumbnailCoordinator.getOriginalPhoto({
+    if (res.status === 'missing') {
+      if (resolved.mode === 'vault_copy') {
+        return validateOriginalPhotoResult({
+          status: 'missing',
           locationId,
-          sourcePath: vaultFallback.filePath,
-          expectedByteSize: vaultFallback.expectedByteSize,
-          expectedMtimeMs: vaultFallback.expectedMtimeMs,
-          expectedSha256: vaultFallback.expectedSha256 ?? undefined,
-          approvedRootsOverride: vaultFallback.approvedRoots
+          reason:
+            'The recorded vault copy is missing from the active vault. Your original file path and metadata are still preserved in the catalog.'
         })
       }
-    }
-
-    if (res.status === 'missing') {
       const cachedFallback = await tryCachedPreviewFallback()
       if (cachedFallback) {
         return validateOriginalPhotoResult(cachedFallback)
       }
     }
 
+    if (
+      resolved.mode === 'vault_copy' &&
+      res.status === 'error' &&
+      /Source content hash mismatch|Source size mismatch|Source modification time changed|modified during read/i.test(
+        res.reason
+      )
+    ) {
+      return validateOriginalPhotoResult({
+        status: 'corrupt',
+        locationId,
+        reason:
+          'The recorded vault copy failed integrity verification (SHA-256 mismatch) and appears corrupt. Your original file path and metadata are still preserved in the catalog.'
+      })
+    }
+
     if (res.status === 'ready') {
       const sourceKind = resolved.mode === 'vault_copy' ? 'vault_copy' : 'original'
+      const originalAvailable = sourceKind === 'vault_copy' && existsSync(resolved.originalPath)
       return validateOriginalPhotoResult({
         ...res,
         sourceKind,
         ...(sourceKind === 'vault_copy'
           ? {
-              notice:
-                'Showing your verified vault copy because the original source file is currently unavailable.'
+              notice: originalAvailable
+                ? 'Showing your verified vault copy.'
+                : 'Showing your verified vault copy (original source file is currently unavailable).'
             }
           : {})
       })

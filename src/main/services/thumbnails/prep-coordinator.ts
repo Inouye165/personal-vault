@@ -249,6 +249,30 @@ export class ThumbnailPrepCoordinator {
         afterId = row.fileLocationId
         if (!row.cacheKey || !cache.has(row.cacheKey)) {
           missingIds.push(row.fileLocationId)
+          continue
+        }
+        const resolved = resolveReadableFileLocation(this.catalog, row.fileLocationId, {
+          verifyPayloadHash: false,
+          preferVaultCopy: true
+        })
+        if (resolved.ok && resolved.mode === 'vault_copy') {
+          const expectedVaultKey = cache.computeCacheKey({
+            locationId: row.fileLocationId,
+            sourcePath: resolved.filePath,
+            sha256: resolved.expectedSha256,
+            byteSize: resolved.expectedByteSize,
+            mtimeMs: resolved.expectedMtimeMs
+          })
+          if (row.cacheKey !== expectedVaultKey) {
+            missingIds.push(row.fileLocationId)
+          }
+        } else if (
+          !resolved.ok &&
+          (resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
+            resolved.errorCode === 'VAULT_CONTAINMENT_ERROR' ||
+            (resolved.errorCode === 'VAULT_COPY_MISSING' && resolved.hasRecordedVaultCopy))
+        ) {
+          missingIds.push(row.fileLocationId)
         }
       }
       if (missingIds.length > 0) {
@@ -323,6 +347,7 @@ export class ThumbnailPrepCoordinator {
 
     const resolved = resolveReadableFileLocation(this.catalog, candidate.fileLocationId, {
       verifyPayloadHash: false,
+      preferVaultCopy: true,
       allowVaultCopyFallbackForUnavailableSource: true
     })
 
@@ -330,6 +355,9 @@ export class ThumbnailPrepCoordinator {
       if (resolved.errorCode === 'VAULT_UNAVAILABLE') {
         return
       }
+      const isVaultIntegrityFailure =
+        resolved.errorCode === 'VAULT_COPY_CORRUPT' ||
+        resolved.errorCode === 'VAULT_CONTAINMENT_ERROR'
       const rootOffline = candidate.sourceKind === 'user' && !existsSync(candidate.sourceRootPath)
       this.catalog.upsertPhotoThumbnailState({
         fileLocationId: candidate.fileLocationId,
@@ -339,8 +367,12 @@ export class ThumbnailPrepCoordinator {
         observedMtimeMs: candidate.filesystemMtimeMs,
         recipeVersion: this.recipeVersion,
         cacheKey: null,
-        status: 'unavailable',
-        errorCode: rootOffline ? 'ROOT_UNAVAILABLE' : resolved.errorCode,
+        status: isVaultIntegrityFailure ? 'failed' : 'unavailable',
+        errorCode: isVaultIntegrityFailure
+          ? resolved.errorCode
+          : rootOffline
+            ? 'ROOT_UNAVAILABLE'
+            : resolved.errorCode,
         errorMessage: resolved.errorMessage
       })
       return

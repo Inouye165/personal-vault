@@ -1783,7 +1783,7 @@ export class ThumbnailCoordinator {
           maxDimension: THUMBNAIL_LIMITS.MAX_DIMENSION_PX,
           maxInputPixels: this.maxInputPixels,
           maxSourceSizeBytes: this.maxSourceSizeBytes,
-          approvedRoots: this.getApprovedRoots()
+          approvedRoots: this.resolveEffectiveRoots(item.params.approvedRootsOverride)
         }
       })
     }
