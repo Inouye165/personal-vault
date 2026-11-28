@@ -30,8 +30,48 @@ import type {
   BackupRecoverCatalogResponse,
   BackupRecoveryPointSummary,
   BackupRestoreResponse,
+  BackupSummaryDto,
   BackupVerifyRecoveryPointResponse
 } from '../../../shared/validation/backup-ipc-schemas'
+
+const SELECTED_DEST_STORAGE_KEY = 'pv.backup.selectedDestinationId'
+
+interface SavedDestinationSelection {
+  readonly id: string
+  readonly atMs: number
+}
+
+function readSavedDestinationSelection(): SavedDestinationSelection | null {
+  try {
+    const raw = window.localStorage.getItem(SELECTED_DEST_STORAGE_KEY)
+    if (!raw) return null
+    if (raw.startsWith('{')) {
+      const parsed = JSON.parse(raw) as { id?: unknown; atMs?: unknown }
+      if (typeof parsed.id === 'string' && parsed.id) {
+        return { id: parsed.id, atMs: typeof parsed.atMs === 'number' ? parsed.atMs : 0 }
+      }
+      return null
+    }
+    return { id: raw, atMs: 0 }
+  } catch {
+    return null
+  }
+}
+
+function writeSavedDestinationId(id: string): void {
+  try {
+    if (id) {
+      window.localStorage.setItem(
+        SELECTED_DEST_STORAGE_KEY,
+        JSON.stringify({ id, atMs: Date.now() })
+      )
+    } else {
+      window.localStorage.removeItem(SELECTED_DEST_STORAGE_KEY)
+    }
+  } catch {
+    // ignore storage restrictions
+  }
+}
 
 type StorageType = 'usb' | 'nas' | 'google_drive'
 type RepoLoadState = 'idle' | 'loading' | 'loaded' | 'error'
@@ -216,7 +256,7 @@ function getStatusPillClass(status: BackupJobStatusDto): string {
 
 export function BackupRestorePanel() {
   const [storageType, setStorageType] = useState<StorageType>('usb')
-  const [destName, setDestName] = useState<string>('USB Backup Drive')
+  const [destName, setDestName] = useState<string>('Local Backup Folder')
   const [destPath, setDestPath] = useState<string>('')
   const [nasRateCapMiB, setNasRateCapMiB] = useState<string>('10')
   const [driveRateCapMiB, setDriveRateCapMiB] = useState<string>('')
@@ -236,6 +276,7 @@ export function BackupRestorePanel() {
 
   const [destinations, setDestinations] = useState<readonly BackupDestinationRecordDto[]>([])
   const [selectedDestId, setSelectedDestId] = useState<string>('')
+  const [backupSummary, setBackupSummary] = useState<BackupSummaryDto | null>(null)
   const [jobs, setJobs] = useState<readonly BackupJobRecordDto[]>([])
   const [activeJob, setActiveJob] = useState<BackupJobRecordDto | null>(null)
   const [requestedJob, setRequestedJob] = useState<BackupJobRecordDto | null>(null)
@@ -387,7 +428,7 @@ export function BackupRestorePanel() {
       }
       const version = ++refreshVersion.current
       try {
-        const [destList, jobPage, currentActive, authStatus] = await Promise.all([
+        const [destList, jobPage, currentActive, authStatus, summary] = await Promise.all([
           window.api.listBackupDestinations(),
           window.api.listBackupJobs({ limit: 25, offset: 0 }),
           typeof window.api?.getActiveBackupJob === 'function'
@@ -395,6 +436,9 @@ export function BackupRestorePanel() {
             : Promise.resolve(null),
           typeof window.api?.getGoogleDriveAuthStatus === 'function'
             ? window.api.getGoogleDriveAuthStatus()
+            : Promise.resolve(null),
+          typeof window.api?.getBackupSummary === 'function'
+            ? window.api.getBackupSummary()
             : Promise.resolve(null)
         ])
         if (signal?.aborted || version !== refreshVersion.current) return
@@ -404,19 +448,32 @@ export function BackupRestorePanel() {
         if (authStatus) {
           setGdriveAuth(authStatus)
         }
+        if (summary) {
+          setBackupSummary(summary)
+        }
 
         let nextRepo = repoDir
         let activeDest: BackupDestinationRecordDto | null =
           destList.find((d) => d.id === selectedDestId) ?? null
         if (destList.length > 0 && !selectedDestId) {
-          const first = destList[0]!
-          activeDest = first
-          setSelectedDestId(first.id)
-          if (first.targetPath) {
-            nextRepo = first.targetPath
-            setRepoDir(first.targetPath)
+          const newestDest = destList[0]!
+          const remembered = readSavedDestinationSelection()
+          const rememberedDest = remembered
+            ? (destList.find((d) => d.id === remembered.id) ?? null)
+            : null
+          const isRememberedFresh =
+            rememberedDest !== null &&
+            remembered !== null &&
+            (remembered.atMs === 0 || newestDest.createdAtMs <= remembered.atMs)
+          const preferred = isRememberedFresh ? rememberedDest : newestDest
+          activeDest = preferred
+          setSelectedDestId(preferred.id)
+          writeSavedDestinationId(preferred.id)
+          if (preferred.targetPath) {
+            nextRepo = preferred.targetPath
+            setRepoDir(preferred.targetPath)
             if (!useCustomRestoreSource) {
-              setRestoreRepoDir(first.targetPath)
+              setRestoreRepoDir(preferred.targetPath)
             }
           } else {
             nextRepo = ''
@@ -532,12 +589,16 @@ export function BackupRestorePanel() {
 
   const handleBrowseFolder = async (
     title: string,
-    setter: (dir: string) => void
+    setter: (dir: string) => void,
+    defaultPath?: string
   ): Promise<void> => {
     if (typeof window.api?.selectBackupDirectory !== 'function') return
     setErrorMessage(null)
     try {
-      const res = await window.api.selectBackupDirectory({ title })
+      const trimmedDefault = defaultPath?.trim()
+      const res = await window.api.selectBackupDirectory(
+        trimmedDefault ? { title, defaultPath: trimmedDefault } : { title }
+      )
       if (!res.canceled && res.directoryPath) {
         setter(res.directoryPath)
       }
@@ -648,6 +709,7 @@ export function BackupRestorePanel() {
         })
         setRequestedJob(null)
         setSelectedDestId(created.id)
+        writeSavedDestinationId(created.id)
         setRepoDir('')
         if (!useCustomRestoreSource) {
           restoreLoadSeqRef.current += 1
@@ -698,6 +760,7 @@ export function BackupRestorePanel() {
       })
       setRequestedJob(null)
       setSelectedDestId(created.id)
+      writeSavedDestinationId(created.id)
       const nextPath = created.targetPath ?? ''
       setRepoDir(nextPath)
       if (!useCustomRestoreSource) {
@@ -724,6 +787,7 @@ export function BackupRestorePanel() {
   const handleSelectDestination = (dest: BackupDestinationRecordDto): void => {
     setRequestedJob(null)
     setSelectedDestId(dest.id)
+    writeSavedDestinationId(dest.id)
     if (dest.kind === 'google_drive') {
       setRepoDir('')
       if (!useCustomRestoreSource) {
@@ -1094,8 +1158,8 @@ export function BackupRestorePanel() {
               <h2 id="backup-restore-heading">Backup &amp; Restore</h2>
             </div>
             <p className="backup-page-subtitle">
-              Keep a safe copy of your vault photos, documents, and catalog on a USB drive or
-              network folder.
+              Keep a safe copy of your vault photos, documents, and catalog on a local folder, USB
+              drive, or network folder.
             </p>
           </div>
         </header>
@@ -1306,6 +1370,81 @@ export function BackupRestorePanel() {
             </div>
           )}
 
+          {backupSummary && !isLatestRunning && (
+            <>
+              <div
+                className="backup-summary-grid"
+                data-testid="backup-prestart-summary"
+                aria-label="Next backup plan"
+              >
+                <div className="backup-metric">
+                  <span className="backup-metric-label">Backup folder</span>
+                  <span className="backup-metric-value">
+                    {selectedDestination ? selectedDestination.name : 'Not chosen yet'}
+                  </span>
+                  <span className="backup-metric-sub">
+                    {selectedDestination
+                      ? getDestinationLocationLabel(selectedDestination)
+                      : 'Choose and save a backup folder below before backing up.'}
+                  </span>
+                </div>
+
+                <div className="backup-metric">
+                  <span className="backup-metric-label">Vault files to back up</span>
+                  <span className="backup-metric-value">
+                    {backupSummary.isCatalogOnly
+                      ? '0 vault files (catalog only)'
+                      : `${backupSummary.vaultFileCount} ${backupSummary.vaultFileCount === 1 ? 'vault file' : 'vault files'}`}
+                  </span>
+                  <span className="backup-metric-sub">
+                    {backupSummary.isCatalogOnly
+                      ? 'Catalog and annotations only'
+                      : `${backupSummary.activeVaultName ? `Vault: ${backupSummary.activeVaultName} • ` : ''}Plus catalog and annotations`}
+                    {!backupSummary.isCatalogOnly &&
+                    backupSummary.catalogedFileCount > backupSummary.vaultFileCount
+                      ? ` • ${backupSummary.catalogedFileCount - backupSummary.vaultFileCount} scanned-only ${
+                          backupSummary.catalogedFileCount - backupSummary.vaultFileCount === 1
+                            ? 'file'
+                            : 'files'
+                        } excluded`
+                      : ''}
+                  </span>
+                </div>
+
+                <div className="backup-metric">
+                  <span className="backup-metric-label">Approximate size</span>
+                  <span className="backup-metric-value">
+                    ~{formatBytes(backupSummary.estimatedTotalBytes)}
+                  </span>
+                  <span className="backup-metric-sub">
+                    {backupSummary.isCatalogOnly
+                      ? `Catalog & notes: ${formatBytes(backupSummary.catalogBytes + backupSummary.annotationsBytes)}`
+                      : `Vault files: ${formatBytes(backupSummary.vaultBytes)} • Catalog & notes: ${formatBytes(backupSummary.catalogBytes + backupSummary.annotationsBytes)}`}
+                  </span>
+                </div>
+              </div>
+
+              {backupSummary.isCatalogOnly && (
+                <div
+                  className="backup-callout backup-callout-warning"
+                  data-testid="backup-catalog-only-warning"
+                  role="status"
+                >
+                  <AlertTriangle size={18} aria-hidden="true" />
+                  <div>
+                    <strong>This will be a catalog-only backup.</strong>{' '}
+                    {backupSummary.hasActiveVault
+                      ? 'Your vault has no imported files yet.'
+                      : 'No active vault is set up yet.'}{' '}
+                    Only your catalog database and annotations will be saved — no photo or document
+                    files will be copied. Use <strong>Review → Verified Import</strong> first if you
+                    want file copies included in the backup.
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
           {selectedDestination && (latestJob || latestRecoveryPoint) && (
             <div className="backup-summary-grid">
               <div className="backup-metric">
@@ -1377,7 +1516,7 @@ export function BackupRestorePanel() {
             </div>
           )}
 
-          {selectedDestination && !latestJob && !latestRecoveryPoint && (
+          {!backupSummary && selectedDestination && !latestJob && !latestRecoveryPoint && (
             <div className="backup-summary-grid">
               <div className="backup-metric">
                 <span className="backup-metric-label">Destination</span>
@@ -1446,12 +1585,16 @@ export function BackupRestorePanel() {
                       checked={storageType === 'usb'}
                       onChange={() => {
                         setStorageType('usb')
-                        if (destName === 'NAS Backup Share' || destName === 'Google Drive Backup') {
-                          setDestName('USB Backup Drive')
+                        if (
+                          destName === 'NAS Backup Share' ||
+                          destName === 'Google Drive Backup' ||
+                          destName === 'USB Backup Drive'
+                        ) {
+                          setDestName('Local Backup Folder')
                         }
                       }}
                     />
-                    USB Drive (Full speed)
+                    Local folder or USB drive (Full speed)
                   </label>
                   <label className="backup-radio-option">
                     <input
@@ -1460,7 +1603,11 @@ export function BackupRestorePanel() {
                       checked={storageType === 'nas'}
                       onChange={() => {
                         setStorageType('nas')
-                        if (destName === 'USB Backup Drive' || destName === 'Google Drive Backup') {
+                        if (
+                          destName === 'Local Backup Folder' ||
+                          destName === 'USB Backup Drive' ||
+                          destName === 'Google Drive Backup'
+                        ) {
                           setDestName('NAS Backup Share')
                         }
                       }}
@@ -1474,7 +1621,11 @@ export function BackupRestorePanel() {
                       checked={storageType === 'google_drive'}
                       onChange={() => {
                         setStorageType('google_drive')
-                        if (destName === 'USB Backup Drive' || destName === 'NAS Backup Share') {
+                        if (
+                          destName === 'Local Backup Folder' ||
+                          destName === 'USB Backup Drive' ||
+                          destName === 'NAS Backup Share'
+                        ) {
                           setDestName('Google Drive Backup')
                         }
                         if (gdriveAuth?.status === 'connected' && gdriveFolders.length === 0) {
@@ -1636,7 +1787,7 @@ export function BackupRestorePanel() {
                           type="text"
                           value={destPath}
                           onChange={(e) => setDestPath(e.target.value)}
-                          placeholder="E:\PersonalVaultBackup or \\NAS\Backups\PersonalVault"
+                          placeholder="D:\PersonalVaultBackup, E:\PersonalVaultBackup, or \\NAS\Backups\PersonalVault"
                           style={{ width: '100%' }}
                         />
                       </label>
@@ -1644,7 +1795,11 @@ export function BackupRestorePanel() {
                         type="button"
                         className="btn btn-secondary"
                         onClick={() =>
-                          void handleBrowseFolder('Select Backup Destination Folder', setDestPath)
+                          void handleBrowseFolder(
+                            'Select Backup Destination Folder',
+                            setDestPath,
+                            destPath
+                          )
                         }
                       >
                         <FolderOpen size={14} aria-hidden="true" /> Browse…

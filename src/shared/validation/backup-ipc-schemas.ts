@@ -81,10 +81,28 @@ export type BackupJobRecordDto = z.infer<typeof BackupJobRecordSchema>
 
 export const BackupSelectDirectoryRequestSchema = z
   .object({
-    title: z.string().min(1).max(128).optional()
+    title: z.string().min(1).max(128).optional(),
+    defaultPath: z.string().trim().min(1).optional()
   })
   .strict()
 export type BackupSelectDirectoryRequest = z.infer<typeof BackupSelectDirectoryRequestSchema>
+
+export const BackupSummarySchema = z
+  .object({
+    hasActiveVault: z.boolean(),
+    activeVaultId: z.string().min(1).nullable(),
+    activeVaultName: z.string().min(1).nullable(),
+    activeVaultPath: z.string().min(1).nullable(),
+    vaultFileCount: z.number().int().nonnegative(),
+    vaultBytes: z.number().int().nonnegative(),
+    catalogBytes: z.number().int().nonnegative(),
+    annotationsBytes: z.number().int().nonnegative(),
+    estimatedTotalBytes: z.number().int().nonnegative(),
+    catalogedFileCount: z.number().int().nonnegative(),
+    isCatalogOnly: z.boolean()
+  })
+  .strict()
+export type BackupSummaryDto = z.infer<typeof BackupSummarySchema>
 
 export const BackupSelectDirectoryResponseSchema = z
   .object({

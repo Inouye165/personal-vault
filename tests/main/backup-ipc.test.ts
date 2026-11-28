@@ -873,4 +873,60 @@ describe('Stage 8B Sub-slice 1C — Backup & Restore IPC handlers', () => {
     })
     expect(reloadedService.getStatus().status).toBe('disconnected')
   })
+
+  it('serves BACKUP_GET_SUMMARY for catalog-only and populated vaults and forwards multi-drive folder selections', async () => {
+    const baseDir = makeTempDir('pv-backup-summary-ipc-')
+    const { userDataDir, catalog, photoBytes } = await createPopulatedProfile(baseDir)
+
+    const backupCoordinator = new BackupCoordinator({
+      catalog,
+      userDataDir,
+      appVersion: '0.1.0'
+    })
+    backupCoordinator.initialize()
+
+    try {
+      const pickedPaths: string[] = ['D:\\Backups\\PV', 'C:\\Temp\\PVBackup']
+      const handlers = new Map<string, (...args: unknown[]) => Promise<unknown> | unknown>()
+      registerBackupIpcHandlers({
+        handle: (ch, fn) => handlers.set(ch, fn),
+        backupCoordinator,
+        catalog,
+        userDataDir,
+        selectBackupDirectory: async () => ({
+          canceled: false,
+          directoryPath: pickedPaths.shift() ?? null
+        })
+      })
+
+      const summary = (await handlers.get(IPC_CHANNELS.BACKUP_GET_SUMMARY)!()) as {
+        hasActiveVault: boolean
+        vaultFileCount: number
+        vaultBytes: number
+        estimatedTotalBytes: number
+        catalogedFileCount: number
+        isCatalogOnly: boolean
+      }
+      expect(summary.hasActiveVault).toBe(true)
+      expect(summary.vaultFileCount).toBe(1)
+      expect(summary.vaultBytes).toBe(photoBytes.length)
+      expect(summary.catalogedFileCount).toBe(1)
+      expect(summary.isCatalogOnly).toBe(false)
+      expect(summary.estimatedTotalBytes).toBeGreaterThanOrEqual(photoBytes.length)
+
+      const dPick = await handlers.get(IPC_CHANNELS.BACKUP_SELECT_DIRECTORY)!({
+        title: 'Pick D',
+        defaultPath: 'Z:\\DoesNotExist'
+      })
+      expect(dPick).toEqual({ canceled: false, directoryPath: 'D:\\Backups\\PV' })
+
+      const cPick = await handlers.get(IPC_CHANNELS.BACKUP_SELECT_DIRECTORY)!({
+        title: 'Pick C'
+      })
+      expect(cPick).toEqual({ canceled: false, directoryPath: 'C:\\Temp\\PVBackup' })
+    } finally {
+      await backupCoordinator.shutdown()
+      catalog.close()
+    }
+  })
 })

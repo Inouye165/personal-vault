@@ -3,7 +3,10 @@ import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BackupRestorePanel } from '../../src/renderer/src/components/BackupRestorePanel'
-import type { BackupProgressEvent } from '../../src/shared/validation/backup-ipc-schemas'
+import type {
+  BackupProgressEvent,
+  BackupSummaryDto
+} from '../../src/shared/validation/backup-ipc-schemas'
 
 afterEach(() => {
   cleanup()
@@ -1129,5 +1132,117 @@ describe('BackupRestorePanel — Redesigned everyday view', () => {
     })
     expect(restoreSecretInput.value).toBe('')
     await screen.findByText(/Restore complete — 6 files restored/i)
+  })
+
+  it('shows destination folder, vault file count, approximate size, and catalog-only warning before starting backup, and remembers selected local drive destination across restarts', async () => {
+    localStorage.clear()
+    const destD = {
+      ...baseDest,
+      id: 'dest-d',
+      name: 'Local Backup (D:)',
+      targetPath: 'D:\\Backups\\PV',
+      maxBytesPerSecond: null,
+      lastVerifiedSnapshotId: null,
+      lastVerifiedAtMs: null
+    }
+    const destC = {
+      ...baseDest,
+      id: 'dest-c',
+      name: 'Local Backup (C:)',
+      targetPath: 'C:\\Backups\\PV',
+      maxBytesPerSecond: null,
+      lastVerifiedSnapshotId: null,
+      lastVerifiedAtMs: null
+    }
+
+    const catalogOnlySummary: BackupSummaryDto = {
+      hasActiveVault: false,
+      activeVaultId: null,
+      activeVaultName: null,
+      activeVaultPath: null,
+      vaultFileCount: 0,
+      vaultBytes: 0,
+      catalogBytes: 16 * 1024,
+      annotationsBytes: 512,
+      estimatedTotalBytes: 16 * 1024 + 512,
+      catalogedFileCount: 2,
+      isCatalogOnly: true
+    }
+    const populatedSummary: BackupSummaryDto = {
+      hasActiveVault: true,
+      activeVaultId: 'vault-1',
+      activeVaultName: 'Trial Vault',
+      activeVaultPath: 'D:\\TrialVault',
+      vaultFileCount: 3,
+      vaultBytes: 3 * 1024 * 1024,
+      catalogBytes: 32 * 1024,
+      annotationsBytes: 1024,
+      estimatedTotalBytes: 3 * 1024 * 1024 + 33 * 1024,
+      catalogedFileCount: 4,
+      isCatalogOnly: false
+    }
+    let currentSummary: BackupSummaryDto = catalogOnlySummary
+    const getBackupSummary = vi.fn().mockImplementation(async () => currentSummary)
+
+    const savedDestinations = [destD, destC]
+    const selectBackupDirectory = vi
+      .fn()
+      .mockResolvedValueOnce({ canceled: false, directoryPath: 'D:\\Backups\\PV' })
+      .mockResolvedValueOnce({ canceled: false, directoryPath: 'C:\\Backups\\PV' })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        listBackupDestinations: vi.fn().mockImplementation(async () => savedDestinations),
+        listBackupJobs: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 }),
+        getActiveBackupJob: vi.fn().mockResolvedValue(null),
+        getBackupSummary,
+        listRecoveryPoints: vi.fn().mockResolvedValue({
+          backupRepoDir: 'D:\\Backups\\PV',
+          repositoryId: null,
+          recoveryPoints: []
+        }),
+        selectBackupDirectory,
+        configureBackupDestination: vi.fn().mockResolvedValue(destD),
+        onBackupProgress: vi.fn().mockReturnValue(() => {})
+      }
+    })
+
+    // 1. Catalog-only pre-backup warning and pre-start summary render BEFORE starting backup
+    const firstRender = render(<BackupRestorePanel />)
+    const prestart = await screen.findByTestId('backup-prestart-summary')
+    expect(prestart).toHaveTextContent('D:\\Backups\\PV')
+    expect(prestart).toHaveTextContent(/0 vault files \(catalog only\)/i)
+    expect(prestart).toHaveTextContent(/16\.5 KiB/i)
+    const catalogOnlyWarn = await screen.findByTestId('backup-catalog-only-warning')
+    expect(catalogOnlyWarn).toHaveTextContent(/catalog-only backup/i)
+
+    // Browse works across D: and C:
+    fireEvent.click(screen.getByRole('button', { name: /Change backup location/i }))
+    const browseBtn = screen.getAllByRole('button', { name: /Browse/i })[0]!
+    fireEvent.click(browseBtn)
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Destination Folder/i)).toHaveValue('D:\\Backups\\PV')
+    })
+    fireEvent.click(browseBtn)
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Destination Folder/i)).toHaveValue('C:\\Backups\\PV')
+    })
+
+    // Switching saved destination to C: persists across unmount/remount
+    fireEvent.click(screen.getByLabelText(/Local Backup \(C:\)/i))
+    currentSummary = populatedSummary
+    firstRender.unmount()
+
+    render(<BackupRestorePanel />)
+    const prestartAfterRemount = await screen.findByTestId('backup-prestart-summary')
+    await waitFor(() => {
+      expect(prestartAfterRemount).toHaveTextContent('C:\\Backups\\PV')
+    })
+    expect(prestartAfterRemount).toHaveTextContent(/3 vault files/i)
+    expect(prestartAfterRemount).toHaveTextContent(/3\.03 MiB/i)
+    expect(prestartAfterRemount).toHaveTextContent(/1 scanned-only file/i)
+    expect(screen.queryByTestId('backup-catalog-only-warning')).not.toBeInTheDocument()
   })
 })

@@ -9,7 +9,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { BackupRepositoryIdentityV1Schema } from '../../../shared/validation/backup-schemas'
-import { canonicalizeWithAncestorPolicySync } from '../annotations/journal'
+import { canonicalizeWithAncestorPolicySync, JournalSecurityError } from '../annotations/journal'
 import { isSameOrDescendantPath } from '../catalog/path-normalization'
 import { BackupContainmentError } from './errors'
 
@@ -120,6 +120,20 @@ function isUncPath(targetPath: string): boolean {
   return /^\\\\[^\\]+\\[^\\]+/.test(targetPath)
 }
 
+function canonicalizeProtectedPathForOverlap(protectedPath: string): string {
+  if (isUncPath(protectedPath)) {
+    return resolve(protectedPath)
+  }
+  try {
+    return canonicalizeWithAncestorPolicySync(protectedPath)
+  } catch (err) {
+    if (err instanceof JournalSecurityError) {
+      return resolve(protectedPath)
+    }
+    throw err
+  }
+}
+
 export function validateBackupDestinationPath(params: ValidateBackupDestinationPathParams): string {
   if (!params.destinationDir || typeof params.destinationDir !== 'string') {
     throw new BackupContainmentError('Backup destination directory must be a non-empty path')
@@ -159,9 +173,11 @@ export function validateBackupDestinationPath(params: ValidateBackupDestinationP
       : canonicalizeWithAncestorPolicySync(resolvedDest)
   }
 
-  const checkProtected = (protectedPath: string, kind: string): void => {
+  const checkProtected = (protectedPath: string, kind: string, allowUnavailable = false): void => {
     if (!protectedPath) return
-    const canonicalProtected = canonicalizeWithAncestorPolicySync(protectedPath)
+    const canonicalProtected = allowUnavailable
+      ? canonicalizeProtectedPathForOverlap(protectedPath)
+      : canonicalizeWithAncestorPolicySync(protectedPath)
     if (
       isSameOrDescendantPath(canonicalProtected, canonicalDest) ||
       isSameOrDescendantPath(canonicalDest, canonicalProtected)
@@ -170,7 +186,7 @@ export function validateBackupDestinationPath(params: ValidateBackupDestinationP
     }
   }
 
-  for (const src of params.sourceRoots) checkProtected(src, 'a registered source root')
+  for (const src of params.sourceRoots) checkProtected(src, 'a registered source root', true)
   for (const vault of params.vaultRoots) checkProtected(vault, 'a registered vault')
   checkProtected(params.userDataDir, 'app-owned data storage')
 
@@ -260,11 +276,17 @@ export function validateRestoreTargetPaths(
     )
   }
 
-  const checkAgainstProtected = (protectedPath: string, kind: string): void => {
+  const checkAgainstProtected = (
+    protectedPath: string,
+    kind: string,
+    allowUnavailable = false
+  ): void => {
     if (!protectedPath) return
-    const canonicalProtected = isUncPath(protectedPath)
-      ? resolve(protectedPath)
-      : canonicalizeWithAncestorPolicySync(protectedPath)
+    const canonicalProtected = allowUnavailable
+      ? canonicalizeProtectedPathForOverlap(protectedPath)
+      : isUncPath(protectedPath)
+        ? resolve(protectedPath)
+        : canonicalizeWithAncestorPolicySync(protectedPath)
     assertDisjoint(canonicalProfile, canonicalProtected, 'restore target profile directory', kind)
     if (canonicalVault !== null) {
       assertDisjoint(canonicalVault, canonicalProtected, 'restore target vault directory', kind)
@@ -276,7 +298,7 @@ export function validateRestoreTargetPaths(
     checkAgainstProtected(params.activeUserDataDir, 'active app userData')
   }
   for (const src of params.activeSourceRoots) {
-    checkAgainstProtected(src, 'a registered source root')
+    checkAgainstProtected(src, 'a registered source root', true)
   }
   for (const vault of params.activeVaultRoots) {
     checkAgainstProtected(vault, 'a registered vault')
