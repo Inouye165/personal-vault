@@ -118,6 +118,23 @@ export type BackupListDestinationsRequest = z.infer<typeof BackupListDestination
 export const BackupListDestinationsResponseSchema = z.array(BackupDestinationRecordSchema)
 export type BackupListDestinationsResponse = z.infer<typeof BackupListDestinationsResponseSchema>
 
+export const BackupSummarySchema = z
+  .object({
+    hasActiveVault: z.boolean(),
+    activeVaultName: z.string().nullable(),
+    activeVaultPath: z.string().nullable(),
+    vaultFileCount: z.number().int().nonnegative(),
+    vaultLogicalBytes: z.number().int().nonnegative(),
+    catalogedFileCount: z.number().int().nonnegative(),
+    excludedScannedOnlyCount: z.number().int().nonnegative(),
+    catalogApproxBytes: z.number().int().nonnegative(),
+    annotationsApproxBytes: z.number().int().nonnegative(),
+    estimatedTotalBytes: z.number().int().nonnegative(),
+    isCatalogOnly: z.boolean()
+  })
+  .strict()
+export type BackupSummaryDto = z.infer<typeof BackupSummarySchema>
+
 export const BackupStartRequestSchema = z
   .object({
     destinationId: z.string().min(1),

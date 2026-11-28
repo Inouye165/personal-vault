@@ -6,6 +6,7 @@ import { BackupRestorePanel } from '../../src/renderer/src/components/BackupRest
 import type { BackupProgressEvent } from '../../src/shared/validation/backup-ipc-schemas'
 
 afterEach(() => {
+  window.localStorage.clear()
   cleanup()
   vi.restoreAllMocks()
 })
@@ -1129,5 +1130,218 @@ describe('BackupRestorePanel — Redesigned everyday view', () => {
     })
     expect(restoreSecretInput.value).toBe('')
     await screen.findByText(/Restore complete — 6 files restored/i)
+  })
+
+  it('shows pre-backup destination, file count, approximate size, and catalog-only warning before starting backup', async () => {
+    const populatedSummary = {
+      hasActiveVault: true,
+      activeVaultName: 'Family Vault',
+      activeVaultPath: 'D:\\PV\\Vault',
+      vaultFileCount: 3,
+      vaultLogicalBytes: 3 * 1024 * 1024,
+      catalogedFileCount: 4,
+      excludedScannedOnlyCount: 1,
+      catalogApproxBytes: 512 * 1024,
+      annotationsApproxBytes: 4096,
+      estimatedTotalBytes: 3 * 1024 * 1024 + 512 * 1024 + 4096,
+      isCatalogOnly: false
+    }
+    const catalogOnlySummary = {
+      hasActiveVault: true,
+      activeVaultName: 'Family Vault',
+      activeVaultPath: 'D:\\PV\\Vault',
+      vaultFileCount: 0,
+      vaultLogicalBytes: 0,
+      catalogedFileCount: 4,
+      excludedScannedOnlyCount: 4,
+      catalogApproxBytes: 256 * 1024,
+      annotationsApproxBytes: 1024,
+      estimatedTotalBytes: 256 * 1024 + 1024,
+      isCatalogOnly: true
+    }
+
+    const getBackupSummary = vi.fn().mockResolvedValue(catalogOnlySummary)
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: {
+        listBackupDestinations: vi.fn().mockResolvedValue([
+          {
+            ...baseDest,
+            id: 'dest-d',
+            name: 'D Drive Backup',
+            targetPath: 'D:\\Backups\\PV',
+            maxBytesPerSecond: null
+          }
+        ]),
+        listBackupJobs: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 }),
+        getActiveBackupJob: vi.fn().mockResolvedValue(null),
+        getBackupSummary,
+        listRecoveryPoints: vi.fn().mockResolvedValue({
+          backupRepoDir: 'D:\\Backups\\PV',
+          repositoryId: 'repo-1',
+          recoveryPoints: []
+        }),
+        onBackupProgress: vi.fn().mockReturnValue(() => {})
+      }
+    })
+
+    const { unmount } = render(<BackupRestorePanel />)
+
+    const prestart = await screen.findByTestId('backup-prestart-summary')
+    expect(prestart).toHaveTextContent('D:\\Backups\\PV')
+    expect(screen.getByTestId('backup-prestart-files')).toHaveTextContent(
+      /0 vault files \(catalog only\)/i
+    )
+    expect(screen.getByTestId('backup-prestart-files')).toHaveTextContent(
+      /4 scanned-only files excluded/i
+    )
+    expect(screen.getByTestId('backup-prestart-size')).toHaveTextContent(/257\.0 KiB/i)
+    expect(screen.getByTestId('backup-prestart-catalog-only-warning')).toHaveTextContent(
+      /Catalog-only backup/i
+    )
+
+    unmount()
+
+    getBackupSummary.mockResolvedValue(populatedSummary)
+    render(<BackupRestorePanel />)
+
+    await screen.findByTestId('backup-prestart-summary')
+    expect(screen.getByTestId('backup-prestart-destination')).toHaveTextContent('D:\\Backups\\PV')
+    expect(screen.getByTestId('backup-prestart-files')).toHaveTextContent(/3 vault files/i)
+    expect(screen.getByTestId('backup-prestart-files')).toHaveTextContent(
+      /1 scanned-only file excluded/i
+    )
+    expect(screen.getByTestId('backup-prestart-size')).toHaveTextContent(/3\.50 MiB/i)
+    expect(screen.queryByTestId('backup-prestart-catalog-only-warning')).not.toBeInTheDocument()
+  })
+
+  it('browses folders on C: and D:, remembers selected destination across restart, and prefers a newer external destination', async () => {
+    const destC = {
+      ...baseDest,
+      id: 'dest-c',
+      name: 'C Drive Backup',
+      targetPath: 'C:\\Temp\\BackupC',
+      maxBytesPerSecond: null,
+      createdAtMs: 1000,
+      updatedAtMs: 1000
+    }
+    const destD = {
+      ...baseDest,
+      id: 'dest-d',
+      name: 'D Drive Backup',
+      targetPath: 'D:\\Backups\\BackupD',
+      maxBytesPerSecond: null,
+      createdAtMs: 2000,
+      updatedAtMs: 3000
+    }
+    const destNewer = {
+      ...baseDest,
+      id: 'dest-e',
+      name: 'External Drive E',
+      targetPath: 'E:\\BackupE',
+      maxBytesPerSecond: null,
+      createdAtMs: Date.now() + 60_000,
+      updatedAtMs: Date.now() + 60_000
+    }
+
+    let currentDests: Array<typeof destC> = []
+    const selectBackupDirectory = vi
+      .fn()
+      .mockResolvedValueOnce({ canceled: false, directoryPath: 'C:\\Temp\\BackupC' })
+      .mockResolvedValueOnce({ canceled: false, directoryPath: 'D:\\Backups\\BackupD' })
+    const configureBackupDestination = vi.fn().mockImplementation(async ({ targetPath }) => {
+      if (targetPath === 'C:\\Temp\\BackupC') {
+        currentDests = [destC]
+        return destC
+      }
+      currentDests = [destD, destC]
+      return destD
+    })
+    const listBackupDestinations = vi.fn().mockImplementation(async () => currentDests)
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: {
+        listBackupDestinations,
+        listBackupJobs: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 }),
+        getActiveBackupJob: vi.fn().mockResolvedValue(null),
+        getBackupSummary: vi.fn().mockResolvedValue({
+          hasActiveVault: false,
+          activeVaultName: null,
+          activeVaultPath: null,
+          vaultFileCount: 0,
+          vaultLogicalBytes: 0,
+          catalogedFileCount: 0,
+          excludedScannedOnlyCount: 0,
+          catalogApproxBytes: 1024,
+          annotationsApproxBytes: 0,
+          estimatedTotalBytes: 1024,
+          isCatalogOnly: true
+        }),
+        selectBackupDirectory,
+        configureBackupDestination,
+        listRecoveryPoints: vi.fn().mockResolvedValue({
+          backupRepoDir: 'C:\\Temp\\BackupC',
+          repositoryId: null,
+          recoveryPoints: []
+        }),
+        onBackupProgress: vi.fn().mockReturnValue(() => {})
+      }
+    })
+
+    const { unmount } = render(<BackupRestorePanel />)
+
+    await screen.findByText(/Local folder or USB drive/i)
+    fireEvent.click(screen.getAllByRole('button', { name: /Browse…/i })[0]!)
+    await waitFor(() => {
+      expect((screen.getByLabelText(/Destination Folder/i) as HTMLInputElement).value).toBe(
+        'C:\\Temp\\BackupC'
+      )
+    })
+    fireEvent.change(screen.getByLabelText(/Destination Name/i), {
+      target: { value: 'C Drive Backup' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Save destination/i }))
+    await screen.findByTestId('backup-prestart-destination')
+    expect(screen.getByTestId('backup-prestart-destination')).toHaveTextContent('C:\\Temp\\BackupC')
+
+    // Add D: destination, then explicitly switch back to C: and confirm C: is remembered on restart
+    fireEvent.click(screen.getByRole('button', { name: /Change backup location/i }))
+    fireEvent.click(screen.getAllByRole('button', { name: /Browse…/i })[0]!)
+    await waitFor(() => {
+      expect((screen.getByLabelText(/Destination Folder/i) as HTMLInputElement).value).toBe(
+        'D:\\Backups\\BackupD'
+      )
+    })
+    fireEvent.change(screen.getByLabelText(/Destination Name/i), {
+      target: { value: 'D Drive Backup' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Save destination/i }))
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-prestart-destination')).toHaveTextContent(
+        'D:\\Backups\\BackupD'
+      )
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Change backup location/i }))
+    fireEvent.click(screen.getByLabelText(/C Drive Backup/i))
+    expect(screen.getByTestId('backup-prestart-destination')).toHaveTextContent('C:\\Temp\\BackupC')
+
+    // Remount (simulate app restart) -> C Drive Backup stays selected even though destD is first in list
+    unmount()
+    const view2 = render(<BackupRestorePanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-prestart-destination')).toHaveTextContent(
+        'C:\\Temp\\BackupC'
+      )
+    })
+    view2.unmount()
+
+    // Remount when a newer destination was added externally -> falls back to newer destination
+    currentDests = [destNewer, destD, destC]
+    render(<BackupRestorePanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-prestart-destination')).toHaveTextContent('E:\\BackupE')
+    })
   })
 })

@@ -17,10 +17,11 @@ Personal Vault 0.1.0 is scoped for personal Windows x64 desktop use. Public dist
 
 ## Back up and check recovery
 
-1. Open **Backup & Restore**. Choose a USB drive, a NAS/network folder, or an encrypted Google Drive destination. Save the destination. Keep it separate from your active vault so one storage failure is less likely to affect both.
-2. For Google Drive, connect your account, choose a dedicated folder, and enter an encryption recovery secret. Store the secret in a password manager or another secure place you can still access after losing this PC. You need it to unlock the backup. If the only copy of the secret is lost, the encrypted backup cannot be restored.
-3. Select **Back up now**, wait for completion, and select **Verify backup**. For an encrypted snapshot, provide the recovery secret again when needed. A locked snapshot can show an unavailable file count until it is unlocked.
-4. Run a recovery drill. In **Restore Files**, select the recovery point and provide a new or empty destination folder. Enter the recovery secret if required, then select **Restore files**. The app restores a separate profile and creates a vault subfolder when the snapshot contains a vault. Open a few restored files and confirm they are the expected copies.
+1. Open **Backup & Restore**. Choose a local folder on any available drive, a USB drive, a NAS/network folder, or an encrypted Google Drive destination. Save the destination. Keep it separate from your active vault and source folders so one storage failure cannot affect both, and avoid overlapping folders.
+2. Review the pre-backup summary before starting: confirm the receiving folder, how many imported vault files will be backed up (and how many scanned-only files outside the vault are excluded), and the approximate backup size. If 0 files are in the vault yet, Personal Vault warns before starting that the backup will save catalog and annotations only.
+3. For Google Drive, connect your account, choose a dedicated folder, and enter an encryption recovery secret. Store the secret in a password manager or another secure place you can still access after losing this PC. You need it to unlock the backup. If the only copy of the secret is lost, the encrypted backup cannot be restored.
+4. Select **Back up now**, wait for completion, and select **Verify backup**. For an encrypted snapshot, provide the recovery secret again when needed. A locked snapshot can show an unavailable file count until it is unlocked.
+5. Run a recovery drill. In **Restore Files**, select the recovery point and provide a new or empty destination folder. Enter the recovery secret if required, then select **Restore files**. The app restores a separate profile and creates a vault subfolder when the snapshot contains a vault. Open a few restored files and confirm they are the expected copies.
 
 Backups include the catalog, annotations, and imported vault files. Scanned files outside the vault remain in their original folders, so back those folders up separately. Thumbnails and offline AI models are excluded and can be recreated or installed again.
 

@@ -1199,4 +1199,230 @@ describe('Stage 8B Sub-slice 1B — Migration 17, BackupRepository & BackupCoord
       reopened.catalog.close()
     }
   })
+
+  it('validates local destinations at save time while allowing unmounted drives and handling unavailable source roots during backup and restore', async () => {
+    const fixture = await createCoordinatorFixture()
+    tempDirs.push(fixture.rootDir)
+
+    const coord = new BackupCoordinator({
+      catalog: fixture.catalog,
+      userDataDir: fixture.userDataDir,
+      appVersion: '1.0.0'
+    })
+    coord.initialize()
+
+    try {
+      // Overlapping active vault, source root, and userDataDir must fail immediately at save time
+      expect(() =>
+        coord.configureDestination({
+          name: 'Bad Vault Overlap',
+          kind: 'local_fs',
+          targetPath: join(fixture.vaultDir, 'nested-backup')
+        })
+      ).toThrow(/overlaps with a registered vault/i)
+
+      expect(() =>
+        coord.configureDestination({
+          name: 'Bad Source Overlap',
+          kind: 'local_fs',
+          targetPath: fixture.sourceDir
+        })
+      ).toThrow(/overlaps with a registered source root/i)
+
+      expect(() =>
+        coord.configureDestination({
+          name: 'Bad UserData Overlap',
+          kind: 'local_fs',
+          targetPath: join(fixture.userDataDir, 'backups')
+        })
+      ).toThrow(/overlaps with app-owned data storage/i)
+
+      // Non-empty directory without repository.json must fail at save time
+      const nonEmptyDir = join(fixture.rootDir, 'non-empty-folder')
+      mkdirSync(nonEmptyDir, { recursive: true })
+      writeFileSync(join(nonEmptyDir, 'notes.txt'), 'not a backup repo', 'utf8')
+      expect(() =>
+        coord.configureDestination({
+          name: 'Non-empty Dir',
+          kind: 'local_fs',
+          targetPath: nonEmptyDir
+        })
+      ).toThrow(/non-empty/i)
+
+      // Disconnected/unmounted drive path can still be saved (T5a queueable offline)
+      const unmountedDest = coord.configureDestination({
+        name: 'Offline Drive Z',
+        kind: 'local_fs',
+        targetPath: 'Z:\\PersonalVaultBackupOffline'
+      })
+      expect(unmountedDest.targetPath).toBe('Z:\\PersonalVaultBackupOffline')
+
+      // Register an unavailable source root on an unmounted drive letter and verify healthy local backup + restore still work
+      const offlineSourceRoot = 'Z:\\OfflinePhotosSource'
+      fixture.catalog
+        .getRawDb()
+        .prepare(
+          `INSERT INTO sources (root_path, normalized_root_path, created_at_ms, updated_at_ms)
+           VALUES (?, ?, ?, ?)`
+        )
+        .run(offlineSourceRoot, offlineSourceRoot.toLowerCase(), 1000, 1000)
+
+      const healthyDest = coord.configureDestination({
+        name: 'Healthy Local Folder',
+        kind: 'local_fs',
+        targetPath: fixture.backupDir
+      })
+
+      const job = await coord.startBackup(healthyDest.id, { snapshotId: 'snap-offline-src-1' })
+      expect(job.status).not.toBe('queued_destination_unavailable')
+      const completed = await coord.waitForCompletion()
+      expect(completed?.status).toBe('completed')
+
+      const restoreRoot = join(fixture.rootDir, 'restored-offline-src')
+      const restored = await (
+        await import('../../src/main/services/backup/restore')
+      ).restoreRecoveryPointToIsolatedProfile({
+        backupRepoDir: fixture.backupDir,
+        snapshotId: 'snap-offline-src-1',
+        targetProfileDir: join(restoreRoot, 'profile'),
+        targetVaultDir: join(restoreRoot, 'vault'),
+        activeUserDataDir: fixture.userDataDir,
+        activeSourceRoots: fixture.catalog.getAllSourceRoots(),
+        activeVaultRoots: [fixture.vaultDir]
+      })
+      expect(restored.verifiedFileCount).toBeGreaterThanOrEqual(4)
+    } finally {
+      await coord.shutdown()
+      fixture.catalog.close()
+    }
+  })
+
+  it('computes accurate pre-backup summary for catalog-only, empty-vault, and populated-vault states', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'pv-8b-summary-'))
+    tempDirs.push(rootDir)
+    const userDataDir = join(rootDir, 'userData')
+    const sourceDir = join(rootDir, 'sources')
+    const vaultDir = join(rootDir, 'vault')
+    mkdirSync(userDataDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+
+    const photo1 = join(sourceDir, 'one.jpg')
+    const photo2 = join(sourceDir, 'two.jpg')
+    const bytes1 = Buffer.alloc(1024, 0x11)
+    const bytes2 = Buffer.alloc(2048, 0x22)
+    writeFileSync(photo1, bytes1)
+    writeFileSync(photo2, bytes2)
+
+    const journal = new AnnotationJournal({
+      storageDir: join(userDataDir, 'annotations'),
+      sourceRoots: () => [sourceDir],
+      vaultPath: () => vaultDir
+    })
+    await journal.initialize()
+    const catalog = CatalogDatabase.open({
+      catalogPath: join(userDataDir, 'vault-catalog.db'),
+      journal
+    })
+
+    const coord = new BackupCoordinator({
+      catalog,
+      userDataDir,
+      appVersion: '1.0.0'
+    })
+
+    try {
+      const now = Date.now()
+      catalog.persistDiscoveryBatch(sourceDir, [
+        {
+          originalPath: photo1,
+          fileName: 'one.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: bytes1.length,
+          birthtimeMs: now - 2000,
+          mtimeMs: now - 2000,
+          discoveredAtMs: now
+        },
+        {
+          originalPath: photo2,
+          fileName: 'two.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: bytes2.length,
+          birthtimeMs: now - 1000,
+          mtimeMs: now - 1000,
+          discoveredAtMs: now
+        }
+      ])
+
+      // 1. Scanned files only, no vault initialized yet
+      const noVaultSummary = coord.getBackupSummary()
+      expect(noVaultSummary.hasActiveVault).toBe(false)
+      expect(noVaultSummary.activeVaultName).toBeNull()
+      expect(noVaultSummary.vaultFileCount).toBe(0)
+      expect(noVaultSummary.vaultLogicalBytes).toBe(0)
+      expect(noVaultSummary.catalogedFileCount).toBe(2)
+      expect(noVaultSummary.excludedScannedOnlyCount).toBe(2)
+      expect(noVaultSummary.catalogApproxBytes).toBeGreaterThan(0)
+      expect(noVaultSummary.estimatedTotalBytes).toBe(
+        noVaultSummary.catalogApproxBytes + noVaultSummary.annotationsApproxBytes
+      )
+      expect(noVaultSummary.isCatalogOnly).toBe(true)
+
+      // 2. Empty initialized vault
+      const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Empty Summary Vault' })
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: vaultDir,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+      const emptyVaultSummary = coord.getBackupSummary()
+      expect(emptyVaultSummary.hasActiveVault).toBe(true)
+      expect(emptyVaultSummary.activeVaultName).toBe('Empty Summary Vault')
+      expect(emptyVaultSummary.vaultFileCount).toBe(0)
+      expect(emptyVaultSummary.excludedScannedOnlyCount).toBe(2)
+      expect(emptyVaultSummary.isCatalogOnly).toBe(true)
+
+      // 3. Import photo1 into vault, leaving photo2 scanned-only
+      const sha1 = sha256Hex(bytes1)
+      const loc1 = catalog
+        .queryFileLocations({ limit: 10 })
+        .items.find((i) => i.fileName === 'one.jpg')!
+      catalog.recordHashObservationsBatch([
+        {
+          originalPath: photo1,
+          sha256: sha1,
+          observedByteSize: bytes1.length,
+          observedMtimeMs: loc1.filesystemMtimeMs,
+          hashedAtMs: now
+        }
+      ])
+      catalog.recordVaultCopy({
+        vaultId: identity.vaultId,
+        sha256: sha1,
+        byteSize: bytes1.length,
+        relativePath: `files/${sha1.slice(0, 2)}/${sha1}/one.jpg`,
+        manifestRelativePath: `files/${sha1.slice(0, 2)}/${sha1}/manifest.json`,
+        verifiedAtMs: now
+      })
+
+      const populatedSummary = coord.getBackupSummary()
+      expect(populatedSummary.hasActiveVault).toBe(true)
+      expect(populatedSummary.activeVaultName).toBe('Empty Summary Vault')
+      expect(populatedSummary.vaultFileCount).toBe(1)
+      expect(populatedSummary.vaultLogicalBytes).toBe(bytes1.length)
+      expect(populatedSummary.catalogedFileCount).toBe(2)
+      expect(populatedSummary.excludedScannedOnlyCount).toBe(1)
+      expect(populatedSummary.isCatalogOnly).toBe(false)
+      expect(populatedSummary.estimatedTotalBytes).toBe(
+        bytes1.length +
+          populatedSummary.catalogApproxBytes +
+          populatedSummary.annotationsApproxBytes
+      )
+    } finally {
+      await coord.shutdown()
+      catalog.close()
+    }
+  })
 })

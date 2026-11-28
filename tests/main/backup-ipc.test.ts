@@ -873,4 +873,62 @@ describe('Stage 8B Sub-slice 1C — Backup & Restore IPC handlers', () => {
     })
     expect(reloadedService.getStatus().status).toBe('disconnected')
   })
+
+  it('serves BACKUP_GET_SUMMARY and rejects overlapping destinations via BACKUP_CONFIGURE_DESTINATION', async () => {
+    const baseDir = makeTempDir('pv-backup-summary-ipc-')
+    const { userDataDir, vaultDir, catalog, photoBytes } = await createPopulatedProfile(baseDir)
+
+    const backupCoordinator = new BackupCoordinator({
+      catalog,
+      userDataDir,
+      appVersion: '0.1.0'
+    })
+    backupCoordinator.initialize()
+
+    try {
+      const handlers = new Map<string, (...args: unknown[]) => Promise<unknown> | unknown>()
+      registerBackupIpcHandlers({
+        handle: (ch, fn) => {
+          handlers.set(ch, async (event: unknown, ...rest: unknown[]) => {
+            if (event === 'untrusted') {
+              throw new Error(`Unauthorized IPC sender for ${ch}`)
+            }
+            return fn(...rest)
+          })
+        },
+        backupCoordinator,
+        catalog,
+        userDataDir
+      })
+
+      expect(IPC_CHANNELS.BACKUP_GET_SUMMARY).toBe('backup:get-summary')
+      const summaryHandler = handlers.get(IPC_CHANNELS.BACKUP_GET_SUMMARY)!
+      await expect(summaryHandler('untrusted')).rejects.toThrow(/Unauthorized IPC sender/)
+
+      const summary = (await summaryHandler('trusted')) as {
+        hasActiveVault: boolean
+        vaultFileCount: number
+        vaultLogicalBytes: number
+        excludedScannedOnlyCount: number
+        isCatalogOnly: boolean
+      }
+      expect(summary.hasActiveVault).toBe(true)
+      expect(summary.vaultFileCount).toBe(1)
+      expect(summary.vaultLogicalBytes).toBe(photoBytes.length)
+      expect(summary.excludedScannedOnlyCount).toBe(0)
+      expect(summary.isCatalogOnly).toBe(false)
+
+      await expect(
+        handlers.get(IPC_CHANNELS.BACKUP_CONFIGURE_DESTINATION)!('trusted', {
+          name: 'Overlap Vault',
+          kind: 'local_fs',
+          targetPath: vaultDir,
+          maxBytesPerSecond: null
+        })
+      ).rejects.toThrow(/overlaps/i)
+    } finally {
+      await backupCoordinator.shutdown()
+      catalog.close()
+    }
+  })
 })

@@ -33,6 +33,7 @@ import {
   BackupSelectDirectoryRequestSchema,
   BackupSelectDirectoryResponseSchema,
   BackupStartRequestSchema,
+  BackupSummarySchema,
   BackupVerifyRecoveryPointRequestSchema,
   BackupVerifyRecoveryPointResponseSchema
 } from '../../shared/validation/backup-ipc-schemas'
@@ -148,6 +149,25 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
       rawPayload === undefined ? {} : BackupListDestinationsRequestSchema.parse(rawPayload)
     const list = backupCoordinator.listDestinations({ enabledOnly: req.enabledOnly })
     return BackupListDestinationsResponseSchema.parse(list)
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GET_SUMMARY, () => {
+    if (!backupCoordinator) {
+      return BackupSummarySchema.parse({
+        hasActiveVault: false,
+        activeVaultName: null,
+        activeVaultPath: null,
+        vaultFileCount: 0,
+        vaultLogicalBytes: 0,
+        catalogedFileCount: 0,
+        excludedScannedOnlyCount: 0,
+        catalogApproxBytes: 0,
+        annotationsApproxBytes: 0,
+        estimatedTotalBytes: 0,
+        isCatalogOnly: true
+      })
+    }
+    return BackupSummarySchema.parse(backupCoordinator.getBackupSummary())
   })
 
   handle(IPC_CHANNELS.BACKUP_START, async (rawPayload) => {

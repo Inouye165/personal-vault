@@ -7,9 +7,9 @@
  */
 
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, normalize, resolve } from 'node:path'
 import { BackupRepositoryIdentityV1Schema } from '../../../shared/validation/backup-schemas'
-import { canonicalizeWithAncestorPolicySync } from '../annotations/journal'
+import { canonicalizeWithAncestorPolicySync, JournalSecurityError } from '../annotations/journal'
 import { isSameOrDescendantPath } from '../catalog/path-normalization'
 import { BackupContainmentError } from './errors'
 
@@ -18,6 +18,7 @@ export interface ValidateBackupDestinationPathParams {
   readonly sourceRoots: readonly string[]
   readonly vaultRoots: readonly string[]
   readonly userDataDir: string
+  readonly allowUnavailableDestination?: boolean
 }
 
 export interface ValidateBackupStagingDirParams {
@@ -95,7 +96,7 @@ export function validateBackupStagingDir(params: ValidateBackupStagingDirParams)
 
   const rejectOverlap = (protectedRoot: string, kind: string): void => {
     if (!protectedRoot) return
-    const canonicalProtected = canonicalizeWithAncestorPolicySync(protectedRoot)
+    const canonicalProtected = canonicalizeProtectedPath(protectedRoot)
     if (
       isSameOrDescendantPath(canonicalProtected, canonicalStaging) ||
       isSameOrDescendantPath(canonicalStaging, canonicalProtected)
@@ -120,6 +121,20 @@ function isUncPath(targetPath: string): boolean {
   return /^\\\\[^\\]+\\[^\\]+/.test(targetPath)
 }
 
+function canonicalizeProtectedPath(targetPath: string): string {
+  if (isUncPath(targetPath)) {
+    return resolve(normalize(targetPath))
+  }
+  try {
+    return canonicalizeWithAncestorPolicySync(targetPath)
+  } catch (err) {
+    if (err instanceof JournalSecurityError) {
+      return resolve(normalize(targetPath))
+    }
+    throw err
+  }
+}
+
 export function validateBackupDestinationPath(params: ValidateBackupDestinationPathParams): string {
   if (!params.destinationDir || typeof params.destinationDir !== 'string') {
     throw new BackupContainmentError('Backup destination directory must be a non-empty path')
@@ -129,39 +144,31 @@ export function validateBackupDestinationPath(params: ValidateBackupDestinationP
   assertNoSymlinkOrJunctionInChain(resolvedDest, 'backup destination directory')
 
   let canonicalDest: string
+  let existingEntries: string[] | null = null
   if (existsSync(resolvedDest)) {
     const st = lstatSync(resolvedDest)
     if (st.isSymbolicLink() || !st.isDirectory()) {
       throw new BackupContainmentError('Backup destination path must be a regular directory')
     }
     canonicalDest = realpathSync(resolvedDest)
-
-    const entries = readdirSync(canonicalDest)
-    if (entries.length > 0) {
-      const repoJsonPath = join(canonicalDest, 'repository.json')
-      if (!existsSync(repoJsonPath)) {
-        throw new BackupContainmentError(
-          'Backup destination directory is non-empty and does not contain a valid repository.json'
-        )
-      }
-      try {
-        const raw = readFileSync(repoJsonPath, 'utf8')
-        BackupRepositoryIdentityV1Schema.parse(JSON.parse(raw))
-      } catch (err) {
-        throw new BackupContainmentError(
-          `Existing backup destination repository.json is invalid: ${(err as Error).message}`
-        )
+    existingEntries = readdirSync(canonicalDest)
+  } else if (isUncPath(resolvedDest)) {
+    canonicalDest = resolvedDest
+  } else {
+    try {
+      canonicalDest = canonicalizeWithAncestorPolicySync(resolvedDest)
+    } catch (err) {
+      if (err instanceof JournalSecurityError && params.allowUnavailableDestination) {
+        canonicalDest = resolve(normalize(resolvedDest))
+      } else {
+        throw err
       }
     }
-  } else {
-    canonicalDest = isUncPath(resolvedDest)
-      ? resolvedDest
-      : canonicalizeWithAncestorPolicySync(resolvedDest)
   }
 
   const checkProtected = (protectedPath: string, kind: string): void => {
     if (!protectedPath) return
-    const canonicalProtected = canonicalizeWithAncestorPolicySync(protectedPath)
+    const canonicalProtected = canonicalizeProtectedPath(protectedPath)
     if (
       isSameOrDescendantPath(canonicalProtected, canonicalDest) ||
       isSameOrDescendantPath(canonicalDest, canonicalProtected)
@@ -173,6 +180,23 @@ export function validateBackupDestinationPath(params: ValidateBackupDestinationP
   for (const src of params.sourceRoots) checkProtected(src, 'a registered source root')
   for (const vault of params.vaultRoots) checkProtected(vault, 'a registered vault')
   checkProtected(params.userDataDir, 'app-owned data storage')
+
+  if (existingEntries && existingEntries.length > 0) {
+    const repoJsonPath = join(canonicalDest, 'repository.json')
+    if (!existsSync(repoJsonPath)) {
+      throw new BackupContainmentError(
+        'Backup destination directory is non-empty and does not contain a valid repository.json'
+      )
+    }
+    try {
+      const raw = readFileSync(repoJsonPath, 'utf8')
+      BackupRepositoryIdentityV1Schema.parse(JSON.parse(raw))
+    } catch (err) {
+      throw new BackupContainmentError(
+        `Existing backup destination repository.json is invalid: ${(err as Error).message}`
+      )
+    }
+  }
 
   return canonicalDest
 }
@@ -262,9 +286,7 @@ export function validateRestoreTargetPaths(
 
   const checkAgainstProtected = (protectedPath: string, kind: string): void => {
     if (!protectedPath) return
-    const canonicalProtected = isUncPath(protectedPath)
-      ? resolve(protectedPath)
-      : canonicalizeWithAncestorPolicySync(protectedPath)
+    const canonicalProtected = canonicalizeProtectedPath(protectedPath)
     assertDisjoint(canonicalProfile, canonicalProtected, 'restore target profile directory', kind)
     if (canonicalVault !== null) {
       assertDisjoint(canonicalVault, canonicalProtected, 'restore target vault directory', kind)
