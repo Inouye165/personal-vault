@@ -299,7 +299,7 @@ describe('PhotosPanel clear separate status, honest GPS text, attention list & p
     })
 
     // Select unread photo -> must say "Location not read yet" (never "no embedded GPS") and show no verified vault copy
-    fireEvent.click(screen.getByRole('button', { name: /unread\.heic/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for unread\.heic/i }))
     await waitFor(() => {
       expect(screen.getByText('Capture Location (GPS)').parentElement).toHaveTextContent(
         /Location not read yet/i
@@ -314,7 +314,7 @@ describe('PhotosPanel clear separate status, honest GPS text, attention list & p
     )
 
     // Select photo that WAS read cleanly with no GPS -> must say "No embedded GPS" and show verified vault + backup
-    fireEvent.click(screen.getByRole('button', { name: /no_gps\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for no_gps\.jpg/i }))
     await waitFor(() => {
       expect(screen.getByText('Capture Location (GPS)').parentElement).toHaveTextContent(
         /No embedded GPS/i

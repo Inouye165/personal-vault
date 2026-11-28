@@ -89,7 +89,7 @@ describe('Photos Review Persistence Propagation & Bounded UI (Findings 1 & 2)', 
       expect(screen.getByRole('heading', { name: /Photographs/i })).toBeInTheDocument()
     })
 
-    const card = screen.getByRole('button', { name: /photo1\.jpg/i })
+    const card = screen.getByRole('button', { name: /Details for photo1\.jpg/i })
     fireEvent.click(card)
 
     // Click 4 Stars
@@ -154,9 +154,9 @@ describe('Photos Review Persistence Propagation & Bounded UI (Findings 1 & 2)', 
 
     // Select photo
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photo1\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photo1\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photo1\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photo1\.jpg/i }))
 
     // Initial page: collections 1 to 50
     await waitFor(() => {

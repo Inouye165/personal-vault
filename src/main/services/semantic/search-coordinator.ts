@@ -901,6 +901,7 @@ export class SemanticSearchCoordinator {
               fileName: photo.fileName,
               extension: photo.extension,
               category: 'photo',
+              mediaKind: photo.mediaKind ?? 'photo',
               discoveryObservationId: photo.discoveryObservationId,
               byteSize: photo.byteSize,
               filesystemBirthtimeMs: photo.filesystemBirthtimeMs,

@@ -125,6 +125,12 @@ import {
   ThumbnailResultSchema,
   GetOriginalPhotoRequestSchema,
   OriginalPhotoResultSchema,
+  PrepareVideoPlaybackRequestSchema,
+  VideoPlaybackResultSchema,
+  RevokeVideoTokenRequestSchema,
+  OpenInDefaultPlayerRequestSchema,
+  OpenInDefaultPlayerResponseSchema,
+  MediaLibraryUpdatedEventSchema,
   CancelThumbnailRequestSchema,
   CancelThumbnailResponseSchema,
   PhotosDiagnosticsResponseSchema,
@@ -265,6 +271,12 @@ import {
   type ThumbnailResult,
   type GetOriginalPhotoRequest,
   type OriginalPhotoResult,
+  type PrepareVideoPlaybackRequest,
+  type VideoPlaybackResult,
+  type RevokeVideoTokenRequest,
+  type OpenInDefaultPlayerRequest,
+  type OpenInDefaultPlayerResponse,
+  type MediaLibraryUpdatedEvent,
   type CancelThumbnailRequest,
   type CancelThumbnailResponse,
   type PhotosDiagnosticsResponse,
@@ -731,6 +743,56 @@ const api: VaultApi = {
       throw new Error(`Invalid getOriginalPhoto response from main: ${result.error}`)
     }
     return result.data
+  },
+
+  async prepareVideoPlayback(request: PrepareVideoPlaybackRequest): Promise<VideoPlaybackResult> {
+    const parsed = validatePayload(PrepareVideoPlaybackRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid prepareVideoPlayback request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.MEDIA_PREPARE_VIDEO, parsed.data)
+    const result = validatePayload(VideoPlaybackResultSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid prepareVideoPlayback response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  async revokeVideoPlaybackToken(request: RevokeVideoTokenRequest): Promise<boolean> {
+    const parsed = validatePayload(RevokeVideoTokenRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid revokeVideoPlaybackToken request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.MEDIA_REVOKE_VIDEO_TOKEN, parsed.data)
+    return Boolean(raw)
+  },
+
+  async openMediaInDefaultPlayer(
+    request: OpenInDefaultPlayerRequest
+  ): Promise<OpenInDefaultPlayerResponse> {
+    const parsed = validatePayload(OpenInDefaultPlayerRequestSchema, request)
+    if (!parsed.success) {
+      throw new Error(`Invalid openMediaInDefaultPlayer request: ${parsed.error}`)
+    }
+    const raw = await ipcRenderer.invoke(IPC_CHANNELS.MEDIA_OPEN_IN_DEFAULT_PLAYER, parsed.data)
+    const result = validatePayload(OpenInDefaultPlayerResponseSchema, raw)
+    if (!result.success) {
+      throw new Error(`Invalid openMediaInDefaultPlayer response from main: ${result.error}`)
+    }
+    return result.data
+  },
+
+  onMediaLibraryUpdated(callback: (event: MediaLibraryUpdatedEvent) => void): () => void {
+    const listener = (_event: unknown, raw: unknown): void => {
+      const result = validatePayload(MediaLibraryUpdatedEventSchema, raw)
+      if (result.success) {
+        callback(result.data)
+      }
+    }
+    ipcRenderer.on(IPC_CHANNELS.MEDIA_LIBRARY_UPDATED_EVENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.MEDIA_LIBRARY_UPDATED_EVENT, listener)
+    }
   },
 
   async cancelThumbnail(request: CancelThumbnailRequest): Promise<CancelThumbnailResponse> {

@@ -108,9 +108,9 @@ describe('Pending Persistence Tracking & Safe Reconciliation (Finding 1)', () =>
 
     // Select photo
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photo1\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photo1\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photo1\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photo1\.jpg/i }))
 
     // Execute Operation A: Click 4 Stars
     const starBtn = screen.getByRole('button', { name: '4 Stars' })
@@ -213,9 +213,9 @@ describe('Pending Persistence Tracking & Safe Reconciliation (Finding 1)', () =>
     render(<PhotosPanel />)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photo1\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photo1\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photo1\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photo1\.jpg/i }))
 
     // Create collection
     const input = screen.getByPlaceholderText(/New collection name…/i)

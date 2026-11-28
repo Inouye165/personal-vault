@@ -479,7 +479,21 @@ export class ScanJobCoordinator {
             birthtimeMs,
             mtimeMs,
             discoveredAtMs: Date.now(),
-            category: event.candidate.candidateKind
+            category: event.candidate.candidateKind,
+            mediaKind: event.candidate.mediaKind,
+            videoMetadata: event.candidate.videoMetadata
+              ? {
+                  containerFormat: event.candidate.videoMetadata.container,
+                  videoCodec: event.candidate.videoMetadata.videoCodec,
+                  audioCodec: event.candidate.videoMetadata.audioCodec,
+                  durationMs: event.candidate.videoMetadata.durationMs,
+                  widthPx: event.candidate.videoMetadata.widthPx,
+                  heightPx: event.candidate.videoMetadata.heightPx,
+                  isPlayableStructure: event.candidate.videoMetadata.isPlayableStructure,
+                  structureError: event.candidate.videoMetadata.structureError,
+                  inspectedAtMs: Date.now()
+                }
+              : null
           })
           uncommittedCandidates++
 

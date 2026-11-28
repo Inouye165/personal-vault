@@ -305,7 +305,9 @@ describe('PhotosPanel responsive layout, virtualization, filters & accessibility
 
     render(<PhotosPanel />)
 
-    const cell = await waitFor(() => screen.getByRole('button', { name: /photo_1\.jpg/i }))
+    const cell = await waitFor(() =>
+      screen.getByRole('button', { name: /Details for photo_1\.jpg/i })
+    )
     cell.focus()
     fireEvent.click(cell)
 
@@ -367,7 +369,9 @@ describe('PhotosPanel responsive layout, virtualization, filters & accessibility
         installMockApi(photos)
 
         const { unmount } = render(<PhotosPanel />)
-        const cell = await waitFor(() => screen.getByRole('button', { name: /photo_1\.jpg/i }))
+        const cell = await waitFor(() =>
+          screen.getByRole('button', { name: /Details for photo_1\.jpg/i })
+        )
         cell.focus()
         fireEvent.click(cell)
         expect(screen.getByRole('heading', { name: /photograph details/i })).toBeInTheDocument()
@@ -428,7 +432,9 @@ describe('PhotosPanel responsive layout, virtualization, filters & accessibility
     installMockApi(photos)
 
     render(<PhotosPanel />)
-    const cell = await waitFor(() => screen.getByRole('button', { name: /photo_1\.jpg/i }))
+    const cell = await waitFor(() =>
+      screen.getByRole('button', { name: /Details for photo_1\.jpg/i })
+    )
     cell.focus()
     fireEvent.click(cell)
     expect(screen.getByRole('heading', { name: /photograph details/i })).toBeInTheDocument()

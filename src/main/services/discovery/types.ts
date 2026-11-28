@@ -1,4 +1,5 @@
 import type { ItemKind } from '../../../shared/types/domain'
+import type { VideoContentMetadata } from '../video/inspector'
 import type { ReadOnlyFsAdapter } from './fs-adapter'
 import type { DiscoveryPolicyConfig } from './policy'
 
@@ -17,6 +18,8 @@ export interface DiscoveredCandidate {
   readonly fileName: string
   readonly extension: string
   readonly candidateKind: ItemKind
+  readonly mediaKind?: 'photo' | 'video' | 'document'
+  readonly videoMetadata?: VideoContentMetadata | null
   readonly byteSize: number
   /**
    * ISO 8601 filesystem creation (birth) timestamp when reliably reported by the OS,

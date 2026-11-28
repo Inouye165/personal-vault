@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CameraLabel,
   InterpretedSearchFilters,
+  MediaKindFilter,
   MetadataAwarePhotoSearchResponse,
   PhotoFileTypeBasis,
   PhotoFlagFilter,
@@ -120,6 +121,9 @@ export interface UsePhotosResult {
   readonly selectedId: number | null
   readonly thumbnails: ReadonlyMap<number, ThumbnailResult>
   readonly thumbnailPrepProgress: ThumbnailPrepProgress | null
+  readonly mediaKindFilter: MediaKindFilter
+  readonly photoCount: number
+  readonly videoCount: number
   readonly ratingFilter: PhotoRatingFilter
   readonly flagFilter: PhotoFlagFilter
   readonly collectionId: number | null
@@ -182,6 +186,7 @@ export interface UsePhotosResult {
   }) => Promise<CameraLabel | null>
   readonly deleteCameraLabel: (id: number) => Promise<void>
   readonly selectPhoto: (id: number | null) => void
+  readonly setMediaKindFilter: (filter: MediaKindFilter) => void
   readonly setRatingFilter: (filter: PhotoRatingFilter) => void
   readonly setFlagFilter: (filter: PhotoFlagFilter) => void
   readonly setCollectionId: (collectionId: number | null) => void
@@ -215,6 +220,7 @@ interface PhotoViewQueryContext {
   readonly queryText: string
   readonly filterOverrides: InterpretedSearchFilters | null
   readonly bypassVisualModel: boolean
+  readonly mediaKind: MediaKindFilter
   readonly rating: PhotoRatingFilter
   readonly flag: PhotoFlagFilter
   readonly collection: number | null
@@ -252,6 +258,7 @@ export function usePhotos(): UsePhotosResult {
     queryText: '',
     filterOverrides: null,
     bypassVisualModel: false,
+    mediaKind: 'all',
     rating: 'all',
     flag: 'all',
     collection: null,
@@ -260,6 +267,9 @@ export function usePhotos(): UsePhotosResult {
   const restoredGridQueryRef = useRef<PhotoViewQueryContext | null>(null)
 
   // Filters state
+  const [mediaKindFilter, setMediaKindFilterState] = useState<MediaKindFilter>('all')
+  const [photoCount, setPhotoCount] = useState<number>(0)
+  const [videoCount, setVideoCount] = useState<number>(0)
   const [ratingFilter, setRatingFilterState] = useState<PhotoRatingFilter>('all')
   const [flagFilter, setFlagFilterState] = useState<PhotoFlagFilter>('all')
   const [collectionId, setCollectionIdState] = useState<number | null>(null)
@@ -291,6 +301,7 @@ export function usePhotos(): UsePhotosResult {
   const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([])
   const [cameraLabels, setCameraLabels] = useState<CameraLabel[]>([])
 
+  const mediaKindFilterRef = useRef(mediaKindFilter)
   const ratingFilterRef = useRef(ratingFilter)
   const flagFilterRef = useRef(flagFilter)
   const collectionIdRef = useRef(collectionId)
@@ -300,11 +311,12 @@ export function usePhotos(): UsePhotosResult {
   const searchScoresRef = useRef(searchScores)
 
   useEffect(() => {
+    mediaKindFilterRef.current = mediaKindFilter
     ratingFilterRef.current = ratingFilter
     flagFilterRef.current = flagFilter
     collectionIdRef.current = collectionId
     metadataFiltersRef.current = metadataFilters
-  }, [ratingFilter, flagFilter, collectionId, metadataFilters])
+  }, [mediaKindFilter, ratingFilter, flagFilter, collectionId, metadataFilters])
 
   useEffect(() => {
     pagesRef.current = pages
@@ -420,6 +432,7 @@ export function usePhotos(): UsePhotosResult {
       pageIndex: number,
       currentGeneration: number,
       activeFilters?: {
+        mediaKind?: MediaKindFilter
         rating: PhotoRatingFilter
         flag: PhotoFlagFilter
         collection: number | null
@@ -435,17 +448,20 @@ export function usePhotos(): UsePhotosResult {
       const restoredViewQuery = pageIndex > 0 ? restoredGridQueryRef.current : null
       const filters = restoredViewQuery
         ? {
+            mediaKind: restoredViewQuery.mediaKind,
             rating: restoredViewQuery.rating,
             flag: restoredViewQuery.flag,
             collection: restoredViewQuery.collection,
             metadata: restoredViewQuery.metadata
           }
-        : (activeFilters ?? {
-            rating: ratingFilterRef.current,
-            flag: flagFilterRef.current,
-            collection: collectionIdRef.current,
-            metadata: metadataFiltersRef.current
-          })
+        : {
+            mediaKind: activeFilters?.mediaKind ?? mediaKindFilterRef.current,
+            rating: activeFilters?.rating ?? ratingFilterRef.current,
+            flag: activeFilters?.flag ?? flagFilterRef.current,
+            collection:
+              activeFilters !== undefined ? activeFilters.collection : collectionIdRef.current,
+            metadata: activeFilters?.metadata ?? metadataFiltersRef.current
+          }
       const query = restoredViewQuery
         ? restoredViewQuery.queryText
         : activeFilters?.searchQuery !== undefined
@@ -470,6 +486,7 @@ export function usePhotos(): UsePhotosResult {
                 bypassVisualModel: activeBypassVisualModel,
                 offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
                 limit: PHOTO_BOUNDS.PAGE_SIZE,
+                mediaKindFilter: filters.mediaKind,
                 ratingFilter: filters.rating,
                 flagFilter: filters.flag,
                 collectionId: filters.collection,
@@ -500,6 +517,7 @@ export function usePhotos(): UsePhotosResult {
                 queryText: query,
                 filterOverrides: activeFilterOverrides,
                 bypassVisualModel: activeBypassVisualModel,
+                mediaKind: filters.mediaKind,
                 rating: filters.rating,
                 flag: filters.flag,
                 collection: filters.collection,
@@ -589,6 +607,7 @@ export function usePhotos(): UsePhotosResult {
             queryText: query,
             offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
             limit: PHOTO_BOUNDS.PAGE_SIZE,
+            mediaKindFilter: filters.mediaKind,
             ratingFilter: filters.rating,
             flagFilter: filters.flag,
             collectionId: filters.collection,
@@ -682,6 +701,7 @@ export function usePhotos(): UsePhotosResult {
               queryText: '',
               filterOverrides: null,
               bypassVisualModel: false,
+              mediaKind: filters.mediaKind,
               rating: filters.rating,
               flag: filters.flag,
               collection: filters.collection,
@@ -700,6 +720,7 @@ export function usePhotos(): UsePhotosResult {
           const res = await window.api.getPhotosPage({
             offset: pageIndex * PHOTO_BOUNDS.PAGE_SIZE,
             limit: PHOTO_BOUNDS.PAGE_SIZE,
+            mediaKindFilter: filters.mediaKind,
             ratingFilter: filters.rating,
             flagFilter: filters.flag,
             collectionId: filters.collection,
@@ -725,6 +746,16 @@ export function usePhotos(): UsePhotosResult {
 
           inFlightPagesRef.current.delete(pageIndex)
           setTotalCount(res.totalCount)
+          if (typeof res.photoCount === 'number') {
+            setPhotoCount(res.photoCount)
+          } else if (filters.mediaKind === 'photo') {
+            setPhotoCount(res.totalCount)
+          }
+          if (typeof res.videoCount === 'number') {
+            setVideoCount(res.videoCount)
+          } else if (filters.mediaKind === 'video') {
+            setVideoCount(res.totalCount)
+          }
 
           pagePhotoIdsRef.current.set(
             pageIndex,
@@ -761,6 +792,7 @@ export function usePhotos(): UsePhotosResult {
                 queryText: query,
                 filterOverrides: activeFilterOverrides,
                 bypassVisualModel: activeBypassVisualModel,
+                mediaKind: filters.mediaKind,
                 rating: filters.rating,
                 flag: filters.flag,
                 collection: filters.collection,
@@ -816,6 +848,7 @@ export function usePhotos(): UsePhotosResult {
 
   const applyFilters = useCallback(
     (
+      newMediaKind: MediaKindFilter,
       newRating: PhotoRatingFilter,
       newFlag: PhotoFlagFilter,
       newCollection: number | null,
@@ -840,6 +873,7 @@ export function usePhotos(): UsePhotosResult {
       setErrorDetails(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
+        mediaKind: newMediaKind,
         rating: newRating,
         flag: newFlag,
         collection: newCollection,
@@ -882,6 +916,7 @@ export function usePhotos(): UsePhotosResult {
       setErrorDetails(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
+        mediaKind: mediaKindFilterRef.current,
         rating: ratingFilterRef.current,
         flag: flagFilterRef.current,
         collection: collectionIdRef.current,
@@ -925,6 +960,7 @@ export function usePhotos(): UsePhotosResult {
     setErrorDetails(null)
     setFilterGeneration((prev) => prev + 1)
     void loadPage(0, nextGen, {
+      mediaKind: mediaKindFilterRef.current,
       rating: ratingFilterRef.current,
       flag: flagFilterRef.current,
       collection: collectionIdRef.current,
@@ -958,6 +994,7 @@ export function usePhotos(): UsePhotosResult {
       setErrorDetails(null)
       setFilterGeneration((prev) => prev + 1)
       void loadPage(0, nextGen, {
+        mediaKind: mediaKindFilterRef.current,
         rating: ratingFilterRef.current,
         flag: flagFilterRef.current,
         collection: collectionIdRef.current,
@@ -1005,6 +1042,7 @@ export function usePhotos(): UsePhotosResult {
     setError(null)
     setErrorDetails(null)
     void loadPage(0, nextGen, {
+      mediaKind: mediaKindFilterRef.current,
       rating: ratingFilterRef.current,
       flag: flagFilterRef.current,
       collection: collectionIdRef.current,
@@ -1114,6 +1152,7 @@ export function usePhotos(): UsePhotosResult {
       setIsLoading(true)
       setIsSearching(true)
       await loadPage(0, nextGen, {
+        mediaKind: mediaKindFilterRef.current,
         rating: ratingFilterRef.current,
         flag: flagFilterRef.current,
         collection: collectionIdRef.current,
@@ -1169,6 +1208,7 @@ export function usePhotos(): UsePhotosResult {
       setIsLoading(true)
       setIsSearching(true)
       await loadPage(0, nextGen, {
+        mediaKind: mediaKindFilterRef.current,
         rating: ratingFilterRef.current,
         flag: flagFilterRef.current,
         collection: collectionIdRef.current,
@@ -1179,11 +1219,27 @@ export function usePhotos(): UsePhotosResult {
     [loadPage, upsertSavedPlace]
   )
 
+  const setMediaKindFilter = useCallback(
+    (newMediaKind: MediaKindFilter) => {
+      mediaKindFilterRef.current = newMediaKind
+      setMediaKindFilterState(newMediaKind)
+      applyFilters(
+        newMediaKind,
+        ratingFilterRef.current,
+        flagFilterRef.current,
+        collectionIdRef.current,
+        metadataFiltersRef.current
+      )
+    },
+    [applyFilters]
+  )
+
   const setRatingFilter = useCallback(
     (newRating: PhotoRatingFilter) => {
       ratingFilterRef.current = newRating
       setRatingFilterState(newRating)
       applyFilters(
+        mediaKindFilterRef.current,
         newRating,
         flagFilterRef.current,
         collectionIdRef.current,
@@ -1198,6 +1254,7 @@ export function usePhotos(): UsePhotosResult {
       flagFilterRef.current = newFlag
       setFlagFilterState(newFlag)
       applyFilters(
+        mediaKindFilterRef.current,
         ratingFilterRef.current,
         newFlag,
         collectionIdRef.current,
@@ -1212,6 +1269,7 @@ export function usePhotos(): UsePhotosResult {
       collectionIdRef.current = newCollection
       setCollectionIdState(newCollection)
       applyFilters(
+        mediaKindFilterRef.current,
         ratingFilterRef.current,
         flagFilterRef.current,
         newCollection,
@@ -1230,6 +1288,7 @@ export function usePhotos(): UsePhotosResult {
       metadataFiltersRef.current = nextMetadata
       setMetadataFiltersState(nextMetadata)
       applyFilters(
+        mediaKindFilterRef.current,
         ratingFilterRef.current,
         flagFilterRef.current,
         collectionIdRef.current,
@@ -1240,6 +1299,7 @@ export function usePhotos(): UsePhotosResult {
   )
 
   const resetFilters = useCallback(() => {
+    mediaKindFilterRef.current = 'all'
     ratingFilterRef.current = 'all'
     flagFilterRef.current = 'all'
     collectionIdRef.current = null
@@ -1261,11 +1321,12 @@ export function usePhotos(): UsePhotosResult {
     void window.api?.cancelPhotosSemanticSearch?.(
       cancelOwnerGen !== null ? { ownerGen: cancelOwnerGen } : undefined
     )
+    setMediaKindFilterState('all')
     setRatingFilterState('all')
     setFlagFilterState('all')
     setCollectionIdState(null)
     setMetadataFiltersState(DEFAULT_PHOTO_METADATA_FILTERS)
-    applyFilters('all', 'all', null, DEFAULT_PHOTO_METADATA_FILTERS)
+    applyFilters('all', 'all', 'all', null, DEFAULT_PHOTO_METADATA_FILTERS)
   }, [applyFilters])
 
   const ensureRangeLoaded = useCallback(
@@ -1500,6 +1561,16 @@ export function usePhotos(): UsePhotosResult {
     }
   }, [loadPage])
 
+  // Subscribe to background media-type reclassification updates
+  useEffect(() => {
+    const unsub = window.api?.onMediaLibraryUpdated?.(() => {
+      void refresh()
+    })
+    return () => {
+      unsub?.()
+    }
+  }, [refresh])
+
   // Invalidate in-flight generation on unmount
   useEffect(() => {
     return () => {
@@ -1532,6 +1603,9 @@ export function usePhotos(): UsePhotosResult {
     selectedId,
     thumbnails,
     thumbnailPrepProgress,
+    mediaKindFilter,
+    photoCount,
+    videoCount,
     ratingFilter,
     flagFilter,
     collectionId,
@@ -1567,6 +1641,7 @@ export function usePhotos(): UsePhotosResult {
     upsertCameraLabel,
     deleteCameraLabel,
     selectPhoto,
+    setMediaKindFilter,
     setRatingFilter,
     setFlagFilter,
     setCollectionId,

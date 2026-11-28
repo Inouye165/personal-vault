@@ -59,6 +59,7 @@ import type {
   HashObservationRecord,
   BatchPersistenceResult,
   CreateScanJobInput,
+  MediaKind,
   PaginatedResult,
   PaginationOptions,
   QueryFileLocationsOptions,
@@ -73,6 +74,8 @@ import type {
   UnhashedFileRecord,
   UnhashedFilesOptions,
   UpdateScanJobProgressInput,
+  VideoMediaMetadataInput,
+  VisualLibraryMediaCounts,
   RegisterVaultInput,
   CatalogVaultRecord,
   RecordVaultCopyInput,
@@ -150,6 +153,14 @@ interface RawFileRow {
   file_name: string
   extension: string
   category: 'photo' | 'document'
+  media_kind?: 'photo' | 'video' | 'document'
+  video_container?: 'mp4' | 'quicktime' | 'webm' | null
+  video_codec?: string | null
+  audio_codec?: string | null
+  video_duration_ms?: number | null
+  video_width_px?: number | null
+  video_height_px?: number | null
+  video_structure_error?: string | null
   discovery_observation_id: number
   byte_size: number
   filesystem_birthtime_ms: number | null
@@ -774,7 +785,7 @@ export class CatalogDatabase {
           : null
 
       const selectFileStmt = this.db.prepare(
-        'SELECT id, original_path, file_name, extension, category FROM file_locations WHERE original_path = ?;'
+        'SELECT id, original_path, file_name, extension, category, media_kind FROM file_locations WHERE original_path = ?;'
       )
 
       const selectCurrentObsStmt = this.db.prepare(`
@@ -786,8 +797,9 @@ export class CatalogDatabase {
       const insertFileStmt = this.db.prepare(`
         INSERT INTO file_locations (
           source_id, original_path, normalized_path, file_name, extension, category,
+          media_kind, media_kind_inspected_at_ms,
           created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id;
       `)
 
@@ -808,8 +820,41 @@ export class CatalogDatabase {
       `)
 
       const updateFileLocationStmt = this.db.prepare(`
-        UPDATE file_locations SET updated_at_ms = ? WHERE id = ?;
+        UPDATE file_locations
+        SET media_kind = ?,
+            media_kind_inspected_at_ms = COALESCE(?, media_kind_inspected_at_ms),
+            updated_at_ms = ?
+        WHERE id = ?;
       `)
+
+      const upsertVideoMetaStmt = this.db.prepare(`
+        INSERT INTO video_media_metadata (
+          file_location_id, discovery_observation_id, container_format,
+          video_codec, audio_codec, duration_ms, width_px, height_px,
+          is_playable_structure, structure_error, inspected_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(file_location_id) DO UPDATE SET
+          discovery_observation_id = excluded.discovery_observation_id,
+          container_format = excluded.container_format,
+          video_codec = excluded.video_codec,
+          audio_codec = excluded.audio_codec,
+          duration_ms = excluded.duration_ms,
+          width_px = excluded.width_px,
+          height_px = excluded.height_px,
+          is_playable_structure = excluded.is_playable_structure,
+          structure_error = excluded.structure_error,
+          inspected_at_ms = excluded.inspected_at_ms;
+      `)
+
+      const deleteVideoMetaStmt = this.db.prepare(
+        'DELETE FROM video_media_metadata WHERE file_location_id = ?;'
+      )
+      const clearThumbErrorForVideoStmt = this.db.prepare(
+        "DELETE FROM photo_thumbnail_state WHERE file_location_id = ? AND status IN ('unsupported', 'failed');"
+      )
+      const clearMetaErrorForVideoStmt = this.db.prepare(
+        "UPDATE photo_technical_metadata SET is_current = 0 WHERE file_location_id = ? AND is_current = 1 AND extraction_status IN ('unsupported', 'failed');"
+      )
 
       const invalidateHashesStmt = this.db.prepare(`
         UPDATE hash_observations
@@ -821,6 +866,9 @@ export class CatalogDatabase {
 
       for (const candidate of candidates) {
         const normalizedPath = normalizePathForLookup(candidate.originalPath)
+        const resolvedMediaKind: MediaKind =
+          candidate.mediaKind ?? (candidate.category === 'document' ? 'document' : 'photo')
+        const inspectedAtMs = candidate.mediaKind ? now : null
         const existingFile = selectFileStmt.get(candidate.originalPath) as unknown as
           | {
               id: number
@@ -828,6 +876,7 @@ export class CatalogDatabase {
               file_name: string
               extension: string
               category: string
+              media_kind?: string
             }
           | undefined
 
@@ -839,18 +888,36 @@ export class CatalogDatabase {
             candidate.fileName,
             candidate.extension,
             candidate.category,
+            resolvedMediaKind,
+            inspectedAtMs,
             now,
             now
           ) as unknown as { id: number }
 
-          insertObsStmt.run(
+          const obsRow = insertObsStmt.get(
             fileRow.id,
             candidate.byteSize,
             candidate.birthtimeMs,
             candidate.mtimeMs,
             candidate.discoveredAtMs,
             candidate.discoveredAtMs
-          )
+          ) as unknown as { id: number }
+
+          if (resolvedMediaKind === 'video' && candidate.videoMetadata) {
+            upsertVideoMetaStmt.run(
+              fileRow.id,
+              obsRow.id,
+              candidate.videoMetadata.containerFormat,
+              candidate.videoMetadata.videoCodec,
+              candidate.videoMetadata.audioCodec,
+              candidate.videoMetadata.durationMs,
+              candidate.videoMetadata.widthPx,
+              candidate.videoMetadata.heightPx,
+              candidate.videoMetadata.isPlayableStructure ? 1 : 0,
+              candidate.videoMetadata.structureError,
+              candidate.videoMetadata.inspectedAtMs
+            )
+          }
           if (insertJobFileStmt) {
             insertJobFileStmt.run(jobId!, fileRow.id)
           }
@@ -909,15 +976,34 @@ export class CatalogDatabase {
               }
             }
 
-            insertObsStmt.run(
+            const obsRow = insertObsStmt.get(
               existingFile.id,
               candidate.byteSize,
               candidate.birthtimeMs,
               candidate.mtimeMs,
               candidate.discoveredAtMs,
               candidate.discoveredAtMs
-            )
-            updateFileLocationStmt.run(now, existingFile.id)
+            ) as unknown as { id: number }
+            updateFileLocationStmt.run(resolvedMediaKind, inspectedAtMs, now, existingFile.id)
+            if (resolvedMediaKind === 'video' && candidate.videoMetadata) {
+              upsertVideoMetaStmt.run(
+                existingFile.id,
+                obsRow.id,
+                candidate.videoMetadata.containerFormat,
+                candidate.videoMetadata.videoCodec,
+                candidate.videoMetadata.audioCodec,
+                candidate.videoMetadata.durationMs,
+                candidate.videoMetadata.widthPx,
+                candidate.videoMetadata.heightPx,
+                candidate.videoMetadata.isPlayableStructure ? 1 : 0,
+                candidate.videoMetadata.structureError,
+                candidate.videoMetadata.inspectedAtMs
+              )
+              clearThumbErrorForVideoStmt.run(existingFile.id)
+              clearMetaErrorForVideoStmt.run(existingFile.id)
+            } else {
+              deleteVideoMetaStmt.run(existingFile.id)
+            }
             this.db
               .prepare(
                 'UPDATE photo_semantic_embeddings SET is_current = 0 WHERE file_location_id = ? AND is_current = 1;'
@@ -933,7 +1019,26 @@ export class CatalogDatabase {
             updatedCount++
           } else {
             updateObsLastSeenStmt.run(candidate.discoveredAtMs, currentObs.id)
-            updateFileLocationStmt.run(now, existingFile.id)
+            updateFileLocationStmt.run(resolvedMediaKind, inspectedAtMs, now, existingFile.id)
+            if (resolvedMediaKind === 'video' && candidate.videoMetadata) {
+              upsertVideoMetaStmt.run(
+                existingFile.id,
+                currentObs.id,
+                candidate.videoMetadata.containerFormat,
+                candidate.videoMetadata.videoCodec,
+                candidate.videoMetadata.audioCodec,
+                candidate.videoMetadata.durationMs,
+                candidate.videoMetadata.widthPx,
+                candidate.videoMetadata.heightPx,
+                candidate.videoMetadata.isPlayableStructure ? 1 : 0,
+                candidate.videoMetadata.structureError,
+                candidate.videoMetadata.inspectedAtMs
+              )
+              clearThumbErrorForVideoStmt.run(existingFile.id)
+              clearMetaErrorForVideoStmt.run(existingFile.id)
+            } else if (resolvedMediaKind !== 'video') {
+              deleteVideoMetaStmt.run(existingFile.id)
+            }
             unchangedCount++
           }
         }
@@ -1130,6 +1235,14 @@ export class CatalogDatabase {
     const stmt = this.db.prepare(`
       SELECT
         f.id, f.source_id, f.original_path, f.normalized_path, f.file_name, f.extension, f.category,
+        f.media_kind,
+        vm.container_format as video_container,
+        vm.video_codec as video_codec,
+        vm.audio_codec as audio_codec,
+        vm.duration_ms as video_duration_ms,
+        vm.width_px as video_width_px,
+        vm.height_px as video_height_px,
+        vm.structure_error as video_structure_error,
         d.id as discovery_observation_id,
         d.byte_size, d.filesystem_birthtime_ms, d.filesystem_mtime_ms, d.inferred_capture_time_ms,
         d.observed_at_ms as first_discovered_at_ms, d.last_seen_at_ms,
@@ -1138,6 +1251,7 @@ export class CatalogDatabase {
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN video_media_metadata vm ON vm.file_location_id = f.id
       WHERE f.original_path = ?;
     `)
     const row = stmt.get(filePath) as unknown as RawFileRow | undefined
@@ -1152,6 +1266,14 @@ export class CatalogDatabase {
     const stmt = this.db.prepare(`
       SELECT
         f.id, f.source_id, f.original_path, f.normalized_path, f.file_name, f.extension, f.category,
+        f.media_kind,
+        vm.container_format as video_container,
+        vm.video_codec as video_codec,
+        vm.audio_codec as audio_codec,
+        vm.duration_ms as video_duration_ms,
+        vm.width_px as video_width_px,
+        vm.height_px as video_height_px,
+        vm.structure_error as video_structure_error,
         d.id as discovery_observation_id,
         d.byte_size, d.filesystem_birthtime_ms, d.filesystem_mtime_ms, d.inferred_capture_time_ms,
         d.observed_at_ms as first_discovered_at_ms, d.last_seen_at_ms,
@@ -1163,6 +1285,7 @@ export class CatalogDatabase {
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN video_media_metadata vm ON vm.file_location_id = f.id
       LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
         AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       WHERE f.id = ?;
@@ -1275,6 +1398,14 @@ export class CatalogDatabase {
     const querySql = `
       SELECT
         f.id, f.source_id, f.original_path, f.normalized_path, f.file_name, f.extension, f.category,
+        f.media_kind,
+        vm.container_format as video_container,
+        vm.video_codec as video_codec,
+        vm.audio_codec as audio_codec,
+        vm.duration_ms as video_duration_ms,
+        vm.width_px as video_width_px,
+        vm.height_px as video_height_px,
+        vm.structure_error as video_structure_error,
         d.id as discovery_observation_id,
         d.byte_size, d.filesystem_birthtime_ms, d.filesystem_mtime_ms, d.inferred_capture_time_ms,
         d.observed_at_ms as first_discovered_at_ms, d.last_seen_at_ms,
@@ -1286,6 +1417,7 @@ export class CatalogDatabase {
       FROM file_locations f
       JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
       LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+      LEFT JOIN video_media_metadata vm ON vm.file_location_id = f.id
       LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
         AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
       ${techMetaJoinClause}
@@ -1895,6 +2027,8 @@ export class CatalogDatabase {
   }
 
   private mapFileRow(row: RawFileRow): CatalogFileRecord {
+    const fallbackMediaKind = row.category === 'document' ? 'document' : 'photo'
+    const mediaKind = row.media_kind ?? fallbackMediaKind
     return {
       id: row.id,
       sourceId: row.source_id,
@@ -1903,6 +2037,18 @@ export class CatalogDatabase {
       fileName: row.file_name,
       extension: row.extension,
       category: row.category,
+      mediaKind,
+      ...(mediaKind === 'video'
+        ? {
+            videoContainer: row.video_container ?? null,
+            videoCodec: row.video_codec ?? null,
+            audioCodec: row.audio_codec ?? null,
+            videoDurationMs: row.video_duration_ms ?? null,
+            videoWidthPx: row.video_width_px ?? null,
+            videoHeightPx: row.video_height_px ?? null,
+            videoStructureError: row.video_structure_error ?? null
+          }
+        : {}),
       discoveryObservationId: row.discovery_observation_id,
       byteSize: row.byte_size,
       filesystemBirthtimeMs: row.filesystem_birthtime_ms,
@@ -1916,6 +2062,180 @@ export class CatalogDatabase {
       flag: (row.annotation_flag as 'none' | 'pick' | 'reject') || 'none',
       annotationVersion: row.annotation_version ?? 0
     }
+  }
+
+  public getVisualLibraryMediaCounts(
+    options: Omit<
+      QueryFileLocationsOptions,
+      'offset' | 'limit' | 'mediaKindFilter' | 'category'
+    > = {}
+  ): VisualLibraryMediaCounts {
+    this.assertOpen()
+    const { conditions, params, techMetaJoinClause, joinParams } = buildPhotoFilterClauses({
+      ...options,
+      category: 'photo',
+      mediaKindFilter: 'all'
+    })
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          COUNT(DISTINCT f.id) AS total_count,
+          COUNT(DISTINCT CASE WHEN f.media_kind = 'photo' THEN f.id END) AS photo_count,
+          COUNT(DISTINCT CASE WHEN f.media_kind = 'video' THEN f.id END) AS video_count
+        FROM file_locations f
+        JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+        LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
+        LEFT JOIN photo_annotations a ON a.file_location_id = f.id AND a.is_current = 1
+          AND (a.discovery_observation_id = d.id OR (a.content_sha256 IS NOT NULL AND h.sha256 IS NOT NULL AND a.content_sha256 = h.sha256))
+        ${techMetaJoinClause}
+        ${whereClause};
+      `
+      )
+      .get(...joinParams, ...params) as
+      { total_count: number; photo_count: number; video_count: number } | undefined
+
+    return {
+      totalCount: Number(row?.total_count ?? 0),
+      photoCount: Number(row?.photo_count ?? 0),
+      videoCount: Number(row?.video_count ?? 0)
+    }
+  }
+
+  public getUninspectedPhotoLocationsBatch(limit = 50): Array<{
+    readonly id: number
+    readonly originalPath: string
+  }> {
+    this.assertOpen()
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
+    return this.db
+      .prepare(
+        `
+        SELECT f.id, f.original_path AS originalPath
+        FROM file_locations f
+        LEFT JOIN photo_technical_metadata tm
+          ON tm.file_location_id = f.id AND tm.is_current = 1
+        LEFT JOIN photo_thumbnail_state ts
+          ON ts.file_location_id = f.id
+        WHERE f.category = 'photo'
+          AND f.media_kind_inspected_at_ms IS NULL
+        ORDER BY
+          CASE
+            WHEN tm.extraction_status IN ('unsupported', 'failed')
+              OR ts.status IN ('unsupported', 'failed')
+            THEN 0
+            ELSE 1
+          END ASC,
+          f.id ASC
+        LIMIT ?;
+      `
+      )
+      .all(safeLimit) as Array<{ id: number; originalPath: string }>
+  }
+
+  public reclassifyLocationAsVideoInPlace(
+    fileLocationId: number,
+    videoMetadata: VideoMediaMetadataInput
+  ): boolean {
+    this.assertOpen()
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE;')
+    try {
+      const row = this.db
+        .prepare(
+          `
+          SELECT f.id, f.media_kind, d.id AS discovery_observation_id
+          FROM file_locations f
+          JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
+          WHERE f.id = ? AND f.category = 'photo';
+        `
+        )
+        .get(fileLocationId) as
+        { id: number; media_kind: string; discovery_observation_id: number } | undefined
+
+      if (!row) {
+        this.db.exec('ROLLBACK;')
+        return false
+      }
+
+      const wasVideo = row.media_kind === 'video'
+      this.db
+        .prepare(
+          'UPDATE file_locations SET media_kind = ?, media_kind_inspected_at_ms = ?, updated_at_ms = ? WHERE id = ?;'
+        )
+        .run('video', videoMetadata.inspectedAtMs || now, now, fileLocationId)
+
+      this.db
+        .prepare(
+          `
+          INSERT INTO video_media_metadata (
+            file_location_id, discovery_observation_id, container_format,
+            video_codec, audio_codec, duration_ms, width_px, height_px,
+            is_playable_structure, structure_error, inspected_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(file_location_id) DO UPDATE SET
+            discovery_observation_id = excluded.discovery_observation_id,
+            container_format = excluded.container_format,
+            video_codec = excluded.video_codec,
+            audio_codec = excluded.audio_codec,
+            duration_ms = excluded.duration_ms,
+            width_px = excluded.width_px,
+            height_px = excluded.height_px,
+            is_playable_structure = excluded.is_playable_structure,
+            structure_error = excluded.structure_error,
+            inspected_at_ms = excluded.inspected_at_ms;
+        `
+        )
+        .run(
+          fileLocationId,
+          row.discovery_observation_id,
+          videoMetadata.containerFormat,
+          videoMetadata.videoCodec,
+          videoMetadata.audioCodec,
+          videoMetadata.durationMs,
+          videoMetadata.widthPx,
+          videoMetadata.heightPx,
+          videoMetadata.isPlayableStructure ? 1 : 0,
+          videoMetadata.structureError,
+          videoMetadata.inspectedAtMs || now
+        )
+
+      this.db
+        .prepare(
+          "DELETE FROM photo_thumbnail_state WHERE file_location_id = ? AND status IN ('unsupported', 'failed');"
+        )
+        .run(fileLocationId)
+
+      this.db
+        .prepare(
+          "UPDATE photo_technical_metadata SET is_current = 0 WHERE file_location_id = ? AND is_current = 1 AND extraction_status IN ('unsupported', 'failed');"
+        )
+        .run(fileLocationId)
+
+      this.db.exec('COMMIT;')
+      return !wasVideo
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK;')
+      } catch {
+        // ignore
+      }
+      throw err
+    }
+  }
+
+  public markLocationMediaKindInspected(
+    fileLocationId: number,
+    mediaKind: 'photo' | 'video' | 'document',
+    inspectedAtMs: number = Date.now()
+  ): void {
+    this.assertOpen()
+    this.db
+      .prepare(
+        'UPDATE file_locations SET media_kind = ?, media_kind_inspected_at_ms = ? WHERE id = ?;'
+      )
+      .run(mediaKind, inspectedAtMs, fileLocationId)
   }
 
   private mapObservationRow(row: RawObservationRow): DiscoveryObservationRecord {
@@ -5277,7 +5597,8 @@ export class CatalogDatabase {
         SELECT COUNT(*) AS total
         FROM file_locations f
         JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
-        WHERE f.category = 'photo';
+        WHERE f.category = 'photo'
+          AND f.media_kind = 'photo';
       `
       )
       .get() as { total: number } | undefined
@@ -5291,6 +5612,7 @@ export class CatalogDatabase {
         JOIN photo_semantic_embeddings e ON e.file_location_id = f.id AND e.is_current = 1
         LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
         WHERE f.category = 'photo'
+          AND f.media_kind = 'photo'
           AND e.model_id = ?
           AND e.model_commit = ?
           AND e.model_manifest_sha256 = ?
@@ -5361,6 +5683,7 @@ export class CatalogDatabase {
           FROM file_locations f
           JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
           WHERE f.category = 'photo'
+            AND f.media_kind = 'photo'
             AND NOT EXISTS (
               SELECT 1 FROM photo_semantic_embeddings e
               WHERE e.file_location_id = f.id
@@ -5835,7 +6158,8 @@ export class CatalogDatabase {
          AND tm.is_current = 1
          AND tm.parser_recipe_version = ?
          AND tm.discovery_observation_id = d.id
-        WHERE f.category = 'photo';
+        WHERE f.category = 'photo'
+          AND f.media_kind = 'photo';
       `
       )
       .get(parserRecipeVersion) as Record<string, unknown> | undefined
@@ -5895,6 +6219,7 @@ export class CatalogDatabase {
         FROM file_locations f
         JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
         WHERE f.category = 'photo'
+          AND f.media_kind = 'photo'
           AND f.id > ?
           AND NOT EXISTS (
             SELECT 1 FROM photo_technical_metadata tm
@@ -6625,6 +6950,7 @@ export class CatalogDatabase {
          AND tm.parser_recipe_version = ?
          AND tm.is_current = 1
         WHERE f.category = 'photo'
+          AND f.media_kind = 'photo'
           AND tm.extraction_status IN (${placeholders});
       `
       )
@@ -6649,6 +6975,7 @@ export class CatalogDatabase {
          AND tm.parser_recipe_version = ?
          AND tm.is_current = 1
         WHERE f.category = 'photo'
+          AND f.media_kind = 'photo'
           AND tm.extraction_status IN (${placeholders})
         ORDER BY f.id ASC
         LIMIT ? OFFSET ?;
@@ -6715,6 +7042,7 @@ export class CatalogDatabase {
         FROM file_locations f
         JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
         WHERE f.category = 'photo'
+          AND f.media_kind = 'photo'
           AND NOT EXISTS (
             SELECT 1 FROM photo_semantic_embeddings e
             WHERE e.file_location_id = f.id
@@ -6846,6 +7174,7 @@ export class CatalogDatabase {
           FROM file_locations f
           JOIN discovery_observations d ON d.file_location_id = f.id AND d.is_current = 1
           WHERE f.category = 'photo'
+            AND f.media_kind = 'photo'
             AND f.extension IS NOT NULL
             AND f.extension != ''
             ${searchCond}
@@ -6892,6 +7221,7 @@ export class CatalogDatabase {
            AND tm.parser_recipe_version = ?
            AND tm.discovery_observation_id = d.id
           WHERE f.category = 'photo'
+            AND f.media_kind = 'photo'
             AND tm.detected_format IS NOT NULL
             ${searchCond}
           GROUP BY tm.detected_format
@@ -6913,6 +7243,7 @@ export class CatalogDatabase {
            AND tm.parser_recipe_version = ?
            AND tm.discovery_observation_id = d.id
           WHERE f.category = 'photo'
+            AND f.media_kind = 'photo'
             AND tm.detected_format IS NULL;
         `
         )
@@ -7348,7 +7679,8 @@ export class CatalogDatabase {
         JOIN discovery_observations d ON d.file_location_id = fl.id AND d.is_current = 1
         LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
         LEFT JOIN photo_thumbnail_state ts ON ts.file_location_id = fl.id
-        WHERE fl.category = 'photo';
+        WHERE fl.category = 'photo'
+          AND fl.media_kind = 'photo';
       `
       )
       .get(recipeVersion, recipeVersion, recipeVersion, recipeVersion) as {
@@ -7405,6 +7737,7 @@ export class CatalogDatabase {
         LEFT JOIN hash_observations h ON h.discovery_observation_id = d.id AND h.is_active = 1
         LEFT JOIN photo_thumbnail_state ts ON ts.file_location_id = fl.id
         WHERE fl.category = 'photo'
+          AND fl.media_kind = 'photo'
           AND fl.id > ?
           AND (
             ts.file_location_id IS NULL

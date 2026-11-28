@@ -267,9 +267,9 @@ describe('Same-Photo Revision & Response Guards (Finding 2)', () => {
 
     // Wait for photo to load and click it
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photo1\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photo1\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photo1\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photo1\.jpg/i }))
 
     // Membership badge "Original-Col" is visible
     expect(await screen.findByText('Original-Col')).toBeInTheDocument()
@@ -307,9 +307,9 @@ describe('Same-Photo Revision & Response Guards (Finding 2)', () => {
 
     // Select the refreshed photo
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photo1\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photo1\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photo1\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photo1\.jpg/i }))
 
     // Updated membership is visible
     expect(await screen.findByText('Updated-Col')).toBeInTheDocument()
@@ -335,7 +335,7 @@ describe('Same-Photo Revision & Response Guards (Finding 2)', () => {
     })
 
     // The photo cell in the grid MUST NOT show 4 stars in its aria-label or active star buttons!
-    const photoCell = screen.getByRole('button', { name: /photo1\.jpg/i })
+    const photoCell = screen.getByTestId('photo-open-btn-101')
     expect(photoCell.getAttribute('aria-label')).toContain('unrated')
     expect(starBtn).not.toHaveClass('active')
   })

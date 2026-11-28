@@ -376,7 +376,7 @@ describe('Photos Onboarding UX — Add photos & Enable photo search', () => {
     expect(harness.api.downloadSemanticModel).not.toHaveBeenCalled()
 
     // Browsing photos stays usable while setup panel is visible
-    fireEvent.click(screen.getByText('beach_day.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: /Details for beach_day\.jpg/i }))
     expect(screen.getByText('Photograph Details')).toBeInTheDocument()
 
     // Start one-time download from the panel

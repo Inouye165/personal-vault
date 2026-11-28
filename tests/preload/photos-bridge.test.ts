@@ -52,6 +52,7 @@ describe('Preload Photos Bridge', () => {
     expect(mockIpcRenderer.invoke).toHaveBeenCalledWith('photos:get-page', {
       offset: 0,
       limit: 50,
+      mediaKindFilter: 'all',
       ratingFilter: 'all',
       flagFilter: 'all',
       collectionId: null,

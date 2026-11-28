@@ -301,7 +301,7 @@ describe('Stage 6C — PhotosPanel Metadata Provenance, Extraction Controls & SQ
     })
 
     // Select photo 1 (extracted with fallback DateTimeDigitized, orientation 6, extension mismatch)
-    fireEvent.click(screen.getByRole('button', { name: /IMG_2024\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for IMG_2024\.jpg/i }))
 
     const techSection = await screen.findByTestId('photo-technical-metadata-section')
     expect(techSection).toHaveTextContent(/Canon EOS R5/i)
@@ -318,7 +318,7 @@ describe('Stage 6C — PhotosPanel Metadata Provenance, Extraction Controls & SQ
     expect(captureDt.parentElement).toHaveTextContent(/DateTimeDigitized/i)
 
     // Select photo 2 (unprocessed) -> must explicitly state Unknown (not extracted yet)
-    fireEvent.click(screen.getByRole('button', { name: /RAW_PENDING\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for RAW_PENDING\.jpg/i }))
     await waitFor(() => {
       expect(screen.getByText('Capture Date').parentElement).toHaveTextContent(
         /Unknown \(not extracted yet\)/i
@@ -491,8 +491,8 @@ describe('Stage 6C — PhotosPanel Metadata Provenance, Extraction Controls & SQ
     expect(pageCallCount).toBeGreaterThanOrEqual(1)
 
     // Test selected-photo detail race guard: click match.jpg (slow detail) then immediately click other.png (fast detail)
-    fireEvent.click(screen.getByRole('button', { name: /match\.jpg/i }))
-    fireEvent.click(screen.getByRole('button', { name: /other\.png/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for match\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for other\.png/i }))
 
     await waitFor(() => {
       expect(screen.getByTestId('photo-technical-metadata-section')).toHaveTextContent(
@@ -743,7 +743,7 @@ describe('Stage 6C — PhotosPanel Metadata Provenance, Extraction Controls & SQ
     })
 
     // Select photo 77 on revision 701 (detail request 1 hangs)
-    fireEvent.click(screen.getByRole('button', { name: /rev-race\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for rev-race\.jpg/i }))
     expect(detailCall).toBe(1)
 
     // Same fileLocationId (77) updates to a new revision (702) after rescan + Refresh

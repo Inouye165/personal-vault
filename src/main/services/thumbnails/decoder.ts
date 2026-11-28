@@ -452,14 +452,28 @@ export async function decodeOriginalPhoto(params: DecodeInputParams): Promise<De
 
   try {
     const { image } = await openSharpFromImageBuffer(verified.fileBuffer, maxInputPixels)
-    const { data, info } = await image.webp({ quality: 92 }).toBuffer({ resolveWithObject: true })
+    let encoded = await image.webp({ quality: 92 }).toBuffer({ resolveWithObject: true })
+    let mimeType = 'image/webp'
+    // Keep encoded payload well under the 24 MB data URL IPC schema cap
+    if (encoded.data.length > 15 * 1024 * 1024) {
+      const { image: lowerQualImg } = await openSharpFromImageBuffer(
+        verified.fileBuffer,
+        maxInputPixels
+      )
+      encoded = await lowerQualImg.webp({ quality: 80 }).toBuffer({ resolveWithObject: true })
+    }
+    if (encoded.data.length > 16 * 1024 * 1024) {
+      const { image: jpegImg } = await openSharpFromImageBuffer(verified.fileBuffer, maxInputPixels)
+      encoded = await jpegImg.jpeg({ quality: 86 }).toBuffer({ resolveWithObject: true })
+      mimeType = 'image/jpeg'
+    }
 
     return {
       status: 'ready',
-      buffer: data,
-      mimeType: 'image/webp',
-      width: info.width,
-      height: info.height
+      buffer: encoded.data,
+      mimeType,
+      width: encoded.info.width,
+      height: encoded.info.height
     }
   } catch (err: unknown) {
     return {

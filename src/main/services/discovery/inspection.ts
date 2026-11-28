@@ -1,5 +1,6 @@
 import { basename, isAbsolute, relative, sep } from 'node:path'
 import type { ReadOnlyFsAdapter } from './fs-adapter'
+import { inspectMediaFileByContent } from '../video/inspector'
 import {
   evaluateDirectoryEntry,
   evaluateFileEntry,
@@ -360,6 +361,22 @@ export async function inspectFileEntry(params: {
     }
   }
 
+  let mediaKind: 'photo' | 'video' | 'document' = fileDecision.initialMediaKind
+  let videoMetadata = null
+  if (fileDecision.candidateKind === 'photo') {
+    try {
+      const inspected = await inspectMediaFileByContent(realFilePath)
+      if (inspected.mediaKind === 'video') {
+        mediaKind = 'video'
+        videoMetadata = inspected.video
+      } else {
+        mediaKind = 'photo'
+      }
+    } catch {
+      // Keep initial extension-derived kind when file cannot be opened (e.g., mocked fsAdapter)
+    }
+  }
+
   return {
     outcome: 'candidate',
     candidate: {
@@ -368,6 +385,8 @@ export async function inspectFileEntry(params: {
       fileName: entryName,
       extension: fileDecision.extension,
       candidateKind: fileDecision.candidateKind,
+      mediaKind,
+      videoMetadata,
       byteSize: fileStats.size,
       filesystemCreatedAt: toHonestIsoTimestamp(fileStats.birthtimeMs),
       filesystemModifiedAt: toHonestIsoTimestamp(fileStats.mtimeMs)

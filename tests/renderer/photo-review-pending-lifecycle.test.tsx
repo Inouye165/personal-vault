@@ -112,12 +112,12 @@ describe('Pending Persistence Lifecycle & Multi-Operation Reconciliation', () =>
 
     // Await photos loaded
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photoA\.jpg/i })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /photoB\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photoA\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photoB\.jpg/i })).toBeInTheDocument()
     })
 
     // 1. Select Photo A
-    fireEvent.click(screen.getByRole('button', { name: /photoA\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photoA\.jpg/i }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '4 Stars' })).toBeInTheDocument()
     })
@@ -127,7 +127,7 @@ describe('Pending Persistence Lifecycle & Multi-Operation Reconciliation', () =>
     expect(screen.getByText(/Saving\.\.\./i)).toBeInTheDocument()
 
     // 3. Immediately switch selection to Photo B before Photo A resolves
-    fireEvent.click(screen.getByRole('button', { name: /photoB\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photoB\.jpg/i }))
     await waitFor(() => {
       // Photo B selected; status reset to idle
       expect(screen.queryByText(/Saving\.\.\./i)).not.toBeInTheDocument()
@@ -191,9 +191,9 @@ describe('Pending Persistence Lifecycle & Multi-Operation Reconciliation', () =>
 
     // Select Photo A
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photoA\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photoA\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photoA\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photoA\.jpg/i }))
 
     // Execute Operation 1: 4 Stars
     const starBtn = screen.getByRole('button', { name: '4 Stars' })
@@ -326,9 +326,9 @@ describe('Pending Persistence Lifecycle & Multi-Operation Reconciliation', () =>
 
     // Select Photo A so details panel opens with collection controls
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /photoA\.jpg/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Details for photoA\.jpg/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /photoA\.jpg/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Details for photoA\.jpg/i }))
 
     // 1. First rename of collection 10 returns persistencePending
     const renameBtn1 = await screen.findByRole('button', {

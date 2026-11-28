@@ -1,4 +1,4 @@
-import { app, BrowserWindow, safeStorage } from 'electron'
+import { app, BrowserWindow, protocol, safeStorage } from 'electron'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc/handlers'
@@ -45,6 +45,19 @@ import { inspectRestoredProfileStatus } from './services/backup/restore'
 import { withProfileStartupCoordination } from './services/backup/catalog-recovery'
 import { createElectronUpdaterAdapter, UpdateCoordinator } from './services/updater'
 import { AppWorkerBudget } from './services/worker-budget'
+import { VideoMediaReconciler, VideoPlaybackCoordinator } from './services/video'
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'pv-media',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: false,
+      stream: true
+    }
+  }
+])
 
 function logStartup(message: string): void {
   try {
@@ -101,6 +114,9 @@ let documentClassificationCoordinator: DocumentClassificationCoordinator | null 
 let exportCoordinator: ExportCoordinator | null = null
 let backupCoordinator: BackupCoordinator | null = null
 let updateCoordinator: UpdateCoordinator | null = null
+let videoPlaybackCoordinator: VideoPlaybackCoordinator | null = null
+let videoMediaReconciler: VideoMediaReconciler | null = null
+let disposeScanVideoReconcile: (() => void) | null = null
 
 function createWindow(): BrowserWindow {
   logStartup('createWindow: initializing BrowserWindow')
@@ -221,6 +237,20 @@ if (!app.requestSingleInstanceLock()) {
         if (disposeImportThumbPrep) {
           disposeImportThumbPrep()
           disposeImportThumbPrep = null
+        }
+        if (disposeScanVideoReconcile) {
+          disposeScanVideoReconcile()
+          disposeScanVideoReconcile = null
+        }
+        if (videoMediaReconciler) {
+          logStartup('shutting down video media reconciler')
+          await videoMediaReconciler.shutdown()
+          logStartup('video media reconciler shutdown done')
+        }
+        if (videoPlaybackCoordinator) {
+          logStartup('shutting down video playback coordinator')
+          await videoPlaybackCoordinator.shutdown()
+          logStartup('video playback coordinator shutdown done')
         }
         if (thumbnailPrepCoordinator) {
           logStartup('shutting down thumbnail prep coordinator')
@@ -630,6 +660,34 @@ if (!app.requestSingleInstanceLock()) {
 
       const activeVaultCoordinator = vaultCoordinator
       const activeBackupCoordinator = backupCoordinator
+      videoPlaybackCoordinator = new VideoPlaybackCoordinator({
+        catalog,
+        userDataDir,
+        log: logStartup
+      })
+      protocol.handle('pv-media', (request) => {
+        if (!videoPlaybackCoordinator) {
+          return new Response('Video service unavailable', { status: 503 })
+        }
+        return videoPlaybackCoordinator.handleProtocolRequest(request)
+      })
+      videoMediaReconciler = new VideoMediaReconciler({
+        catalog,
+        onLibraryUpdated: (reclassifiedCount) => {
+          const win = mainWindow
+          if (win && !win.isDestroyed()) {
+            win.webContents.send('media:library-updated-event', { reclassifiedCount })
+          }
+        },
+        log: logStartup
+      })
+      disposeScanVideoReconcile = coordinator.onProgress((progress) => {
+        if (progress.status === 'completed') {
+          videoMediaReconciler?.triggerReconciliation()
+        }
+      })
+      videoMediaReconciler.initialize()
+      logStartup('videoPlaybackCoordinator & videoMediaReconciler initialized')
       updateCoordinator = new UpdateCoordinator({
         adapter: createElectronUpdaterAdapter(),
         currentVersion: app.getVersion(),
@@ -669,6 +727,7 @@ if (!app.requestSingleInstanceLock()) {
         documentClassificationCoordinator,
         exportCoordinator,
         backupCoordinator,
+        videoPlaybackCoordinator,
         googleDriveAuth,
         updateCoordinator,
         userDataDir,
