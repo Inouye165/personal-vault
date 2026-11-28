@@ -17,8 +17,17 @@
 
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { accessSync, constants, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync
+} from 'node:fs'
 import { dirname, join } from 'node:path'
+import type { BackupSummaryDto } from '../../../shared/validation/backup-ipc-schemas'
 import {
   BackupSnapshotCompleteMarkerV1Schema,
   BackupSnapshotManifestV1Schema,
@@ -298,6 +307,24 @@ export class BackupCoordinator {
     if (input.kind === 'local_fs' && !input.targetPath) {
       throw new BackupContainmentError('Local backup destination requires a non-empty targetPath')
     }
+    if (input.kind === 'local_fs' && input.targetPath) {
+      const { sourceRoots, vaultRoots } = this.getSourceAndVaultRoots()
+      try {
+        validateBackupDestinationPath({
+          destinationDir: input.targetPath,
+          sourceRoots,
+          vaultRoots,
+          userDataDir: this.userDataDir
+        })
+      } catch (err) {
+        if (
+          !(err instanceof JournalSecurityError) &&
+          classifyBackupDestinationFsError(err) !== 'destination_unavailable'
+        ) {
+          throw err
+        }
+      }
+    }
     const encryptionMode =
       input.encryptionMode ?? (input.kind === 'google_drive' ? 'aes-256-gcm-v1' : 'none')
     return this.catalog.getBackupRepository().createDestination({
@@ -308,6 +335,64 @@ export class BackupCoordinator {
       dailyBudgetBytes: input.dailyBudgetBytes,
       encryptionMode
     })
+  }
+
+  public getBackupSummary(): BackupSummaryDto {
+    const activeVault = this.catalog.getActiveVault()
+    const db = this.catalog.getRawDb()
+
+    let vaultFileCount = 0
+    let vaultBytes = 0
+    if (activeVault) {
+      const row = db
+        .prepare(
+          'SELECT COUNT(*) AS copy_count, COALESCE(SUM(byte_size), 0) AS total_bytes FROM vault_copies WHERE vault_id = ?;'
+        )
+        .get(activeVault.vaultId) as { copy_count: number; total_bytes: number } | undefined
+      vaultFileCount = Number(row?.copy_count ?? 0)
+      vaultBytes = Number(row?.total_bytes ?? 0)
+    }
+
+    const catalogedRow = db
+      .prepare(
+        `SELECT COUNT(DISTINCT fl.id) AS cnt
+         FROM file_locations fl
+         JOIN discovery_observations d
+           ON d.file_location_id = fl.id
+          AND d.is_current = 1;`
+      )
+      .get() as { cnt: number } | undefined
+    const catalogedFileCount = Number(catalogedRow?.cnt ?? 0)
+
+    const statSize = (filePath: string): number => {
+      try {
+        return existsSync(filePath) ? statSync(filePath).size : 0
+      } catch {
+        return 0
+      }
+    }
+
+    const catalogPath = this.catalog.getCatalogPath()
+    const catalogBytes =
+      catalogPath !== ':memory:' ? statSize(catalogPath) + statSize(`${catalogPath}-wal`) : 0
+    const annotationsDir = join(this.userDataDir, 'annotations')
+    const annotationsBytes =
+      statSize(join(annotationsDir, '.pv_annotations_owner')) +
+      statSize(join(annotationsDir, 'review-journal.jsonl'))
+
+    return {
+      hasActiveVault: activeVault !== null,
+      activeVaultId: activeVault?.vaultId ?? null,
+      activeVaultName: activeVault?.name ?? null,
+      activeVaultPath: activeVault?.vaultPath ?? null,
+      vaultFileCount,
+      vaultBytes,
+      catalogBytes,
+      annotationsBytes,
+      estimatedTotalBytes: catalogBytes + annotationsBytes + vaultBytes,
+      catalogedFileCount,
+      isCatalogOnly: activeVault === null || vaultFileCount === 0
+    }
   }
 
   public getDestination(id: string): BackupDestinationRecord | null {

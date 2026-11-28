@@ -6,6 +6,7 @@
  * listing and verifying recovery points, and restoring into an isolated profile.
  */
 
+import { existsSync, statSync } from 'node:fs'
 import { dialog, type BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../shared/contracts/channels'
 import {
@@ -33,6 +34,7 @@ import {
   BackupSelectDirectoryRequestSchema,
   BackupSelectDirectoryResponseSchema,
   BackupStartRequestSchema,
+  BackupSummarySchema,
   BackupVerifyRecoveryPointRequestSchema,
   BackupVerifyRecoveryPointResponseSchema
 } from '../../shared/validation/backup-ipc-schemas'
@@ -63,7 +65,10 @@ export interface BackupIpcHandlerDeps {
   readonly catalog?: CatalogDatabase
   readonly userDataDir?: string
   readonly getMainWindow?: () => BrowserWindow | null
-  readonly selectBackupDirectory?: (title?: string) => Promise<{
+  readonly selectBackupDirectory?: (
+    title?: string,
+    defaultPath?: string
+  ) => Promise<{
     canceled: boolean
     directoryPath: string | null
   }>
@@ -104,13 +109,24 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
 
   handle(IPC_CHANNELS.BACKUP_SELECT_DIRECTORY, async (rawPayload) => {
     const req = rawPayload === undefined ? {} : BackupSelectDirectoryRequestSchema.parse(rawPayload)
+    let validDefaultPath: string | undefined
+    if (req.defaultPath) {
+      try {
+        if (existsSync(req.defaultPath) && statSync(req.defaultPath).isDirectory()) {
+          validDefaultPath = req.defaultPath
+        }
+      } catch {
+        validDefaultPath = undefined
+      }
+    }
     const result = selectBackupDirectory
-      ? await selectBackupDirectory(req.title)
+      ? await selectBackupDirectory(req.title, validDefaultPath)
       : await (async () => {
           const win = getMainWindow?.() ?? null
           const options: Electron.OpenDialogOptions = {
             title: req.title ?? 'Select Folder',
-            properties: ['openDirectory', 'createDirectory']
+            properties: ['openDirectory', 'createDirectory'],
+            ...(validDefaultPath ? { defaultPath: validDefaultPath } : {})
           }
           const dialogRes = win
             ? await dialog.showOpenDialog(win, options)
@@ -122,6 +138,25 @@ export function registerBackupIpcHandlers(deps: BackupIpcHandlerDeps): void {
         })()
 
     return BackupSelectDirectoryResponseSchema.parse(result)
+  })
+
+  handle(IPC_CHANNELS.BACKUP_GET_SUMMARY, () => {
+    if (!backupCoordinator) {
+      return BackupSummarySchema.parse({
+        hasActiveVault: false,
+        activeVaultId: null,
+        activeVaultName: null,
+        activeVaultPath: null,
+        vaultFileCount: 0,
+        vaultBytes: 0,
+        catalogBytes: 0,
+        annotationsBytes: 0,
+        estimatedTotalBytes: 0,
+        catalogedFileCount: 0,
+        isCatalogOnly: true
+      })
+    }
+    return BackupSummarySchema.parse(backupCoordinator.getBackupSummary())
   })
 
   handle(IPC_CHANNELS.BACKUP_CONFIGURE_DESTINATION, (rawPayload) => {

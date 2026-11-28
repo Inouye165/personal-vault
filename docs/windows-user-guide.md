@@ -17,9 +17,9 @@ Personal Vault 0.1.0 is scoped for personal Windows x64 desktop use. Public dist
 
 ## Back up and check recovery
 
-1. Open **Backup & Restore**. Choose a USB drive, a NAS/network folder, or an encrypted Google Drive destination. Save the destination. Keep it separate from your active vault so one storage failure is less likely to affect both.
+1. Open **Backup & Restore**. Choose a local folder or USB drive, a NAS/network folder, or an encrypted Google Drive destination, browse to a dedicated folder on any available drive, and save the destination. Keep it separate from your active vault and source folders so one storage failure is less likely to affect both.
 2. For Google Drive, connect your account, choose a dedicated folder, and enter an encryption recovery secret. Store the secret in a password manager or another secure place you can still access after losing this PC. You need it to unlock the backup. If the only copy of the secret is lost, the encrypted backup cannot be restored.
-3. Select **Back up now**, wait for completion, and select **Verify backup**. For an encrypted snapshot, provide the recovery secret again when needed. A locked snapshot can show an unavailable file count until it is unlocked.
+3. Check the pre-backup summary before starting: confirm the destination folder, vault file count, approximate size, and whether the backup is **catalog-only** (no imported vault files yet) or includes imported vault copies. Select **Back up now**, wait for completion, and select **Verify backup**. For an encrypted snapshot, provide the recovery secret again when needed. A locked snapshot can show an unavailable file count until it is unlocked.
 4. Run a recovery drill. In **Restore Files**, select the recovery point and provide a new or empty destination folder. Enter the recovery secret if required, then select **Restore files**. The app restores a separate profile and creates a vault subfolder when the snapshot contains a vault. Open a few restored files and confirm they are the expected copies.
 
 Backups include the catalog, annotations, and imported vault files. Scanned files outside the vault remain in their original folders, so back those folders up separately. Thumbnails and offline AI models are excluded and can be recreated or installed again.

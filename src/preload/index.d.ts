@@ -26,6 +26,7 @@ import type {
   BackupSelectDirectoryRequest,
   BackupSelectDirectoryResponse,
   BackupStartRequest,
+  BackupSummaryDto,
   BackupVerifyRecoveryPointRequest,
   BackupVerifyRecoveryPointResponse
 } from '../shared/validation/backup-ipc-schemas.js'
@@ -401,6 +402,7 @@ export interface VaultApi {
   listBackupDestinations: (
     request?: BackupListDestinationsRequest
   ) => Promise<BackupListDestinationsResponse>
+  getBackupSummary: () => Promise<BackupSummaryDto>
   startBackup: (request: BackupStartRequest) => Promise<BackupJobRecordDto>
   pauseBackup: (jobId: string) => Promise<BackupJobActionResponse>
   resumeBackup: (jobId: string, recoverySecret?: string) => Promise<BackupJobRecordDto>

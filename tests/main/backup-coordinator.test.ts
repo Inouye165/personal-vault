@@ -28,6 +28,8 @@ import { initializeVault } from '../../src/main/services/vault/identity'
 import { writeVaultManifest } from '../../src/main/services/vault/manifest'
 import type { VaultManifest } from '../../src/main/services/vault/types'
 import { BackupCoordinator } from '../../src/main/services/backup/coordinator'
+import { validateRestoreTargetPaths } from '../../src/main/services/backup/containment'
+import { BackupContainmentError } from '../../src/main/services/backup/errors'
 import { inspectRecoveryPointStatus } from '../../src/main/services/backup/engine'
 import {
   BACKUP_OBJECTS_DIR,
@@ -1197,6 +1199,203 @@ describe('Stage 8B Sub-slice 1B — Migration 17, BackupRepository & BackupCoord
       await coord2.shutdown()
     } finally {
       reopened.catalog.close()
+    }
+  })
+
+  it('computes accurate pre-backup summary for no-vault, empty-vault, and populated-vault with scanned-only files', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'pv-8b-summary-'))
+    tempDirs.push(rootDir)
+    const userDataDir = join(rootDir, 'userData')
+    const sourceDir = join(rootDir, 'sources')
+    const vaultDir = join(rootDir, 'vault')
+    mkdirSync(userDataDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+
+    const journal = new AnnotationJournal({
+      storageDir: join(userDataDir, 'annotations'),
+      sourceRoots: () => [sourceDir],
+      vaultPath: () => (existsSync(vaultDir) ? vaultDir : null)
+    })
+    await journal.initialize()
+    const catalog = CatalogDatabase.open({
+      catalogPath: join(userDataDir, 'vault-catalog.db'),
+      journal
+    })
+
+    const coord = new BackupCoordinator({
+      catalog,
+      userDataDir,
+      appVersion: '0.1.0'
+    })
+    coord.initialize()
+
+    try {
+      // 1. No active vault -> catalog-only
+      const noVaultSummary = coord.getBackupSummary()
+      expect(noVaultSummary.hasActiveVault).toBe(false)
+      expect(noVaultSummary.activeVaultId).toBeNull()
+      expect(noVaultSummary.vaultFileCount).toBe(0)
+      expect(noVaultSummary.vaultBytes).toBe(0)
+      expect(noVaultSummary.catalogBytes).toBeGreaterThan(0)
+      expect(noVaultSummary.annotationsBytes).toBeGreaterThan(0)
+      expect(noVaultSummary.estimatedTotalBytes).toBe(
+        noVaultSummary.catalogBytes + noVaultSummary.annotationsBytes
+      )
+      expect(noVaultSummary.isCatalogOnly).toBe(true)
+
+      // 2. Empty initialized vault -> still catalog-only
+      const identity = initializeVault({ vaultPath: vaultDir, vaultName: 'Empty Vault' })
+      catalog.registerVault({
+        vaultId: identity.vaultId,
+        vaultPath: vaultDir,
+        name: identity.vaultName,
+        createdAtMs: identity.createdAtMs
+      })
+      const emptyVaultSummary = coord.getBackupSummary()
+      expect(emptyVaultSummary.hasActiveVault).toBe(true)
+      expect(emptyVaultSummary.activeVaultName).toBe('Empty Vault')
+      expect(emptyVaultSummary.vaultFileCount).toBe(0)
+      expect(emptyVaultSummary.isCatalogOnly).toBe(true)
+
+      // 3. Scan 2 files, import only 1 -> vaultFileCount = 1, catalogedFileCount = 2, isCatalogOnly = false
+      const importedBytes = Buffer.alloc(12_345, 0x33)
+      const scannedOnlyBytes = Buffer.alloc(4_096, 0x44)
+      const importedPath = join(sourceDir, 'imported.jpg')
+      const scannedPath = join(sourceDir, 'scanned-only.jpg')
+      writeFileSync(importedPath, importedBytes)
+      writeFileSync(scannedPath, scannedOnlyBytes)
+
+      const now = Date.now()
+      catalog.persistDiscoveryBatch(sourceDir, [
+        {
+          originalPath: importedPath,
+          fileName: 'imported.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: importedBytes.length,
+          birthtimeMs: now - 2000,
+          mtimeMs: now - 2000,
+          discoveredAtMs: now
+        },
+        {
+          originalPath: scannedPath,
+          fileName: 'scanned-only.jpg',
+          extension: '.jpg',
+          category: 'photo',
+          byteSize: scannedOnlyBytes.length,
+          birthtimeMs: now - 1000,
+          mtimeMs: now - 1000,
+          discoveredAtMs: now
+        }
+      ])
+
+      const importedSha = sha256Hex(importedBytes)
+      catalog.recordHashObservationsBatch([
+        {
+          originalPath: importedPath,
+          sha256: importedSha,
+          observedByteSize: importedBytes.length,
+          observedMtimeMs: now - 2000,
+          hashedAtMs: now
+        }
+      ])
+      const copyPath = `files/${importedSha.slice(0, 2)}/${importedSha}/imported.jpg`
+      const manifestPath = `files/${importedSha.slice(0, 2)}/${importedSha}/manifest.json`
+      catalog.recordVaultCopy({
+        vaultId: identity.vaultId,
+        sha256: importedSha,
+        byteSize: importedBytes.length,
+        relativePath: copyPath,
+        manifestRelativePath: manifestPath,
+        verifiedAtMs: now
+      })
+
+      const populatedSummary = coord.getBackupSummary()
+      expect(populatedSummary.hasActiveVault).toBe(true)
+      expect(populatedSummary.vaultFileCount).toBe(1)
+      expect(populatedSummary.vaultBytes).toBe(importedBytes.length)
+      expect(populatedSummary.catalogedFileCount).toBe(2)
+      expect(populatedSummary.isCatalogOnly).toBe(false)
+      expect(populatedSummary.estimatedTotalBytes).toBe(
+        populatedSummary.catalogBytes + populatedSummary.annotationsBytes + importedBytes.length
+      )
+    } finally {
+      await coord.shutdown()
+      catalog.close()
+    }
+  })
+
+  it('rejects overlapping or non-empty non-repo local destinations at configure time and allows unavailable source roots during restore path validation', async () => {
+    const fixture = await createCoordinatorFixture()
+    tempDirs.push(fixture.rootDir)
+
+    const nonEmptyForeignDir = join(fixture.rootDir, 'foreign-non-empty')
+    mkdirSync(nonEmptyForeignDir, { recursive: true })
+    writeFileSync(join(nonEmptyForeignDir, 'unrelated.txt'), 'keep me')
+
+    const coord = new BackupCoordinator({
+      catalog: fixture.catalog,
+      userDataDir: fixture.userDataDir,
+      appVersion: '0.1.0'
+    })
+    coord.initialize()
+
+    try {
+      expect(() =>
+        coord.configureDestination({
+          name: 'Overlap Vault',
+          kind: 'local_fs',
+          targetPath: fixture.vaultDir
+        })
+      ).toThrow(BackupContainmentError)
+
+      expect(() =>
+        coord.configureDestination({
+          name: 'Overlap Source',
+          kind: 'local_fs',
+          targetPath: join(fixture.sourceDir, 'nested')
+        })
+      ).toThrow(BackupContainmentError)
+
+      expect(() =>
+        coord.configureDestination({
+          name: 'Overlap Profile',
+          kind: 'local_fs',
+          targetPath: join(fixture.userDataDir, 'backups')
+        })
+      ).toThrow(BackupContainmentError)
+
+      expect(() =>
+        coord.configureDestination({
+          name: 'Foreign Dir',
+          kind: 'local_fs',
+          targetPath: nonEmptyForeignDir
+        })
+      ).toThrow(BackupContainmentError)
+
+      // Disconnected drive/parent path remains configurable (e.g. unmounted USB)
+      const disconnectedPath = join(fixture.rootDir, 'unmounted-parent', 'backup-repo')
+      const offlineDest = coord.configureDestination({
+        name: 'Offline USB',
+        kind: 'local_fs',
+        targetPath: disconnectedPath
+      })
+      expect(offlineDest.targetPath).toBe(disconnectedPath)
+
+      // Unavailable registered source root on a missing drive letter must not crash restore validation
+      const restoreRoot = join(fixture.rootDir, 'restore-out')
+      const validated = validateRestoreTargetPaths({
+        targetProfileDir: join(restoreRoot, 'profile'),
+        targetVaultDir: join(restoreRoot, 'vault'),
+        backupRepoDir: fixture.backupDir,
+        activeUserDataDir: fixture.userDataDir,
+        activeSourceRoots: ['Q:\\NonExistentDrive\\Photos'],
+        activeVaultRoots: [fixture.vaultDir]
+      })
+      expect(validated.targetProfileDir).toContain('restore-out')
+    } finally {
+      await coord.shutdown()
+      fixture.catalog.close()
     }
   })
 })

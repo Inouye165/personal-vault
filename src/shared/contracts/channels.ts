@@ -150,6 +150,7 @@ export const IPC_CHANNELS = {
   BACKUP_SELECT_DIRECTORY: 'backup:select-directory',
   BACKUP_CONFIGURE_DESTINATION: 'backup:configure-destination',
   BACKUP_LIST_DESTINATIONS: 'backup:list-destinations',
+  BACKUP_GET_SUMMARY: 'backup:get-summary',
   BACKUP_START: 'backup:start',
   BACKUP_PAUSE: 'backup:pause',
   BACKUP_RESUME: 'backup:resume',

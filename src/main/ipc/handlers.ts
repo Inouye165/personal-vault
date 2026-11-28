@@ -245,7 +245,10 @@ export interface IpcHandlerOptions {
     canceled: boolean
     directoryPath: string | null
   }>
-  readonly selectBackupDirectory?: (title?: string) => Promise<{
+  readonly selectBackupDirectory?: (
+    title?: string,
+    defaultPath?: string
+  ) => Promise<{
     canceled: boolean
     directoryPath: string | null
   }>
